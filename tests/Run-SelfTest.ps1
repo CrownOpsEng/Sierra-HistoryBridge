@@ -131,7 +131,8 @@ try {
         $target,
         $inference.Factor,
         $backup,
-        2.0)
+        2.0,
+        "[test] synthetic")
 
     if ($result.SourceRecords -ne 20) {
         throw "Expected 20 source records."

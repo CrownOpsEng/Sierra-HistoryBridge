@@ -3,7 +3,7 @@
 The first Git-tracked version is:
 
 ```text
-v0.0.4
+v0.0.5
 ```
 
 ## Initial repository
@@ -11,7 +11,7 @@ v0.0.4
 ```bash
 git init
 git add .
-git commit -m "Initial release: v0.0.4"
+git commit -m "Initial release: v0.0.5"
 git branch -M main
 git remote add origin https://github.com/CrownOpsEng/Sierra-HistoryBridge.git
 git push -u origin main
@@ -20,8 +20,8 @@ git push -u origin main
 ## Tag
 
 ```bash
-git tag v0.0.4
-git push origin v0.0.4
+git tag v0.0.5
+git push origin v0.0.5
 ```
 
 ## Build the release archive
@@ -35,7 +35,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-
 Attach:
 
 ```text
-dist\SierraHistoryBridge-v0.0.4.zip
+dist\SierraHistoryBridge-v0.0.5.zip
 ```
 
 to the GitHub Release.

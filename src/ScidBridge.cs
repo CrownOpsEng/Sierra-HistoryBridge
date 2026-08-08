@@ -26,6 +26,10 @@ namespace SierraHistoryBridge
         public long TailRecords;
         public long OutputRecords;
         public double ElapsedSeconds;
+        public double ConversionSeconds;
+        public double FlushSeconds;
+        public double ValidationSeconds;
+        public double ReplaceSeconds;
 
         public long OutOfOrderRecords;
         public long FirstOutOfOrderIndex;
@@ -277,10 +281,76 @@ namespace SierraHistoryBridge
             }
         }
 
+        private static int LastStatusLength = 0;
+
+        private static string FitStatusLine(string line)
+        {
+            int width = 0;
+
+            try
+            {
+                if (!Console.IsOutputRedirected)
+                    width = Math.Max(40, Console.WindowWidth - 1);
+            }
+            catch
+            {
+                width = 0;
+            }
+
+            if (width > 0 && line.Length > width)
+            {
+                if (width <= 4)
+                    return line.Substring(0, width);
+
+                return line.Substring(0, width - 3) + "...";
+            }
+
+            return line;
+        }
+
+        public static void UpdateStatusLine(string line)
+        {
+            line = FitStatusLine(line ?? String.Empty);
+
+            if (Console.IsOutputRedirected)
+                return;
+
+            int clearTo = Math.Max(LastStatusLength, line.Length);
+
+            Console.Write(
+                "\r" +
+                line.PadRight(clearTo));
+
+            Console.Out.Flush();
+            LastStatusLength = clearTo;
+        }
+
+        public static void CompleteStatusLine(string line)
+        {
+            line = FitStatusLine(line ?? String.Empty);
+
+            if (Console.IsOutputRedirected)
+            {
+                Console.WriteLine(line);
+                return;
+            }
+
+            int clearTo = Math.Max(LastStatusLength, line.Length);
+
+            Console.Write(
+                "\r" +
+                line.PadRight(clearTo));
+
+            Console.WriteLine();
+            Console.Out.Flush();
+            LastStatusLength = 0;
+        }
+
         private static void ShowProgress(
+            string statusPrefix,
             long completedBytes,
             long totalBytes,
-            ref int nextPercent,
+            ref int lastPercent,
             DateTime started)
         {
             if (totalBytes <= 0)
@@ -288,32 +358,34 @@ namespace SierraHistoryBridge
 
             int percent = (int)((completedBytes * 100L) / totalBytes);
 
-            if (percent >= nextPercent || completedBytes >= totalBytes)
-            {
-                double seconds = Math.Max(0.001, (DateTime.UtcNow - started).TotalSeconds);
-                double completedMb = completedBytes / 1048576.0;
-                double totalMb = totalBytes / 1048576.0;
-                double rate = completedMb / seconds;
+            if (percent == lastPercent && completedBytes < totalBytes)
+                return;
 
-                Console.WriteLine(
-                    "      {0,3}%  {1,9:0.0} MB / {2,9:0.0} MB   {3,7:0.0} MB/s",
+            double seconds = Math.Max(0.001, (DateTime.UtcNow - started).TotalSeconds);
+            double completedMb = completedBytes / 1048576.0;
+            double totalMb = totalBytes / 1048576.0;
+            double rate = completedMb / seconds;
+
+            UpdateStatusLine(
+                String.Format(
+                    "{0} | CONVERT {1,3}% | {2:0}/{3:0} MB | {4:0} MB/s",
+                    statusPrefix,
                     Math.Min(100, percent),
                     completedMb,
                     totalMb,
-                    rate);
+                    rate));
 
-                while (nextPercent <= percent)
-                    nextPercent += 5;
-            }
+            lastPercent = percent;
         }
 
         private static void CopyRange(
+            string statusPrefix,
             FileStream input,
             FileStream output,
             long bytes,
             long totalBytes,
             ref long completedBytes,
-            ref int nextPercent,
+            ref int lastPercent,
             DateTime started)
         {
             byte[] buffer = new byte[16 * 1024 * 1024];
@@ -330,7 +402,12 @@ namespace SierraHistoryBridge
                 bytes -= read;
                 completedBytes += read;
 
-                ShowProgress(completedBytes, totalBytes, ref nextPercent, started);
+                ShowProgress(
+                    statusPrefix,
+                    completedBytes,
+                    totalBytes,
+                    ref lastPercent,
+                    started);
             }
         }
 
@@ -339,7 +416,8 @@ namespace SierraHistoryBridge
             string targetPath,
             double scale,
             string backupDirectory,
-            double tailGuardSeconds)
+            double tailGuardSeconds,
+            string statusPrefix)
         {
             DateTime started = DateTime.UtcNow;
             string temporaryPath = targetPath + ".scbridge.tmp";
@@ -377,13 +455,18 @@ namespace SierraHistoryBridge
             long sourcePayloadBytes = sourceMeta.Records * RecordSize;
             long totalWorkBytes = sourcePayloadBytes + tailBytes;
             long completedBytes = 0;
-            int nextPercent = 0;
+            int lastPercent = -1;
 
             long outOfOrderRecords = 0;
             long firstOutOfOrderIndex = -1;
             long firstPriorDateTime = 0;
             long firstOutOfOrderDateTime = 0;
             long largestBackwardMicroseconds = 0;
+
+            double conversionSeconds = 0;
+            double flushSeconds = 0;
+            double validationSeconds = 0;
+            double replaceSeconds = 0;
 
             try
             {
@@ -476,9 +559,10 @@ namespace SierraHistoryBridge
                         completedBytes += bytesThisChunk;
 
                         ShowProgress(
+                            statusPrefix,
                             completedBytes,
                             totalWorkBytes,
-                            ref nextPercent,
+                            ref lastPercent,
                             started);
                     }
 
@@ -491,18 +575,36 @@ namespace SierraHistoryBridge
                             target.Position = HeaderSize + tailIndex * RecordSize;
 
                             CopyRange(
+                                statusPrefix,
                                 target,
                                 output,
                                 tailBytes,
                                 totalWorkBytes,
                                 ref completedBytes,
-                                ref nextPercent,
+                                ref lastPercent,
                                 started);
                         }
                     }
 
+                    DateTime conversionFinished = DateTime.UtcNow;
+                    conversionSeconds =
+                        (conversionFinished - started).TotalSeconds;
+
+                    UpdateStatusLine(
+                        statusPrefix +
+                        " | FLUSHING | writing cached data to disk");
+
+                    DateTime flushStarted = DateTime.UtcNow;
                     output.Flush(true);
+                    flushSeconds =
+                        (DateTime.UtcNow - flushStarted).TotalSeconds;
                 }
+
+                UpdateStatusLine(
+                    statusPrefix +
+                    " | VALIDATE | checking converted SCID");
+
+                DateTime validationStarted = DateTime.UtcNow;
 
                 ScidMeta outputMeta = GetMeta(temporaryPath);
                 long expectedRecords = sourceMeta.Records + tailRecords;
@@ -535,6 +637,15 @@ namespace SierraHistoryBridge
                     }
                 }
 
+                validationSeconds =
+                    (DateTime.UtcNow - validationStarted).TotalSeconds;
+
+                UpdateStatusLine(
+                    statusPrefix +
+                    " | REPLACE | updating Rithmic target");
+
+                DateTime replaceStarted = DateTime.UtcNow;
+
                 if (File.Exists(targetPath))
                 {
                     Directory.CreateDirectory(backupDirectory);
@@ -551,12 +662,19 @@ namespace SierraHistoryBridge
                     File.Move(temporaryPath, targetPath);
                 }
 
+                replaceSeconds =
+                    (DateTime.UtcNow - replaceStarted).TotalSeconds;
+
                 return new ConvertResult
                 {
                     SourceRecords = sourceMeta.Records,
                     TailRecords = tailRecords,
                     OutputRecords = expectedRecords,
                     ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds,
+                    ConversionSeconds = conversionSeconds,
+                    FlushSeconds = flushSeconds,
+                    ValidationSeconds = validationSeconds,
+                    ReplaceSeconds = replaceSeconds,
                     OutOfOrderRecords = outOfOrderRecords,
                     FirstOutOfOrderIndex = firstOutOfOrderIndex,
                     FirstPriorDateTime = firstPriorDateTime,

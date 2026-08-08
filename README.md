@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.4 — experimental / pre-stable**
+**Version 0.0.5 — experimental / pre-stable**
 
 Sierra History Bridge updates Sierra Chart **Rithmic-named intraday files** with **SC Data historical records**, while preserving Rithmic records that are genuinely newer than the SC Data source.
 

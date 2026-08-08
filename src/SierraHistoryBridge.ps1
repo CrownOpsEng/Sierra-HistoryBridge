@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.4"
+$Version = "0.0.5"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -29,6 +29,40 @@ function Show-Banner {
     Write-Host "historical records while preserving newer Rithmic live records."
     Write-Host
 }
+
+function Format-CompactCount([long]$Value) {
+    if ($Value -ge 1000000000) {
+        return "{0:0.00}B" -f ($Value / 1000000000.0)
+    }
+    if ($Value -ge 1000000) {
+        return "{0:0.00}M" -f ($Value / 1000000.0)
+    }
+    if ($Value -ge 1000) {
+        return "{0:0.0}K" -f ($Value / 1000.0)
+    }
+    return [string]$Value
+}
+
+function Format-CompactSize([long]$Bytes) {
+    if ($Bytes -ge 1GB) {
+        return "{0:0.00} GB" -f ($Bytes / 1GB)
+    }
+    if ($Bytes -ge 1MB) {
+        return "{0:0.0} MB" -f ($Bytes / 1MB)
+    }
+    if ($Bytes -ge 1KB) {
+        return "{0:0.0} KB" -f ($Bytes / 1KB)
+    }
+    return "$Bytes B"
+}
+
+function Get-CompactName([string]$FileName) {
+    if ($FileName.EndsWith(".scid", [StringComparison]::OrdinalIgnoreCase)) {
+        return $FileName.Substring(0, $FileName.Length - 5)
+    }
+    return $FileName
+}
+
 
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -298,14 +332,12 @@ function Invoke-SierraHistoryBridge {
         throw "ScidBridge.cs was not found next to SierraHistoryBridge.ps1."
     }
 
-    Write-Host "[1/4] Loading SCID converter..."
+    Write-Host -NoNewline "[1/4] Converter  "
     Add-Type -Path $ConverterSource
-    Write-Host "      Ready."
-    Write-Host
+    Write-Host "OK"
 
-    Write-Host "[2/4] Locating Sierra Chart data..."
     $resolvedDataFolder = Get-SierraDataFolder $DataFolder
-    Write-Host "      $resolvedDataFolder"
+    Write-Host "[2/4] Data       $resolvedDataFolder"
 
     $config = Read-JsonFile $ConfigPath
     $config | Add-Member -NotePropertyName default_data_folder -NotePropertyValue $resolvedDataFolder -Force
@@ -314,8 +346,7 @@ function Invoke-SierraHistoryBridge {
         $config | Add-Member -NotePropertyName proven_scales -NotePropertyValue ([pscustomobject]@{}) -Force
     }
 
-    Write-Host
-    Write-Host "[3/4] Scanning SC Data futures files..."
+    Write-Host -NoNewline "[3/4] Scan       "
 
     $sourcePattern = [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.scid$'
     $candidates = @()
@@ -365,9 +396,8 @@ function Invoke-SierraHistoryBridge {
         throw "No matching SC Data futures files were found. Expected names such as NQU26-CME.scid."
     }
 
-    Write-Host "      Found $($candidates.Count) SC Data futures file(s)."
-    Write-Host
-    Write-Host "      Verifying raw-price scale by symbol group..."
+    Write-Host "$($candidates.Count) SC Data futures file(s)"
+    Write-Host "      Scale verification:"
 
     $scales = Get-ScaleTable $config
 
@@ -389,7 +419,7 @@ function Invoke-SierraHistoryBridge {
                 $scales[$group] = [double]$inference.Factor
 
                 Write-Host (
-                    "      {0}: x{1:g} from {2} <-> {3} (median {4:N8}, {5} samples)" -f
+                    "        {0,-12} x{1:g} verified | {2} <-> {3} | {5} samples" -f
                     $group,
                     $inference.Factor,
                     $overlapPair.SourceName,
@@ -400,26 +430,26 @@ function Invoke-SierraHistoryBridge {
             catch {
                 if ($scales.ContainsKey($group)) {
                     Write-Host (
-                        "      {0}: using previously verified x{1:g}." -f
+                        "        {0,-12} x{1:g} saved" -f
                         $group,
                         $scales[$group]) -ForegroundColor Yellow
                 }
                 else {
                     Write-Host (
-                        "      {0}: no overlapping pair is available to verify the scale." -f
+                        "        {0,-12} UNVERIFIED - no overlapping target" -f
                         $group) -ForegroundColor Yellow
                 }
             }
         }
         elseif ($scales.ContainsKey($group)) {
             Write-Host (
-                "      {0}: using previously verified x{1:g}." -f
+                "        {0,-12} x{1:g} saved" -f
                 $group,
                 $scales[$group])
         }
         else {
             Write-Host (
-                "      {0}: no overlapping pair is available to verify the scale." -f
+                "        {0,-12} UNVERIFIED - no overlapping target" -f
                 $group) -ForegroundColor Yellow
         }
     }
@@ -469,11 +499,11 @@ function Invoke-SierraHistoryBridge {
     }
 
     Write-Host
-    Write-Host "Update plan:"
-    Write-Host "  Ready:      $($ready.Count)"
-    Write-Host "  Unchanged:  $unchanged"
-    Write-Host "  Unverified: $unverified"
-    Write-Host
+    Write-Host (
+        "Plan: {0} ready | {1} unchanged | {2} unverified" -f
+        $ready.Count,
+        $unchanged,
+        $unverified)
 
     foreach ($candidate in $ready) {
         $status = $candidate.TargetStatus
@@ -498,14 +528,11 @@ function Invoke-SierraHistoryBridge {
         }
 
         Write-Host (
-            "  {0,-7} {1} -> {2}" -f
-            $action,
-            $candidate.SourceName,
-            $candidate.TargetName)
-
-        Write-Host (
-            "          Target: {0} ({1})" -f
-            $candidate.Target,
+            "  {0,-7} {1} -> {2} | {3} | {4}" -f
+            $action.ToUpperInvariant(),
+            (Get-CompactName $candidate.SourceName),
+            (Get-CompactName $candidate.TargetName),
+            (Format-CompactSize $candidate.Size),
             $detail)
     }
 
@@ -535,16 +562,17 @@ function Invoke-SierraHistoryBridge {
 
     if (Test-SierraChartRunning) {
         Write-Host
-        Write-Host "Sierra Chart is running." -ForegroundColor Yellow
-        Write-Host "Close all Sierra Chart instances before the files are updated."
+        Write-Host "Sierra Chart: RUNNING - close all instances before update." -ForegroundColor Yellow
 
         while (Test-SierraChartRunning) {
-            Read-Host "After Sierra Chart is closed, press Enter to check again" | Out-Null
+            Read-Host "Press Enter after Sierra Chart is closed" | Out-Null
         }
+
+        Write-Host "Sierra Chart: CLOSED"
     }
 
     Write-Host
-    Write-Host "[4/4] Updating Rithmic history files..."
+    Write-Host "[4/4] Update"
 
     $backupDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Backups"
     $logDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Logs"
@@ -566,23 +594,20 @@ function Invoke-SierraHistoryBridge {
 
     $updated = 0
     $failed = 0
+    $warningFiles = 0
+    $updateStopwatch = [Diagnostics.Stopwatch]::StartNew()
 
     for ($index = 0; $index -lt $ready.Count; $index++) {
         $candidate = $ready[$index]
 
-        Write-Host
-        Write-Host (
+        $sourceDisplay = Get-CompactName $candidate.SourceName
+        $targetDisplay = Get-CompactName $candidate.TargetName
+        $statusPrefix =
             "[{0}/{1}] {2} -> {3}" -f
             ($index + 1),
             $ready.Count,
-            $candidate.SourceName,
-            $candidate.TargetName)
-
-        Write-Host (
-            "      Source: {0:N1} MB | {1:N0} records | scale x{2:g}" -f
-            ($candidate.Size / 1MB),
-            $candidate.Records,
-            $scales[$candidate.Group])
+            $sourceDisplay,
+            $targetDisplay
 
         try {
             $result =
@@ -591,7 +616,11 @@ function Invoke-SierraHistoryBridge {
                     $candidate.Target,
                     [double]$scales[$candidate.Group],
                     $backupDirectory,
-                    2.0)
+                    2.0,
+                    $statusPrefix)
+
+            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                "$statusPrefix | VERIFY | checking final target")
 
             $targetMeta =
                 [SierraHistoryBridge.ScidBridge]::GetMeta($candidate.Target)
@@ -613,11 +642,20 @@ function Invoke-SierraHistoryBridge {
                 minimum_target_last_datetime = [long]$targetMeta.LastDateTime
             }
 
-            Write-Host (
-                "      OK: {0:N0} SC records + {1:N0} newer Rithmic records; {2:N1} s" -f
-                $result.SourceRecords,
-                $result.TailRecords,
-                $result.ElapsedSeconds) -ForegroundColor Green
+            $finalStatus =
+                "{0} | OK | {1} rec | {2} | {3:0.0}s" -f
+                $statusPrefix,
+                (Format-CompactCount $result.OutputRecords),
+                (Format-CompactSize $targetMeta.Length),
+                $result.ElapsedSeconds
+
+            if ($result.OutOfOrderRecords -gt 0) {
+                $finalStatus +=
+                    " | WARN: {0} timestamp inversion(s)" -f
+                    $result.OutOfOrderRecords
+            }
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine($finalStatus)
 
             $entry =
                 "OK $($candidate.SourceName) -> $($candidate.TargetName) " +
@@ -626,12 +664,17 @@ function Invoke-SierraHistoryBridge {
                 "tail_records=$($result.TailRecords) " +
                 "output_records=$($result.OutputRecords) " +
                 "target_bytes=$($targetMeta.Length) " +
+                "conversion_seconds=$($result.ConversionSeconds) " +
+                "flush_seconds=$($result.FlushSeconds) " +
+                "validation_seconds=$($result.ValidationSeconds) " +
+                "replace_seconds=$($result.ReplaceSeconds) " +
                 "elapsed=$($result.ElapsedSeconds)"
 
             $log.Add($entry)
             Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
 
             if ($result.OutOfOrderRecords -gt 0) {
+                $warningFiles++
                 $prior =
                     [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
                         $result.FirstPriorDateTime)
@@ -642,24 +685,6 @@ function Invoke-SierraHistoryBridge {
 
                 $backSeconds =
                     $result.LargestBackwardMicroseconds / 1000000.0
-
-                Write-Host (
-                    "      WARNING: source contains {0:N0} out-of-order timestamp record(s)." -f
-                    $result.OutOfOrderRecords) -ForegroundColor Yellow
-
-                Write-Host (
-                    "               First at source record {0:N0}: {1} -> {2}" -f
-                    $result.FirstOutOfOrderIndex,
-                    $prior,
-                    $offending) -ForegroundColor Yellow
-
-                Write-Host (
-                    "               Largest backward timestamp jump: {0:N6} seconds." -f
-                    $backSeconds) -ForegroundColor Yellow
-
-                Write-Host (
-                    "               Record order was preserved exactly; timestamps were not sorted or rewritten."
-                ) -ForegroundColor Yellow
 
                 $warning =
                     "WARNING $($candidate.SourceName): " +
@@ -675,7 +700,14 @@ function Invoke-SierraHistoryBridge {
         }
         catch {
             $failed++
-            Write-Host "      ERROR: $($_.Exception.Message)" -ForegroundColor Red
+
+            $compactError = $_.Exception.Message
+            if ($compactError.Length -gt 90) {
+                $compactError = $compactError.Substring(0, 87) + "..."
+            }
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$statusPrefix | FAILED | $compactError")
 
             $entry =
                 "ERROR $($candidate.SourceName) -> $($candidate.TargetName): " +
@@ -692,16 +724,19 @@ function Invoke-SierraHistoryBridge {
 
     $log | Set-Content -LiteralPath $logPath -Encoding UTF8
 
+    $updateStopwatch.Stop()
+
     Write-Host
-    Write-Host "================================================================"
-    Write-Host "Completed."
-    Write-Host "  Updated: $updated"
-    Write-Host "  Failed:  $failed"
-    Write-Host "  Skipped unchanged: $unchanged"
-    Write-Host
-    Write-Host "Backups: $backupDirectory"
+    Write-Host (
+        "Done: {0} updated | {1} failed | {2} unchanged | {3} warning file(s) | {4:0.0}s" -f
+        $updated,
+        $failed,
+        $unchanged,
+        $warningFiles,
+        $updateStopwatch.Elapsed.TotalSeconds)
+
     Write-Host "Log:     $logPath"
-    Write-Host "================================================================"
+    Write-Host "Backups: $backupDirectory"
 
     if ($failed -gt 0) {
         return 2

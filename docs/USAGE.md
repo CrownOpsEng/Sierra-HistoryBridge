@@ -114,3 +114,25 @@ Processed-file state also stores minimum target metadata. If a converted target
 is deleted, truncated, or later recreated as a placeholder, the source is
 automatically placed back in the update plan even when the SC Data source file
 itself has not changed.
+
+
+## Console status display
+
+Each file uses one live status line. The same line is updated as the file moves
+through:
+
+```text
+CONVERT -> FLUSHING -> VALIDATE -> REPLACE -> VERIFY
+```
+
+The final line is retained as a compact result, for example:
+
+```text
+[1/5] NQH26-CME -> NQH6.CME | OK | 30.84M rec | 1.15 GB | 13.8s
+```
+
+A timestamp anomaly is shown on the same final line as a warning. Full anomaly
+details and per-stage timings remain in the run log.
+
+This keeps the console useful as a reviewable run report while still showing
+live progress during large conversions.
