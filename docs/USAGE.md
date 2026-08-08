@@ -252,3 +252,18 @@ press Enter.
 File-specific context actions use `-SelectedFile` internally and still validate
 that the selected item is a recognized SC Data source or bridge archive before
 changing anything.
+
+
+## Removing verified Rithmic baselines
+
+Run `storage.cmd`. If Rithmic baselines exist, Storage Report displays their
+count/size and offers:
+
+```text
+Verify and remove eligible baselines now? [y/N]
+```
+
+This is intentionally not automatic. The bridge performs one final full
+cross-feed validation before deleting each independent baseline. Baselines that
+are incomplete, inconsistent, unavailable, or otherwise uncertain remain
+untouched.

@@ -1,10 +1,18 @@
 # Changelog
 
-## v0.0.18 - 2026-08-07
+## v0.0.19 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- verified baseline removal also prunes empty Rithmic_Baselines directory structures
+
+- Storage Report can verify and remove original Rithmic baselines once SC Data coverage, converted target consistency, full cross-feed validation, and ordering checks all pass
+
+- restore also removes stale empty SC_Data scaffolding when no archives remain
+
+- archive/restore housekeeping now prunes empty bridge-created contract/year directory trees
 
 - storage output calls SCID_Bridge_Backups Recovery staging to clarify that it is temporary transactional storage
 

@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.18"
+$Version = "0.0.19"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1429,15 +1429,20 @@ function Invoke-SourceArchiveManager(
         }
     }
 
+    $emptyDirectoriesRemoved =
+        Invoke-BridgeDirectoryHousekeeping `
+            $ResolvedDataFolder
+
     $after = Get-StorageSnapshot $ResolvedDataFolder
 
     Write-Host
     Write-Host (
-        "Archive done: {0} archived | {1} failed | raw {2} -> archive {3}" -f
+        "Archive done: {0} archived | {1} failed | raw {2} -> archive {3} | {4} empty folder(s) removed" -f
         $archived,
         $failed,
         (Format-StorageBytes $rawBytes),
-        (Format-StorageBytes $archiveBytes))
+        (Format-StorageBytes $archiveBytes),
+        $emptyDirectoriesRemoved)
 
     Show-StorageDelta $before $after
 
@@ -1446,6 +1451,107 @@ function Invoke-SourceArchiveManager(
     }
 
     return 0
+}
+
+function Remove-EmptyBridgeDirectories(
+    [string]$Root,
+    [switch]$PreserveRoot) {
+
+    if ([string]::IsNullOrWhiteSpace($Root) -or
+        -not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return 0
+    }
+
+    $resolvedRoot =
+        [IO.Path]::GetFullPath(
+            $Root).TrimEnd('\')
+
+    $removed = 0
+
+    $directories =
+        @(
+            Get-ChildItem `
+                -LiteralPath $resolvedRoot `
+                -Directory `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue |
+            Sort-Object {
+                $_.FullName.Length
+            } -Descending
+        )
+
+    foreach ($directory in $directories) {
+        try {
+            $remaining =
+                @(
+                    Get-ChildItem `
+                        -LiteralPath $directory.FullName `
+                        -Force `
+                        -ErrorAction Stop
+                )
+
+            if ($remaining.Count -eq 0) {
+                Remove-Item `
+                    -LiteralPath $directory.FullName `
+                    -Force `
+                    -ErrorAction Stop
+
+                $removed++
+            }
+        }
+        catch {
+            # Directory cleanup is housekeeping only. Never turn a completed
+            # archive/restore into a failure because Windows kept a handle on
+            # an otherwise empty directory.
+        }
+    }
+
+    if (-not $PreserveRoot) {
+        try {
+            $remaining =
+                @(
+                    Get-ChildItem `
+                        -LiteralPath $resolvedRoot `
+                        -Force `
+                        -ErrorAction Stop
+                )
+
+            if ($remaining.Count -eq 0) {
+                Remove-Item `
+                    -LiteralPath $resolvedRoot `
+                    -Force `
+                    -ErrorAction Stop
+
+                $removed++
+            }
+        }
+        catch { }
+    }
+
+    return $removed
+}
+
+function Invoke-BridgeDirectoryHousekeeping(
+    [string]$DataFolder) {
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $removed = 0
+
+    foreach ($root in @(
+        $bridgePaths.Archive,
+        $bridgePaths.Recovery,
+        $bridgePaths.Logs
+    )) {
+        $removed +=
+            Remove-EmptyBridgeDirectories `
+                $root `
+                -PreserveRoot
+    }
+
+    return $removed
 }
 
 function Get-ArchivedSourceFiles([string]$DataFolder) {
@@ -1595,6 +1701,8 @@ function Select-RestoreArchives(
 function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
+
+    [void](Invoke-BridgeDirectoryHousekeeping $ResolvedDataFolder)
 
     $archives = Get-ArchivedSourceFiles $ResolvedDataFolder
     if ($archives.Count -eq 0) {
@@ -1817,17 +1925,322 @@ function Invoke-SourceRestoreManager(
         }
     }
 
+    $emptyDirectoriesRemoved =
+        Invoke-BridgeDirectoryHousekeeping `
+            $ResolvedDataFolder
+
     $after = Get-StorageSnapshot $ResolvedDataFolder
 
     Write-Host
     Write-Host (
-        "Restore done: {0} restored | {1} already present/deduplicated | {2} conflict(s) skipped | {3} failed" -f
+        "Restore done: {0} restored | {1} already present/deduplicated | {2} conflict(s) skipped | {3} failed | {4} empty folder(s) removed" -f
         $restored,
         $deduplicated,
         $skippedConflicts,
-        $failed)
+        $failed,
+        $emptyDirectoriesRemoved)
 
     Show-StorageDelta $before $after
+
+    if ($failed -gt 0) {
+        return 2
+    }
+
+    return 0
+}
+
+function Get-RithmicBaselineArchives(
+    [string]$DataFolder) {
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $root =
+        Join-Path `
+            $bridgePaths.Archive `
+            "Rithmic_Baselines"
+
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        return @()
+    }
+
+    $items = @()
+
+    foreach ($archive in @(
+        Get-ChildItem `
+            -LiteralPath $root `
+            -Recurse `
+            -File `
+            -Filter "*.scid.gz" `
+            -ErrorAction SilentlyContinue)) {
+
+        $meta =
+            Read-ScidArchiveMeta `
+                $archive.FullName
+
+        if (-not $meta) {
+            continue
+        }
+
+        $sourceStem =
+            $archive.Directory.Name
+
+        $sourceName =
+            $sourceStem + ".scid"
+
+        $targetName =
+            $archive.Name.Substring(
+                0,
+                $archive.Name.Length - 3)
+
+        $sourceMatch =
+            [regex]::Match(
+                $sourceName,
+                '^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.scid$')
+
+        if (-not $sourceMatch.Success) {
+            continue
+        }
+
+        $group =
+            "$($sourceMatch.Groups["root"].Value.ToUpperInvariant())|" +
+            "$($sourceMatch.Groups["exchange"].Value.ToUpperInvariant())"
+
+        $items +=
+            [pscustomobject]@{
+                ArchivePath = $archive.FullName
+                MetadataPath = $archive.FullName + ".meta"
+                SourceName = $sourceName
+                SourcePath =
+                    Join-Path `
+                        $DataFolder `
+                        $sourceName
+                TargetName = $targetName
+                TargetPath =
+                    Join-Path `
+                        $DataFolder `
+                        $targetName
+                Group = $group
+                ArchiveBytes = [long]$archive.Length
+                Meta = $meta
+            }
+    }
+
+    return @(
+        $items |
+        Sort-Object SourceName, TargetName
+    )
+}
+
+function Invoke-VerifiedBaselineCleanup(
+    [string]$ResolvedDataFolder,
+    [bool]$Ask) {
+
+    $baselines =
+        Get-RithmicBaselineArchives `
+            $ResolvedDataFolder
+
+    if ($baselines.Count -eq 0) {
+        Write-Host
+        Write-Host "No Rithmic baseline archives are present."
+        [void](Invoke-BridgeDirectoryHousekeeping $ResolvedDataFolder)
+        return 0
+    }
+
+    $totalBytes =
+        [long]((
+            $baselines |
+            Measure-Object `
+                -Property ArchiveBytes `
+                -Sum).Sum)
+
+    Write-Host
+    Write-Host (
+        "Rithmic baselines: {0} file(s) | {1} on disk" -f
+        $baselines.Count,
+        (Format-StorageBytes $totalBytes))
+
+    Write-Host (
+        "These are the original independent Rithmic files kept only for cross-feed validation.")
+
+    if ($Ask -and -not $Yes) {
+        Write-Host (
+            "Removing them requires one final full source-vs-baseline validation.")
+        Write-Host (
+            "Only STRONG, fully covered, current pairs are deleted; anything uncertain is kept.")
+
+        $answer =
+            Read-Host "Verify and remove eligible Rithmic baselines? [y/N]"
+
+        if ($answer.Trim().ToLowerInvariant() -notin @("y", "yes")) {
+            return 0
+        }
+    }
+
+    $config =
+        Read-JsonFile `
+            $ConfigPath
+
+    $scales =
+        Get-ScaleTable `
+            $config
+
+    $removed = 0
+    $kept = 0
+    $failed = 0
+    $reclaimed = 0L
+
+    foreach ($item in $baselines) {
+        $status =
+            "VERIFY BASELINE $($item.SourceName) <-> $($item.TargetName)"
+
+        try {
+            if (-not (
+                Test-Path `
+                    -LiteralPath $item.SourcePath `
+                    -PathType Leaf) -or
+                -not (
+                Test-Path `
+                    -LiteralPath $item.TargetPath `
+                    -PathType Leaf)) {
+
+                $kept++
+                Write-Host (
+                    "  KEEP {0} | source or target is not currently available" -f
+                    $item.TargetName) `
+                    -ForegroundColor Yellow
+                continue
+            }
+
+            if (-not $scales.ContainsKey($item.Group)) {
+                $kept++
+                Write-Host (
+                    "  KEEP {0} | no verified price scale for {1}" -f
+                    $item.TargetName,
+                    $item.Group) `
+                    -ForegroundColor Yellow
+                continue
+            }
+
+            $sourceMeta =
+                [SierraHistoryBridge.ScidBridge]::GetMeta(
+                    $item.SourcePath)
+
+            $targetMeta =
+                [SierraHistoryBridge.ScidBridge]::GetMeta(
+                    $item.TargetPath)
+
+            if ($sourceMeta.FirstDateTime -gt
+                    [long]$item.Meta.FirstDateTime -or
+                $sourceMeta.LastDateTime -lt
+                    [long]$item.Meta.LastDateTime) {
+
+                $kept++
+                Write-Host (
+                    "  KEEP {0} | SC Data does not fully cover the original Rithmic baseline" -f
+                    $item.TargetName) `
+                    -ForegroundColor Yellow
+                continue
+            }
+
+            $currentPair =
+                [SierraHistoryBridge.ScidBridge]::QuickConvertedPairMatches(
+                    $item.SourcePath,
+                    $item.TargetPath,
+                    [double]$scales[$item.Group])
+
+            if (-not $currentPair) {
+                $kept++
+                Write-Host (
+                    "  KEEP {0} | current Rithmic-named target does not match the converted SC Data source" -f
+                    $item.TargetName) `
+                    -ForegroundColor Yellow
+                continue
+            }
+
+            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                $status)
+
+            $validation =
+                [SierraHistoryBridge.ScidBridge]::ValidatePairGzipTarget(
+                    $item.SourcePath,
+                    $item.ArchivePath,
+                    [long]$item.Meta.OriginalBytes,
+                    [long]$item.Meta.FirstDateTime,
+                    [long]$item.Meta.LastDateTime,
+                    [double]$scales[$item.Group],
+                    $status)
+
+            $grade =
+                Get-ScidPairGrade `
+                    $validation
+
+            $safeToRemove =
+                $grade -eq "STRONG" -and
+                $validation.SourceOutOfOrderRecords -eq 0 -and
+                $validation.TargetOutOfOrderRecords -eq 0
+
+            if (-not $safeToRemove) {
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$status | KEEP | $grade")
+
+                $kept++
+                continue
+            }
+
+            if ($DryRun) {
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$status | VERIFIED | dry run")
+
+                $kept++
+                continue
+            }
+
+            $bytes =
+                [long](
+                    Get-Item `
+                        -LiteralPath $item.ArchivePath).Length
+
+            Remove-Item `
+                -LiteralPath $item.ArchivePath `
+                -Force
+
+            Remove-Item `
+                -LiteralPath $item.MetadataPath `
+                -Force `
+                -ErrorAction SilentlyContinue
+
+            $removed++
+            $reclaimed += $bytes
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                (
+                    "$status | VERIFIED + REMOVED | reclaimed {0}" -f
+                    (Format-StorageBytes $bytes)))
+        }
+        catch {
+            $failed++
+
+            try {
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$status | FAILED | $($_.Exception.Message)")
+            }
+            catch { }
+        }
+    }
+
+    $emptyDirectories =
+        Invoke-BridgeDirectoryHousekeeping `
+            $ResolvedDataFolder
+
+    Write-Host
+    Write-Host (
+        "Baseline cleanup: {0} removed | {1} kept | {2} failed | reclaimed {3} | {4} empty folder(s) removed" -f
+        $removed,
+        $kept,
+        $failed,
+        (Format-StorageBytes $reclaimed),
+        $emptyDirectories)
 
     if ($failed -gt 0) {
         return 2
@@ -1871,6 +2284,36 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
     Write-Host "  Archive:  $($snapshot.ArchivePath)"
     Write-Host "  Recovery: $($snapshot.RecoveryPath)"
     Write-Host "  Logs:     $($snapshot.LogPath)"
+
+    $baselines =
+        Get-RithmicBaselineArchives `
+            $ResolvedDataFolder
+
+    if ($baselines.Count -gt 0) {
+        $baselineBytes =
+            [long]((
+                $baselines |
+                Measure-Object `
+                    -Property ArchiveBytes `
+                    -Sum).Sum)
+
+        Write-Host
+        Write-Host (
+            "Rithmic baselines: {0} file(s) | {1} on disk" -f
+            $baselines.Count,
+            (Format-StorageBytes $baselineBytes))
+
+        if ($Interactive) {
+            $answer =
+                Read-Host "Verify and remove eligible baselines now? [y/N]"
+
+            if ($answer.Trim().ToLowerInvariant() -in @("y", "yes")) {
+                return Invoke-VerifiedBaselineCleanup `
+                    $ResolvedDataFolder `
+                    $false
+            }
+        }
+    }
 
     return 0
 }
@@ -2142,11 +2585,16 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
         }
     }
 
+    $emptyDirectories =
+        Invoke-BridgeDirectoryHousekeeping `
+            $DataFolder
+
     return [pscustomobject]@{
         ReclaimedBytes = $reclaimed
         PrunedBackups = $pruned
         CompressedBackups = $compressed
         StaleTemps = $staleTemps
+        EmptyDirectories = $emptyDirectories
         Warnings = $warnings
     }
 }
@@ -2982,14 +3430,15 @@ function Invoke-SierraHistoryBridge {
             $resolvedDataFolder
 
     Write-Host (
-        "      Storage: {0} free | Data {1} logical / {2} disk | reclaimed {3} | pruned {4} backup(s) | compressed {5} backup(s) | removed {6} stale temp(s)" -f
+        "      Storage: {0} free | Data {1} logical / {2} disk | reclaimed {3} | pruned {4} backup(s) | compressed {5} backup(s) | removed {6} stale temp(s) / {7} empty folder(s)" -f
         (Format-StorageBytes $freeAfterCleanup),
         (Format-StorageBytes $storageAfterCleanup.TotalLogical),
         (Format-StorageBytes $storageAfterCleanup.TotalDisk),
         (Format-StorageBytes $storageCleanup.ReclaimedBytes),
         $storageCleanup.PrunedBackups,
         $storageCleanup.CompressedBackups,
-        $storageCleanup.StaleTemps)
+        $storageCleanup.StaleTemps,
+        $storageCleanup.EmptyDirectories)
 
     if ($storageCleanup.Warnings -gt 0) {
         Write-Host (

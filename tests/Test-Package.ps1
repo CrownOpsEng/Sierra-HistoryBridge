@@ -307,6 +307,19 @@ if ($appText -match '"\$\(\$candidate\.Size\)\|"\s*\+') {
     throw "SCID dirty-check regression: modification-time source signature was reintroduced."
 }
 
+
+foreach ($cleanupToken in @(
+    'Remove-EmptyBridgeDirectories',
+    'Invoke-BridgeDirectoryHousekeeping',
+    'Get-RithmicBaselineArchives',
+    'Invoke-VerifiedBaselineCleanup',
+    'Verify and remove eligible baselines now?'
+)) {
+    if ($appText -notlike "*$cleanupToken*") {
+        throw "Archive/baseline cleanup regression: missing $cleanupToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

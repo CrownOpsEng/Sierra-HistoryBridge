@@ -156,3 +156,34 @@ is being replaced. Verified historical backups are normally removed after a
 successful replacement; live rollback evidence is compressed into the bridge
 archive. A steady-state installation can therefore show zero bytes in Recovery
 staging.
+
+
+## Empty bridge directories
+
+Archive/restore and startup housekeeping remove empty bridge-created directory
+trees from the deepest directory upward. The configured top-level Archive,
+Recovery, and Logs folders are retained, but empty internal paths such as:
+
+```text
+SCID_Bridge_Archive\SC_Data\NQ-CME\2000
+```
+
+are removed after their final archive/metadata file is removed.
+
+## Rithmic baseline cleanup
+
+Original Rithmic baselines are independent validation evidence, not permanent
+required data. Storage Report shows their count and disk usage and can perform a
+verified cleanup.
+
+A baseline is deleted only after all of these checks pass immediately before
+removal:
+
+1. the SC Data source and current Rithmic-named target both exist;
+2. SC Data covers the complete original Rithmic baseline time range;
+3. the current target matches the converted SC Data source;
+4. a full independent source-vs-compressed-baseline validation is `STRONG`;
+5. neither side contains out-of-order records.
+
+Anything uncertain is retained. After deletion, empty `Rithmic_Baselines`
+directory structures are pruned automatically.
