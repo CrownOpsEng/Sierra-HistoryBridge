@@ -18,3 +18,4 @@ if exist "%~dp0setup\Setup.ps1" (
 
 "%PWSH%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SETUP%" -Mode Install -Interactive
 exit /b %ERRORLEVEL%
+

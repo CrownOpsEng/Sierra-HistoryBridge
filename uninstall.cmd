@@ -21,3 +21,4 @@ title Uninstall Sierra History Bridge
 
 "%PWSH%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SETUP%" -Mode Uninstall -Interactive
 exit /b %ERRORLEVEL%
+

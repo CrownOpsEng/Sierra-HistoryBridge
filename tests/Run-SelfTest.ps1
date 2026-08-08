@@ -174,12 +174,75 @@ try {
         }
     }
 
+
+    $dailySource = Join-Path $temp "NQU26-CME.dly"
+    $dailyTarget = Join-Path $temp "NQU6.CME.dly"
+
+    @(
+        "Date, Open, High, Low, Close, Volume, OpenInterest",
+        "2026/01/01, 100.00, 101.00, 99.00, 100.50, 1000, 10",
+        "2026/01/02, 101.00, 102.00, 100.00, 101.50, 1100, 11",
+        "2026/01/03, 102.00, 103.00, 101.00, 102.50, 1200, 0"
+    ) | Set-Content -LiteralPath $dailySource -Encoding ASCII
+
+    @(
+        "Date, Open, High, Low, Close, Volume, OpenInterest",
+        "2025/12/31, 9900.00000000, 9950.00000000, 9850.00000000, 9925.00000000, 900, 9",
+        "2026/01/03, 10225.00000000, 10325.00000000, 10125.00000000, 10300.00000000, 1300, 12",
+        "2026/01/04, 10300.00000000, 10400.00000000, 10200.00000000, 10350.00000000, 1400, 13"
+    ) | Set-Content -LiteralPath $dailyTarget -Encoding ASCII
+
+    $dailyResult =
+        [SierraHistoryBridge.DailyBridge]::Sync(
+            $dailySource,
+            $dailyTarget,
+            100.0,
+            $backup)
+
+    if ($dailyResult.SourceRecords -ne 3) {
+        throw "Expected 3 Historical Daily source records."
+    }
+
+    if ($dailyResult.SourceAppliedRecords -ne 2) {
+        throw "Expected 2 Historical Daily source records to be applied."
+    }
+
+    if ($dailyResult.PreservedTargetRecords -ne 3) {
+        throw "Expected 3 Historical Daily target records to be retained."
+    }
+
+    if ($dailyResult.OutputRecords -ne 5) {
+        throw "Expected 5 Historical Daily output records."
+    }
+
+    if (-not $dailyResult.PreservedLatestSourceDate) {
+        throw "Expected the overlapping latest source date to remain from the Rithmic target."
+    }
+
+    $dailyText = Get-Content -LiteralPath $dailyTarget -Raw
+
+    if ($dailyText -notmatch
+        '2026/01/01,\s+10000\.00000000,\s+10100\.00000000') {
+        throw "Historical Daily source prices were not scaled."
+    }
+
+    if ($dailyText -notmatch
+        '2026/01/03,\s+10225\.00000000,\s+10325\.00000000') {
+        throw "Historical Daily latest-date target record was not retained."
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $backup "NQU6.CME.dly.bak"))) {
+        throw "Expected Historical Daily backup file was not created."
+    }
+
     Write-Host "PASS: scale inference"
     Write-Host "PASS: SCID conversion"
     Write-Host "PASS: newer Rithmic tail preservation"
     Write-Host "PASS: backup creation"
     Write-Host "PASS: Sierra Open-field marker preservation"
     Write-Host "PASS: out-of-order source timestamp preserved and reported"
+    Write-Host "PASS: Historical Daily merge and scale conversion"
+    Write-Host "PASS: Historical Daily latest-date overlap handling"
     exit 0
 }
 finally {

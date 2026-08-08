@@ -18,3 +18,4 @@ if exist "%~dp0app\SierraHistoryBridge.ps1" (
 
 "%PWSH%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%APP%" -Interactive %*
 exit /b %ERRORLEVEL%
+

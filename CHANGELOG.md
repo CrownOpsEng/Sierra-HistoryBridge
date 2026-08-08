@@ -1,78 +1,41 @@
 # Changelog
 
-All notable changes to Sierra History Bridge are documented here.
+## v0.0.9 - 2026-08-07
 
-The project uses pre-stable semantic versioning while conversion behavior and supported service/symbol mappings are validated.
+Initial pre-stable release.
 
-## v0.0.8 - 2026-08-07
+### History processing
 
-Initial Git-tracked version.
+- SC Data `.scid` to Rithmic `.scid` conversion
+- matching Historical Daily `.dly` processing
+- verified raw-price scale per root/exchange group
+- preservation of newer Rithmic intraday records
+- date-based Historical Daily merge with latest-date overlap handling
+- output validation before target replacement
+- rolling target backups
+- exact per-file record totals in the console and log
+- source timestamp inversion reporting without record reordering
 
-### Application
+### Rolling history management
 
-- warning when a symbol group spans beyond Sierra Chart's practical five-year continuous-futures window under Rithmic symbology
-
-- hard safety check for decade-separated SC Data contracts that collide under Rithmic one-digit-year filenames
-
-- final per-file result lines are never truncated, preserving exact verification counts even in narrow consoles
-
-- exact source, preserved-tail, and output record totals retained in each final console status line
-
-- conversion/flush/validation/replacement timings recorded in the detailed run log
-
-- one persistent summary line per processed file instead of percentage-line spam
-
-- compact in-place per-file status display for conversion, flush, validation, replacement, and final verification
-
-- stores minimum target record/timestamp metadata so deleted or recreated targets are automatically rebuilt
-
-- detects header-only Sierra/Rithmic placeholder files and labels them explicitly in the update plan
-
-- validates processed target files before treating a source as unchanged
-
-- verifies the replaced target record count after every successful conversion
-
-- writes the run log before conversion begins and appends success/failure diagnostics immediately
-
-- preserves SC Data record order when isolated source timestamps move backward and reports the anomaly
-
-- scans SC Data futures `.scid` files
-- maps SC Data futures filenames to Rithmic-style filenames
-- verifies raw-price conversion scales from overlapping files
-- converts SCID records in large chunks
-- preserves timestamps, trade counts, total volume, bid volume, and ask volume
-- preserves Sierra single-trade and CME unbundled-trade `Open` markers
-- preserves genuinely newer Rithmic records after the SC Data historical section
-- uses a handoff guard to reduce live/backfill duplication
-- validates converted output before replacement
-- creates rolling Rithmic target backups
-- writes per-run logs
-- skips unchanged source contracts on later runs
+- five-year history range for Rithmic single-digit-year symbols
+- three-month older rollover buffer
+- six-month forward-contract buffer
+- automatic exclusion of older two-digit-year SC Data contracts
+- metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
 
-- Windows PowerShell 5.1-compatible embedded C# compilation using plain `Add-Type`
-- safe allocation-free price-field conversion with no custom compiler switches
-- allocation-free safe price-field conversion with no `/unsafe` compiler requirement
-- base-framework SCID converter with no LINQ/System.Core dependency during Windows PowerShell 5.1 compilation
-
-- current-user installation under the local Programs directory
-- optional all-users installation under Program Files
-- separate per-user mutable application data
+- current-user and all-users installation
 - File Explorer folder/background command
-- optional Start Menu / All apps shortcuts
+- optional Start Menu shortcuts
 - Windows Installed apps registration
-- standard uninstall command
-- repair/update maintenance mode
-- clean repair payload stored with the installed setup files
-- migration cleanup for earlier development install locations
+- repair/update and uninstall support
+- per-user configuration and processing state
+- Windows PowerShell 5.1-compatible C# compilation
 
 ### Project
 
-- public GitHub-ready repository layout
-- user, installation, technical, troubleshooting, development, and publishing documentation
-- contribution and security guidance
-- synthetic SCID self-test
+- SCID and Historical Daily self-tests
 - release-package test
-- Windows GitHub Actions workflow
-- reproducible release builder
+- Windows CI workflow

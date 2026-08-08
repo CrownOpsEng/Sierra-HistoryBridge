@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.8"
+$Version = "0.0.9"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -25,8 +25,8 @@ function Show-Banner {
     Write-Host "================================================================"
     Write-Host " Sierra History Bridge v$Version"
     Write-Host "================================================================"
-    Write-Host "Updates Rithmic-named Sierra Chart intraday files with SC Data"
-    Write-Host "historical records while preserving newer Rithmic live records."
+    Write-Host "Updates Rithmic-named Sierra Chart intraday and daily files with"
+    Write-Host "SC Data history while preserving newer Rithmic records."
     Write-Host
 }
 
@@ -57,10 +57,53 @@ function Format-CompactSize([long]$Bytes) {
 }
 
 function Get-CompactName([string]$FileName) {
-    if ($FileName.EndsWith(".scid", [StringComparison]::OrdinalIgnoreCase)) {
-        return $FileName.Substring(0, $FileName.Length - 5)
+    foreach ($extension in @(".scid", ".dly")) {
+        if ($FileName.EndsWith(
+            $extension,
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+            return $FileName.Substring(
+                0,
+                $FileName.Length - $extension.Length)
+        }
     }
+
     return $FileName
+}
+
+function Get-FuturesMonthNumber([string]$MonthCode) {
+    switch ($MonthCode.ToUpperInvariant()) {
+        "F" { return 1 }
+        "G" { return 2 }
+        "H" { return 3 }
+        "J" { return 4 }
+        "K" { return 5 }
+        "M" { return 6 }
+        "N" { return 7 }
+        "Q" { return 8 }
+        "U" { return 9 }
+        "V" { return 10 }
+        "X" { return 11 }
+        "Z" { return 12 }
+        default { throw "Unknown futures month code: $MonthCode" }
+    }
+}
+
+function Get-ContractMonth([int]$FullYear, [string]$MonthCode) {
+    return [datetime]::new(
+        $FullYear,
+        (Get-FuturesMonthNumber $MonthCode),
+        1)
+}
+
+function Test-ContractInRithmicWindow(
+    [datetime]$ContractMonth,
+    [datetime]$WindowStart,
+    [datetime]$WindowEnd) {
+
+    return (
+        $ContractMonth -ge $WindowStart -and
+        $ContractMonth -le $WindowEnd)
 }
 
 
@@ -317,6 +360,86 @@ function Test-ProcessedTargetStillValid(
     return $true
 }
 
+
+function Get-DailyTargetStatus([string]$TargetPath) {
+    if (-not (Test-Path -LiteralPath $TargetPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            Exists = $false
+            Kind = "missing"
+            Records = 0
+            Length = 0
+            FirstDateTicks = 0
+            LastDateTicks = 0
+        }
+    }
+
+    try {
+        $meta = [SierraHistoryBridge.DailyBridge]::GetMeta($TargetPath)
+
+        return [pscustomobject]@{
+            Exists = $true
+            Kind = $(if ($meta.Records -eq 0) { "empty" } else { "data" })
+            Records = [long]$meta.Records
+            Length = [long]$meta.Length
+            FirstDateTicks = [long]$meta.FirstDateTicks
+            LastDateTicks = [long]$meta.LastDateTicks
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Exists = $true
+            Kind = "invalid"
+            Records = 0
+            Length = [long](Get-Item -LiteralPath $TargetPath).Length
+            FirstDateTicks = 0
+            LastDateTicks = 0
+        }
+    }
+}
+
+function Test-ProcessedDailyTargetStillValid(
+    $StateEntry,
+    [string]$SourceSignature,
+    $TargetStatus) {
+
+    if ($null -eq $StateEntry -or
+        -not $StateEntry.daily_source_signature -or
+        [string]$StateEntry.daily_source_signature -ne $SourceSignature) {
+        return $false
+    }
+
+    if (-not $TargetStatus.Exists -or
+        $TargetStatus.Kind -ne "data") {
+        return $false
+    }
+
+    try {
+        $minimumRecords = [long]$StateEntry.daily_minimum_target_records
+        $expectedFirst = [long]$StateEntry.daily_target_first_date_ticks
+        $minimumLast = [long]$StateEntry.daily_minimum_target_last_date_ticks
+    }
+    catch {
+        return $false
+    }
+
+    if ($minimumRecords -le 0 -or
+        $TargetStatus.Records -lt $minimumRecords) {
+        return $false
+    }
+
+    if ($expectedFirst -ne 0 -and
+        $TargetStatus.FirstDateTicks -ne $expectedFirst) {
+        return $false
+    }
+
+    if ($minimumLast -ne 0 -and
+        $TargetStatus.LastDateTicks -lt $minimumLast) {
+        return $false
+    }
+
+    return $true
+}
+
 function Convert-HashtableToObject([hashtable]$Table) {
     $ordered = [ordered]@{}
     foreach ($key in ($Table.Keys | Sort-Object)) {
@@ -372,6 +495,44 @@ function Invoke-SierraHistoryBridge {
                     $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($file.FullName)
 
                     if ($meta.Records -gt 0) {
+                        $dailySource =
+                            [IO.Path]::ChangeExtension($file.FullName, ".dly")
+                        $dailyTarget =
+                            [IO.Path]::ChangeExtension($targetPath, ".dly")
+
+                        $dailyAvailable = $false
+                        $dailyError = $null
+                        $dailyRecords = 0
+                        $dailyFirstDateTicks = 0
+                        $dailyLastDateTicks = 0
+                        $dailySize = 0
+                        $dailyModifiedTicks = 0
+
+                        if (Test-Path -LiteralPath $dailySource -PathType Leaf) {
+                            try {
+                                $dailyMeta =
+                                    [SierraHistoryBridge.DailyBridge]::GetMeta(
+                                        $dailySource)
+
+                                if ($dailyMeta.Records -gt 0) {
+                                    $dailyAvailable = $true
+                                    $dailyRecords = [long]$dailyMeta.Records
+                                    $dailyFirstDateTicks =
+                                        [long]$dailyMeta.FirstDateTicks
+                                    $dailyLastDateTicks =
+                                        [long]$dailyMeta.LastDateTicks
+                                    $dailyItem =
+                                        Get-Item -LiteralPath $dailySource
+                                    $dailySize = [long]$dailyItem.Length
+                                    $dailyModifiedTicks =
+                                        [long]$dailyItem.LastWriteTimeUtc.Ticks
+                                }
+                            }
+                            catch {
+                                $dailyError = $_.Exception.Message
+                            }
+                        }
+
                         $candidates += [pscustomobject]@{
                             Source = $file.FullName
                             SourceName = $file.Name
@@ -379,11 +540,27 @@ function Invoke-SierraHistoryBridge {
                             TargetName = $targetName
                             Group = "$($root.ToUpperInvariant())|$exchange"
                             FullYear = 2000 + [int]$year
+                            MonthCode = $month
+                            ContractMonth =
+                                Get-ContractMonth (2000 + [int]$year) $month
                             Records = $meta.Records
                             First = $meta.FirstDateTime
                             Last = $meta.LastDateTime
                             Size = $file.Length
                             ModifiedTicks = $file.LastWriteTimeUtc.Ticks
+                            DailyAvailable = $dailyAvailable
+                            DailyError = $dailyError
+                            DailySource = $dailySource
+                            DailySourceName =
+                                [IO.Path]::GetFileName($dailySource)
+                            DailyTarget = $dailyTarget
+                            DailyTargetName =
+                                [IO.Path]::GetFileName($dailyTarget)
+                            DailyRecords = $dailyRecords
+                            DailyFirstDateTicks = $dailyFirstDateTicks
+                            DailyLastDateTicks = $dailyLastDateTicks
+                            DailySize = $dailySize
+                            DailyModifiedTicks = $dailyModifiedTicks
                         }
                     }
                 }
@@ -397,66 +574,106 @@ function Invoke-SierraHistoryBridge {
         throw "No matching SC Data futures files were found. Expected names such as NQU26-CME.scid."
     }
 
-    # Rithmic uses only the final year digit in futures symbols. Contracts ten
-    # years apart therefore map to the same filename (for example NQH16-CME
-    # and NQH26-CME both map to NQH6.CME). Never choose one silently.
-    $targetCollisions =
+    # Rithmic's one-digit year repeats every ten years. Sierra Chart also
+    # limits single-digit-year Continuous Futures Contract charts to five
+    # years. Treat Rithmic-named files as a rolling history set, not
+    # as the long-term source archive.
+    $currentMonth =
+        [datetime]::new(
+            (Get-Date).Year,
+            (Get-Date).Month,
+            1)
+
+    $usableHistoryYears = 5
+    $historyBufferMonths = 3
+    $forwardBufferMonths = 6
+
+    $windowStart =
+        $currentMonth.
+            AddYears(-$usableHistoryYears).
+            AddMonths(-$historyBufferMonths)
+
+    $windowEnd =
+        $currentMonth.AddMonths($forwardBufferMonths)
+
+    $archiveCandidates = $candidates
+
+    $candidates =
+        $archiveCandidates |
+        Where-Object {
+            Test-ContractInRithmicWindow `
+                $_.ContractMonth `
+                $windowStart `
+                $windowEnd
+        }
+
+    $archiveOnly =
+        $archiveCandidates |
+        Where-Object {
+            -not (
+                Test-ContractInRithmicWindow `
+                    $_.ContractMonth `
+                    $windowStart `
+                    $windowEnd)
+        }
+
+    # The selected window is deliberately much shorter than the ten-year
+    # Rithmic filename alias cycle. If an unusual source set still maps more
+    # than one eligible contract to the same target, newest eligible wins and
+    # the older candidate remains available only under its SC Data filename.
+    $superseded = @()
+    $selected = @()
+
+    foreach ($targetGroup in ($candidates | Group-Object TargetName)) {
+        $winner =
+            $targetGroup.Group |
+            Sort-Object ContractMonth -Descending |
+            Select-Object -First 1
+
+        $selected += $winner
+
+        if ($targetGroup.Count -gt 1) {
+            $superseded +=
+                $targetGroup.Group |
+                Where-Object { $_.Source -ne $winner.Source }
+        }
+    }
+
+    $candidates = $selected | Sort-Object ContractMonth, SourceName
+
+    if ($candidates.Count -eq 0) {
+        throw (
+            "No SC Data contracts fall inside the current Rithmic history window " +
+            "($($windowStart.ToString('yyyy-MM')) through $($windowEnd.ToString('yyyy-MM'))).")
+    }
+
+    Write-Host (
+        "{0} eligible | {1} archive-only | window {2}..{3}" -f
+        $candidates.Count,
+        $archiveOnly.Count,
+        $windowStart.ToString("yyyy-MM"),
+        $windowEnd.ToString("yyyy-MM"))
+
+    Write-Host (
+        "      Policy: 5y Sierra history + 3mo rollover buffer + 6mo forward buffer")
+
+    if ($superseded.Count -gt 0) {
+        Write-Host (
+            "      {0} eligible source(s) superseded by newer contracts sharing a Rithmic filename." -f
+            $superseded.Count) -ForegroundColor Yellow
+    }
+
+    $dailySourceErrors =
         $candidates |
-        Group-Object TargetName |
-        Where-Object { $_.Count -gt 1 }
+        Where-Object { $_.DailyError }
 
-    if ($targetCollisions) {
-        Write-Host
-        Write-Host "RITHMIC YEAR COLLISION" -ForegroundColor Red
-        Write-Host "Rithmic futures symbols contain only one year digit."
-        Write-Host "The following SC Data contracts would map to the same target:"
-        Write-Host
-
-        foreach ($collision in $targetCollisions) {
-            Write-Host "  $($collision.Name)" -ForegroundColor Yellow
-            foreach ($item in ($collision.Group | Sort-Object FullYear)) {
-                Write-Host "    <- $($item.SourceName)"
-            }
-        }
-
-        Write-Host
-        Write-Host "No files were changed."
-        Write-Host "Keep older multi-year history in SC Data naming or a separate"
-        Write-Host "SC Data Sierra Chart instance. Do not overwrite decade-colliding"
-        Write-Host "Rithmic filenames."
-
-        throw "Rithmic one-digit-year filename collision detected."
+    foreach ($dailySourceError in $dailySourceErrors) {
+        Write-Host (
+            "      DLY WARNING: {0}: {1}" -f
+            $dailySourceError.DailySourceName,
+            $dailySourceError.DailyError) -ForegroundColor Yellow
     }
 
-    # Sierra Chart itself limits continuous-futures history when the active
-    # service uses one-digit year symbols. Warn when a group spans more than
-    # five calendar years even if no filename collision exists yet.
-    foreach ($groupName in ($candidates.Group | Sort-Object -Unique)) {
-        $groupCandidates =
-            $candidates |
-            Where-Object { $_.Group -eq $groupName }
-
-        $years =
-            $groupCandidates |
-            Select-Object -ExpandProperty FullYear |
-            Sort-Object -Unique
-
-        if ($years.Count -gt 1) {
-            $span = $years[-1] - $years[0]
-
-            if ($span -ge 5) {
-                Write-Host
-                Write-Host (
-                    "NOTE: {0} spans {1}-{2}. Rithmic's one-digit-year symbols " +
-                    "limit Sierra Chart continuous-futures history to about five years." -f
-                    $groupName,
-                    $years[0],
-                    $years[-1]) -ForegroundColor Yellow
-            }
-        }
-    }
-
-    Write-Host "$($candidates.Count) SC Data futures file(s)"
     Write-Host "      Scale verification:"
 
     $scales = Get-ScaleTable $config
@@ -520,6 +737,165 @@ function Invoke-SierraHistoryBridge {
     $state = Read-JsonFile $StatePath
     $stateTable = Get-StateTable $state
 
+    # Build a retirement plan for bridge-managed Rithmic files whose
+    # SC Data contract has moved outside the managed history window.
+    # Only modern state entries with verifiable target metadata are eligible.
+    # Never retire a target path currently required by an eligible contract.
+    $eligibleTargetPaths = @{}
+    foreach ($candidate in $candidates) {
+        $eligibleTargetPaths[$candidate.Target.ToLowerInvariant()] = $true
+    }
+
+    $retire = @()
+
+    foreach ($sourcePath in @($stateTable.Keys)) {
+        $entry = $stateTable[$sourcePath]
+
+        if ($entry -is [string] -or
+            $null -eq $entry -or
+            -not $entry.target_path) {
+            continue
+        }
+
+        $sourceName = [IO.Path]::GetFileName([string]$sourcePath)
+        $match = $sourcePattern.Match($sourceName)
+
+        if (-not $match.Success) {
+            continue
+        }
+
+        $fullYear = 2000 + [int]$match.Groups["year"].Value
+        $monthCode = $match.Groups["month"].Value.ToUpperInvariant()
+        $contractMonth = Get-ContractMonth $fullYear $monthCode
+
+        if (Test-ContractInRithmicWindow $contractMonth $windowStart $windowEnd) {
+            continue
+        }
+
+        $targetPath = [string]$entry.target_path
+        $targetKey = $targetPath.ToLowerInvariant()
+
+        if ($eligibleTargetPaths.ContainsKey($targetKey)) {
+            # The one-digit target name has been legitimately reused by a
+            # newer eligible decade. Drop only the stale state entry.
+            $retire += [pscustomobject]@{
+                Source = $sourcePath
+                SourceName = $sourceName
+                Target = $targetPath
+                TargetName = [IO.Path]::GetFileName($targetPath)
+                RemoveTarget = $false
+                DailyTarget =
+                    if ($entry.daily_target_path) {
+                        [string]$entry.daily_target_path
+                    }
+                    else {
+                        [IO.Path]::ChangeExtension($targetPath, ".dly")
+                    }
+                RemoveDailyTarget = $false
+                Reason = "target name is used by a newer eligible contract"
+            }
+            continue
+        }
+
+        $targetStatus = Get-TargetStatus $targetPath
+
+        if (-not $targetStatus.Exists) {
+            $dailyTargetPath =
+                if ($entry.daily_target_path) {
+                    [string]$entry.daily_target_path
+                }
+                else {
+                    [IO.Path]::ChangeExtension($targetPath, ".dly")
+                }
+
+            $removeDaily = $false
+
+            if ($entry.daily_minimum_target_records -and
+                (Test-Path -LiteralPath $dailyTargetPath -PathType Leaf)) {
+
+                $dailyStatus =
+                    Get-DailyTargetStatus $dailyTargetPath
+
+                $removeDaily =
+                    $dailyStatus.Kind -eq "data" -and
+                    $dailyStatus.Records -ge
+                        [long]$entry.daily_minimum_target_records -and
+                    (
+                        -not $entry.daily_target_first_date_ticks -or
+                        $dailyStatus.FirstDateTicks -eq
+                            [long]$entry.daily_target_first_date_ticks
+                    )
+            }
+
+            $retire += [pscustomobject]@{
+                Source = $sourcePath
+                SourceName = $sourceName
+                Target = $targetPath
+                TargetName = [IO.Path]::GetFileName($targetPath)
+                RemoveTarget = $false
+                DailyTarget = $dailyTargetPath
+                RemoveDailyTarget = [bool]$removeDaily
+                Reason = "managed intraday target already missing"
+            }
+            continue
+        }
+
+        # Retire only a target that still looks like the file recorded by the
+        # bridge. If it has become unrecognizable, leave it alone and keep a
+        # warning in the plan instead of deleting an unknown file.
+        $safeToRemove =
+            $targetStatus.Kind -eq "data" -and
+            $entry.minimum_target_records -and
+            $targetStatus.Records -ge [long]$entry.minimum_target_records -and
+            (
+                -not $entry.target_first_datetime -or
+                $targetStatus.FirstDateTime -eq [long]$entry.target_first_datetime
+            )
+
+        $dailyTargetPath =
+            if ($entry.daily_target_path) {
+                [string]$entry.daily_target_path
+            }
+            else {
+                [IO.Path]::ChangeExtension($targetPath, ".dly")
+            }
+
+        $safeToRemoveDaily = $false
+
+        if ($entry.daily_minimum_target_records -and
+            (Test-Path -LiteralPath $dailyTargetPath -PathType Leaf)) {
+
+            $dailyStatus = Get-DailyTargetStatus $dailyTargetPath
+
+            $safeToRemoveDaily =
+                $dailyStatus.Kind -eq "data" -and
+                $dailyStatus.Records -ge
+                    [long]$entry.daily_minimum_target_records -and
+                (
+                    -not $entry.daily_target_first_date_ticks -or
+                    $dailyStatus.FirstDateTicks -eq
+                        [long]$entry.daily_target_first_date_ticks
+                )
+        }
+
+        $retire += [pscustomobject]@{
+            Source = $sourcePath
+            SourceName = $sourceName
+            Target = $targetPath
+            TargetName = [IO.Path]::GetFileName($targetPath)
+            RemoveTarget = [bool]$safeToRemove
+            DailyTarget = $dailyTargetPath
+            RemoveDailyTarget = [bool]$safeToRemoveDaily
+            Reason =
+                if ($safeToRemove) {
+                    "outside rolling Rithmic history window"
+                }
+                else {
+                    "outside window but intraday target no longer matches saved metadata"
+                }
+        }
+    }
+
     $ready = @()
     $unchanged = 0
     $unverified = 0
@@ -549,8 +925,53 @@ function Invoke-SierraHistoryBridge {
                 $null
             }
 
-        if (-not $Force -and
-            (Test-ProcessedTargetStillValid $stateEntry $signature $targetStatus)) {
+        $scidCurrent =
+            -not $Force -and
+            (Test-ProcessedTargetStillValid `
+                $stateEntry `
+                $signature `
+                $targetStatus)
+
+        $dailySignature = $null
+        $dailyTargetStatus = $null
+        $dailyCurrent = $true
+
+        if ($candidate.DailyAvailable) {
+            $dailySignature =
+                "$($candidate.DailySize)|" +
+                "$($candidate.DailyModifiedTicks)|" +
+                "$($candidate.DailyRecords)|" +
+                "$($candidate.DailyLastDateTicks)"
+
+            $dailyTargetStatus =
+                Get-DailyTargetStatus $candidate.DailyTarget
+
+            $dailyCurrent =
+                -not $Force -and
+                (Test-ProcessedDailyTargetStillValid `
+                    $stateEntry `
+                    $dailySignature `
+                    $dailyTargetStatus)
+        }
+
+        $candidate |
+            Add-Member -NotePropertyName DailySignature -NotePropertyValue $dailySignature
+
+        $candidate |
+            Add-Member -NotePropertyName DailyTargetStatus -NotePropertyValue $dailyTargetStatus
+
+        $candidate |
+            Add-Member -NotePropertyName ScidNeeded -NotePropertyValue (-not $scidCurrent)
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName DailyNeeded `
+                -NotePropertyValue (
+                    $candidate.DailyAvailable -and
+                    -not $dailyCurrent)
+
+        if (-not $candidate.ScidNeeded -and
+            -not $candidate.DailyNeeded) {
             $unchanged++
             continue
         }
@@ -560,43 +981,76 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host (
-        "Plan: {0} ready | {1} unchanged | {2} unverified" -f
+        "Plan: {0} ready | {1} unchanged | {2} archive-only | {3} retire | {4} unverified" -f
         $ready.Count,
         $unchanged,
+        $archiveOnly.Count,
+        $retire.Count,
         $unverified)
 
     foreach ($candidate in $ready) {
-        $status = $candidate.TargetStatus
+        $scidPlan =
+            if ($candidate.ScidNeeded) {
+                if (-not $candidate.TargetStatus.Exists) {
+                    "SCID create"
+                }
+                elseif ($candidate.TargetStatus.Kind -eq "placeholder") {
+                    "SCID replace placeholder"
+                }
+                else {
+                    "SCID update"
+                }
+            }
+            else {
+                "SCID current"
+            }
 
-        if (-not $status.Exists) {
-            $action = "create"
-            $detail = "target missing"
-        }
-        elseif ($status.Kind -eq "placeholder") {
-            $action = "replace"
-            $detail = "header-only placeholder: $($status.Length) bytes, 0 records"
-        }
-        elseif ($status.Kind -eq "invalid") {
-            $action = "replace"
-            $detail = "existing target is not a valid SCID file"
-        }
-        else {
-            $action = "update"
-            $detail = "{0:N0} existing records, {1:N1} MB" -f
-                $status.Records,
-                ($status.Length / 1MB)
-        }
+        $dailyPlan =
+            if (-not $candidate.DailyAvailable) {
+                if ($candidate.DailyError) {
+                    "DLY invalid source"
+                }
+                else {
+                    "DLY not present"
+                }
+            }
+            elseif ($candidate.DailyNeeded) {
+                if (-not $candidate.DailyTargetStatus.Exists) {
+                    "DLY create"
+                }
+                else {
+                    "DLY update"
+                }
+            }
+            else {
+                "DLY current"
+            }
 
         Write-Host (
-            "  {0,-7} {1} -> {2} | {3} | {4}" -f
-            $action.ToUpperInvariant(),
+            "  UPDATE  {0} -> {1} | {2} | {3}" -f
             (Get-CompactName $candidate.SourceName),
             (Get-CompactName $candidate.TargetName),
-            (Format-CompactSize $candidate.Size),
-            $detail)
+            $scidPlan,
+            $dailyPlan)
     }
 
-    if ($ready.Count -eq 0) {
+    foreach ($item in $retire) {
+        $action =
+            if ($item.RemoveTarget) { "RETIRE" } else { "STATE" }
+
+        $dailyNote =
+            if ($item.RemoveDailyTarget) { " + DLY" } else { "" }
+
+        Write-Host (
+            "  {0,-7} {1} -> {2}{3} | {4}" -f
+            $action,
+            (Get-CompactName $item.SourceName),
+            (Get-CompactName $item.TargetName),
+            $dailyNote,
+            $item.Reason)
+    }
+
+    if ($ready.Count -eq 0 -and $retire.Count -eq 0) {
         Write-Host
         Write-Host "Nothing needs updating."
         return 0
@@ -610,7 +1064,7 @@ function Invoke-SierraHistoryBridge {
 
     if (-not $Yes) {
         Write-Host
-        $response = Read-Host "Update these Rithmic history files? [Y/n]"
+        $response = Read-Host "Apply this history update plan? [Y/n]"
         if (-not [string]::IsNullOrWhiteSpace($response)) {
             $normalized = $response.Trim().ToLowerInvariant()
             if ($normalized -ne "y" -and $normalized -ne "yes") {
@@ -634,6 +1088,68 @@ function Invoke-SierraHistoryBridge {
     Write-Host
     Write-Host "[4/4] Update"
 
+    $retiredTargets = 0
+    $retiredState = 0
+    $retireWarnings = 0
+
+    foreach ($item in $retire) {
+        if ($item.RemoveTarget) {
+            try {
+                if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+                    Remove-Item -LiteralPath $item.Target -Force
+                    $retiredTargets++
+                }
+
+                if ($item.RemoveDailyTarget -and
+                    (Test-Path -LiteralPath $item.DailyTarget -PathType Leaf)) {
+
+                    Remove-Item -LiteralPath $item.DailyTarget -Force
+                    $retiredTargets++
+                }
+
+                if ($stateTable.ContainsKey($item.Source)) {
+                    $stateTable.Remove($item.Source)
+                    $retiredState++
+                }
+
+                $retiredTypes =
+                    if ($item.RemoveDailyTarget) {
+                        "SCID + DLY"
+                    }
+                    else {
+                        "SCID"
+                    }
+
+                Write-Host (
+                    "  RETIRED {0} | {1} | source {2}" -f
+                    (Get-CompactName $item.TargetName),
+                    $retiredTypes,
+                    (Get-CompactName $item.SourceName))
+            }
+            catch {
+                $retireWarnings++
+                Write-Host (
+                    "  RETIRE WARNING {0} | {1}" -f
+                    (Get-CompactName $item.TargetName),
+                    $_.Exception.Message) -ForegroundColor Yellow
+            }
+        }
+        elseif ($item.Reason -eq "managed intraday target already missing" -or
+                $item.Reason -eq "target alias reused by newer eligible contract") {
+            if ($stateTable.ContainsKey($item.Source)) {
+                $stateTable.Remove($item.Source)
+                $retiredState++
+            }
+        }
+        else {
+            $retireWarnings++
+            Write-Host (
+                "  RETIRE SKIPPED {0} | {1}" -f
+                (Get-CompactName $item.TargetName),
+                $item.Reason) -ForegroundColor Yellow
+        }
+    }
+
     $backupDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Backups"
     $logDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Logs"
 
@@ -648,8 +1164,7 @@ function Invoke-SierraHistoryBridge {
     $log.Add("Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     $log.Add("")
 
-    # Write the log immediately so a run always leaves diagnostics even if a
-    # later conversion fails or the process is interrupted.
+    # Create the log before file updates begin.
     $log | Set-Content -LiteralPath $logPath -Encoding UTF8
 
     $updated = 0
@@ -669,30 +1184,71 @@ function Invoke-SierraHistoryBridge {
             $sourceDisplay,
             $targetDisplay
 
+        $scidResult = $null
+        $dailyResult = $null
+
         try {
-            $result =
-                [SierraHistoryBridge.ScidBridge]::Convert(
-                    $candidate.Source,
-                    $candidate.Target,
-                    [double]$scales[$candidate.Group],
-                    $backupDirectory,
-                    2.0,
-                    $statusPrefix)
+            if ($candidate.ScidNeeded) {
+                $scidResult =
+                    [SierraHistoryBridge.ScidBridge]::Convert(
+                        $candidate.Source,
+                        $candidate.Target,
+                        [double]$scales[$candidate.Group],
+                        $backupDirectory,
+                        2.0,
+                        $statusPrefix)
 
-            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
-                "$statusPrefix | VERIFY | checking final target")
+                [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                    "$statusPrefix | VERIFY SCID")
 
-            $targetMeta =
-                [SierraHistoryBridge.ScidBridge]::GetMeta($candidate.Target)
+                $targetMeta =
+                    [SierraHistoryBridge.ScidBridge]::GetMeta(
+                        $candidate.Target)
 
-            if ($targetMeta.Records -ne $result.OutputRecords) {
-                throw (
-                    "Post-replacement verification failed. Expected {0:N0} records; target contains {1:N0}." -f
-                    $result.OutputRecords,
-                    $targetMeta.Records)
+                if ($targetMeta.Records -ne $scidResult.OutputRecords) {
+                    throw (
+                        "SCID verification failed. Expected {0:N0} records; target contains {1:N0}." -f
+                        $scidResult.OutputRecords,
+                        $targetMeta.Records)
+                }
+            }
+            else {
+                $targetMeta =
+                    [SierraHistoryBridge.ScidBridge]::GetMeta(
+                        $candidate.Target)
             }
 
-            $updated++
+            if ($candidate.DailyNeeded) {
+                [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                    "$statusPrefix | UPDATE DLY")
+
+                $dailyResult =
+                    [SierraHistoryBridge.DailyBridge]::Sync(
+                        $candidate.DailySource,
+                        $candidate.DailyTarget,
+                        [double]$scales[$candidate.Group],
+                        $backupDirectory)
+
+                $dailyTargetMeta =
+                    [SierraHistoryBridge.DailyBridge]::GetMeta(
+                        $candidate.DailyTarget)
+
+                if ($dailyTargetMeta.Records -ne
+                    $dailyResult.OutputRecords) {
+                    throw (
+                        "DLY verification failed. Expected {0:N0} records; target contains {1:N0}." -f
+                        $dailyResult.OutputRecords,
+                        $dailyTargetMeta.Records)
+                }
+            }
+            elseif ($candidate.DailyAvailable) {
+                $dailyTargetMeta =
+                    [SierraHistoryBridge.DailyBridge]::GetMeta(
+                        $candidate.DailyTarget)
+            }
+            else {
+                $dailyTargetMeta = $null
+            }
 
             $stateTable[$candidate.Source] = [pscustomobject]@{
                 source_signature = $candidate.Signature
@@ -700,83 +1256,182 @@ function Invoke-SierraHistoryBridge {
                 minimum_target_records = [long]$targetMeta.Records
                 target_first_datetime = [long]$targetMeta.FirstDateTime
                 minimum_target_last_datetime = [long]$targetMeta.LastDateTime
+                daily_source_signature =
+                    if ($candidate.DailyAvailable) {
+                        $candidate.DailySignature
+                    }
+                    else {
+                        $null
+                    }
+                daily_target_path =
+                    if ($candidate.DailyAvailable) {
+                        $candidate.DailyTarget
+                    }
+                    else {
+                        $null
+                    }
+                daily_minimum_target_records =
+                    if ($dailyTargetMeta) {
+                        [long]$dailyTargetMeta.Records
+                    }
+                    else {
+                        0
+                    }
+                daily_target_first_date_ticks =
+                    if ($dailyTargetMeta) {
+                        [long]$dailyTargetMeta.FirstDateTicks
+                    }
+                    else {
+                        0
+                    }
+                daily_minimum_target_last_date_ticks =
+                    if ($dailyTargetMeta) {
+                        [long]$dailyTargetMeta.LastDateTicks
+                    }
+                    else {
+                        0
+                    }
             }
 
-            if ($result.TailRecords -gt 0) {
-                $recordSummary =
-                    "src={0:N0} + tail={1:N0} -> out={2:N0}" -f
-                    $result.SourceRecords,
-                    $result.TailRecords,
-                    $result.OutputRecords
+            $statusParts =
+                New-Object System.Collections.Generic.List[string]
+
+            if ($scidResult) {
+                if ($scidResult.TailRecords -gt 0) {
+                    $statusParts.Add(
+                        "SCID src={0:N0} + newer={1:N0} -> out={2:N0}" -f
+                        $scidResult.SourceRecords,
+                        $scidResult.TailRecords,
+                        $scidResult.OutputRecords)
+                }
+                else {
+                    $statusParts.Add(
+                        "SCID src={0:N0} -> out={1:N0}" -f
+                        $scidResult.SourceRecords,
+                        $scidResult.OutputRecords)
+                }
             }
             else {
-                $recordSummary =
-                    "src={0:N0} -> out={1:N0}" -f
-                    $result.SourceRecords,
-                    $result.OutputRecords
+                $statusParts.Add(
+                    "SCID current={0:N0}" -f
+                    $targetMeta.Records)
             }
+
+            if ($dailyResult) {
+                $statusParts.Add(
+                    "DLY src={0:N0} applied={1:N0} kept={2:N0} -> out={3:N0}" -f
+                    $dailyResult.SourceRecords,
+                    $dailyResult.SourceAppliedRecords,
+                    $dailyResult.PreservedTargetRecords,
+                    $dailyResult.OutputRecords)
+            }
+            elseif ($dailyTargetMeta) {
+                $statusParts.Add(
+                    "DLY current={0:N0}" -f
+                    $dailyTargetMeta.Records)
+            }
+            else {
+                $statusParts.Add("DLY none")
+            }
+
+            $elapsed =
+                if ($scidResult -and $dailyResult) {
+                    $scidResult.ElapsedSeconds +
+                    $dailyResult.ElapsedSeconds
+                }
+                elseif ($scidResult) {
+                    $scidResult.ElapsedSeconds
+                }
+                elseif ($dailyResult) {
+                    $dailyResult.ElapsedSeconds
+                }
+                else {
+                    0
+                }
 
             $finalStatus =
                 "{0} | OK | {1} | {2:0.0}s" -f
                 $statusPrefix,
-                $recordSummary,
-                $result.ElapsedSeconds
+                ($statusParts -join " | "),
+                $elapsed
 
-            if ($result.OutOfOrderRecords -gt 0) {
+            if ($scidResult -and
+                $scidResult.OutOfOrderRecords -gt 0) {
                 $finalStatus +=
                     " | WARN:{0}" -f
-                    $result.OutOfOrderRecords
+                    $scidResult.OutOfOrderRecords
             }
 
-            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine($finalStatus)
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                $finalStatus)
 
-            $entry =
-                "OK $($candidate.SourceName) -> $($candidate.TargetName) " +
-                "scale=x$($scales[$candidate.Group]) " +
-                "source_records=$($result.SourceRecords) " +
-                "tail_records=$($result.TailRecords) " +
-                "output_records=$($result.OutputRecords) " +
-                "target_bytes=$($targetMeta.Length) " +
-                "conversion_seconds=$($result.ConversionSeconds) " +
-                "flush_seconds=$($result.FlushSeconds) " +
-                "validation_seconds=$($result.ValidationSeconds) " +
-                "replace_seconds=$($result.ReplaceSeconds) " +
-                "elapsed=$($result.ElapsedSeconds)"
+            $updated++
 
-            $log.Add($entry)
-            Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
+            if ($scidResult) {
+                $entry =
+                    "SCID OK $($candidate.SourceName) -> $($candidate.TargetName) " +
+                    "scale=x$($scales[$candidate.Group]) " +
+                    "source_records=$($scidResult.SourceRecords) " +
+                    "newer_rithmic_records=$($scidResult.TailRecords) " +
+                    "output_records=$($scidResult.OutputRecords) " +
+                    "target_bytes=$($targetMeta.Length) " +
+                    "conversion_seconds=$($scidResult.ConversionSeconds) " +
+                    "flush_seconds=$($scidResult.FlushSeconds) " +
+                    "validation_seconds=$($scidResult.ValidationSeconds) " +
+                    "replace_seconds=$($scidResult.ReplaceSeconds) " +
+                    "elapsed=$($scidResult.ElapsedSeconds)"
 
-            if ($result.OutOfOrderRecords -gt 0) {
-                $warningFiles++
-                $prior =
-                    [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
-                        $result.FirstPriorDateTime)
+                $log.Add($entry)
+                Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
 
-                $offending =
-                    [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
-                        $result.FirstOutOfOrderDateTime)
+                if ($scidResult.OutOfOrderRecords -gt 0) {
+                    $warningFiles++
 
-                $backSeconds =
-                    $result.LargestBackwardMicroseconds / 1000000.0
+                    $prior =
+                        [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
+                            $scidResult.FirstPriorDateTime)
 
-                $warning =
-                    "WARNING $($candidate.SourceName): " +
-                    "out_of_order=$($result.OutOfOrderRecords) " +
-                    "first_index=$($result.FirstOutOfOrderIndex) " +
-                    "prior=$prior offending=$offending " +
-                    "largest_backward_seconds=$backSeconds " +
-                    "action=preserved_record_order"
+                    $offending =
+                        [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
+                            $scidResult.FirstOutOfOrderDateTime)
 
-                $log.Add($warning)
-                Add-Content -LiteralPath $logPath -Value $warning -Encoding UTF8
+                    $backSeconds =
+                        $scidResult.LargestBackwardMicroseconds / 1000000.0
+
+                    $warning =
+                        "SCID WARNING $($candidate.SourceName): " +
+                        "out_of_order=$($scidResult.OutOfOrderRecords) " +
+                        "first_index=$($scidResult.FirstOutOfOrderIndex) " +
+                        "prior=$prior offending=$offending " +
+                        "largest_backward_seconds=$backSeconds " +
+                        "action=preserved_record_order"
+
+                    $log.Add($warning)
+                    Add-Content -LiteralPath $logPath -Value $warning -Encoding UTF8
+                }
+            }
+
+            if ($dailyResult) {
+                $dailyEntry =
+                    "DLY OK $($candidate.DailySourceName) -> $($candidate.DailyTargetName) " +
+                    "scale=x$($scales[$candidate.Group]) " +
+                    "source_records=$($dailyResult.SourceRecords) " +
+                    "source_applied=$($dailyResult.SourceAppliedRecords) " +
+                    "target_records_preserved=$($dailyResult.PreservedTargetRecords) " +
+                    "latest_source_date_preserved_from_target=$($dailyResult.PreservedLatestSourceDate) " +
+                    "output_records=$($dailyResult.OutputRecords) " +
+                    "elapsed=$($dailyResult.ElapsedSeconds)"
+
+                $log.Add($dailyEntry)
+                Add-Content -LiteralPath $logPath -Value $dailyEntry -Encoding UTF8
             }
         }
         catch {
             $failed++
 
             $compactError = $_.Exception.Message
-            if ($compactError.Length -gt 90) {
-                $compactError = $compactError.Substring(0, 87) + "..."
+            if ($compactError.Length -gt 100) {
+                $compactError = $compactError.Substring(0, 97) + "..."
             }
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -801,11 +1456,12 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host (
-        "Done: {0} updated | {1} failed | {2} unchanged | {3} warning file(s) | {4:0.0}s" -f
+        "Done: {0} updated | {1} retired | {2} failed | {3} unchanged | {4} warning file(s) | {5:0.0}s" -f
         $updated,
+        $retiredTargets,
         $failed,
         $unchanged,
-        $warningFiles,
+        ($warningFiles + $retireWarnings),
         $updateStopwatch.Elapsed.TotalSeconds)
 
     Write-Host "Log:     $logPath"

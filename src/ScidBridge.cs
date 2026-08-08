@@ -2,6 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
+using System.Text;
 
 namespace SierraHistoryBridge
 {
@@ -736,5 +738,296 @@ namespace SierraHistoryBridge
                 throw new IOException("Scaled price validation failed.");
         }
     }
+
+    public sealed class DailyMeta
+    {
+        public long Records;
+        public long FirstDateTicks;
+        public long LastDateTicks;
+        public long Length;
+    }
+
+    public sealed class DailySyncResult
+    {
+        public long SourceRecords;
+        public long TargetRecordsBefore;
+        public long SourceAppliedRecords;
+        public long PreservedTargetRecords;
+        public long OutputRecords;
+        public bool PreservedLatestSourceDate;
+        public long FirstDateTicks;
+        public long LastDateTicks;
+        public double ElapsedSeconds;
+    }
+
+    public static class DailyBridge
+    {
+        private sealed class DailyRecord
+        {
+            public DateTime Date;
+            public decimal Open;
+            public decimal High;
+            public decimal Low;
+            public decimal Close;
+            public long Volume;
+            public long OpenInterest;
+        }
+
+        private static readonly string[] DateFormats =
+            new string[] { "yyyy/MM/dd", "yyyy/M/d", "yyyy/MM/d", "yyyy/M/dd" };
+
+        private static List<DailyRecord> ReadRecords(string path)
+        {
+            if (!File.Exists(path))
+                throw new FileNotFoundException("Historical Daily file was not found.", path);
+
+            string[] lines = File.ReadAllLines(path);
+            var records = new List<DailyRecord>();
+
+            if (lines.Length == 0)
+                return records;
+
+            int lineIndex = 0;
+            while (lineIndex < lines.Length &&
+                   String.IsNullOrWhiteSpace(lines[lineIndex]))
+                lineIndex++;
+
+            if (lineIndex >= lines.Length)
+                return records;
+
+            string header = lines[lineIndex].Trim();
+            if (!header.StartsWith("Date", StringComparison.OrdinalIgnoreCase))
+                throw new IOException(
+                    Path.GetFileName(path) +
+                    ": Historical Daily header was not recognized.");
+
+            DateTime previousDate = DateTime.MinValue;
+
+            for (lineIndex++; lineIndex < lines.Length; lineIndex++)
+            {
+                string line = lines[lineIndex];
+
+                if (String.IsNullOrWhiteSpace(line))
+                    continue;
+
+                string[] fields = line.Split(',');
+                if (fields.Length < 7)
+                    throw new IOException(
+                        Path.GetFileName(path) +
+                        ": Historical Daily record does not contain seven fields at line " +
+                        (lineIndex + 1).ToString(CultureInfo.InvariantCulture) + ".");
+
+                DateTime date;
+                if (!DateTime.TryParseExact(
+                    fields[0].Trim(),
+                    DateFormats,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out date))
+                    throw new IOException(
+                        Path.GetFileName(path) +
+                        ": invalid Historical Daily date at line " +
+                        (lineIndex + 1).ToString(CultureInfo.InvariantCulture) + ".");
+
+                if (previousDate != DateTime.MinValue && date <= previousDate)
+                    throw new IOException(
+                        Path.GetFileName(path) +
+                        ": Historical Daily dates are not strictly increasing.");
+
+                decimal open;
+                decimal high;
+                decimal low;
+                decimal close;
+                long volume;
+                long openInterest;
+
+                if (!Decimal.TryParse(fields[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out open) ||
+                    !Decimal.TryParse(fields[2].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out high) ||
+                    !Decimal.TryParse(fields[3].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out low) ||
+                    !Decimal.TryParse(fields[4].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out close) ||
+                    !Int64.TryParse(fields[5].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out volume) ||
+                    !Int64.TryParse(fields[6].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out openInterest))
+                    throw new IOException(
+                        Path.GetFileName(path) +
+                        ": invalid Historical Daily value at line " +
+                        (lineIndex + 1).ToString(CultureInfo.InvariantCulture) + ".");
+
+                records.Add(new DailyRecord
+                {
+                    Date = date,
+                    Open = open,
+                    High = high,
+                    Low = low,
+                    Close = close,
+                    Volume = volume,
+                    OpenInterest = openInterest
+                });
+
+                previousDate = date;
+            }
+
+            return records;
+        }
+
+        private static string FormatRecord(DailyRecord record, decimal priceScale)
+        {
+            return String.Format(
+                CultureInfo.InvariantCulture,
+                "{0:yyyy/MM/dd}, {1:0.00000000}, {2:0.00000000}, {3:0.00000000}, {4:0.00000000}, {5}, {6}",
+                record.Date,
+                record.Open * priceScale,
+                record.High * priceScale,
+                record.Low * priceScale,
+                record.Close * priceScale,
+                record.Volume,
+                record.OpenInterest);
+        }
+
+        public static DailyMeta GetMeta(string path)
+        {
+            List<DailyRecord> records = ReadRecords(path);
+
+            return new DailyMeta
+            {
+                Records = records.Count,
+                FirstDateTicks = records.Count > 0 ? records[0].Date.Ticks : 0,
+                LastDateTicks = records.Count > 0 ? records[records.Count - 1].Date.Ticks : 0,
+                Length = new FileInfo(path).Length
+            };
+        }
+
+        public static DailySyncResult Sync(
+            string sourcePath,
+            string targetPath,
+            double priceScale,
+            string backupDirectory)
+        {
+            DateTime started = DateTime.UtcNow;
+            string temporaryPath = targetPath + ".dailybridge.tmp";
+
+            if (File.Exists(temporaryPath))
+                File.Delete(temporaryPath);
+
+            List<DailyRecord> source = ReadRecords(sourcePath);
+            if (source.Count == 0)
+                throw new IOException("The SC Data Historical Daily source contains no records.");
+
+            List<DailyRecord> target = new List<DailyRecord>();
+
+            if (File.Exists(targetPath))
+            {
+                try
+                {
+                    target = ReadRecords(targetPath);
+                }
+                catch (IOException)
+                {
+                    target = new List<DailyRecord>();
+                }
+            }
+
+            var targetByDate = new Dictionary<DateTime, DailyRecord>();
+            for (int i = 0; i < target.Count; i++)
+                targetByDate[target[i].Date] = target[i];
+
+            var output = new Dictionary<DateTime, string>();
+            var sourceAppliedDates = new Dictionary<DateTime, bool>();
+
+            for (int i = 0; i < target.Count; i++)
+                output[target[i].Date] = FormatRecord(target[i], 1m);
+
+            DateTime latestSourceDate = source[source.Count - 1].Date;
+            bool preserveLatestSourceDate = targetByDate.ContainsKey(latestSourceDate);
+            decimal scale = Convert.ToDecimal(priceScale);
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                DailyRecord record = source[i];
+
+                if (record.Date == latestSourceDate && preserveLatestSourceDate)
+                    continue;
+
+                output[record.Date] = FormatRecord(record, scale);
+                sourceAppliedDates[record.Date] = true;
+            }
+
+            long sourceAppliedRecords = sourceAppliedDates.Count;
+            long preservedTargetRecords = output.Count - sourceAppliedRecords;
+
+            try
+            {
+                using (var stream = new FileStream(
+                    temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    64 * 1024, FileOptions.SequentialScan))
+                using (var writer = new StreamWriter(
+                    stream, Encoding.ASCII, 64 * 1024, true))
+                {
+                    writer.NewLine = "\r\n";
+                    writer.WriteLine("Date, Open, High, Low, Close, Volume, OpenInterest");
+
+                    var outputDates = new List<DateTime>(output.Keys);
+                    outputDates.Sort();
+
+                    for (int i = 0; i < outputDates.Count; i++)
+                        writer.WriteLine(output[outputDates[i]]);
+
+                    writer.Flush();
+                    stream.Flush(true);
+                }
+
+                DailyMeta outputMeta = GetMeta(temporaryPath);
+
+                if (outputMeta.Records != output.Count)
+                    throw new IOException("Historical Daily output record-count validation failed.");
+
+                if (File.Exists(targetPath))
+                {
+                    Directory.CreateDirectory(backupDirectory);
+                    string backupPath =
+                        Path.Combine(backupDirectory, Path.GetFileName(targetPath) + ".bak");
+
+                    if (File.Exists(backupPath))
+                        File.Delete(backupPath);
+
+                    File.Replace(temporaryPath, targetPath, backupPath, true);
+                }
+                else
+                {
+                    File.Move(temporaryPath, targetPath);
+                }
+
+                DailyMeta finalMeta = GetMeta(targetPath);
+
+                if (finalMeta.Records != outputMeta.Records ||
+                    finalMeta.FirstDateTicks != outputMeta.FirstDateTicks ||
+                    finalMeta.LastDateTicks != outputMeta.LastDateTicks)
+                    throw new IOException("Historical Daily post-replacement validation failed.");
+
+                return new DailySyncResult
+                {
+                    SourceRecords = source.Count,
+                    TargetRecordsBefore = target.Count,
+                    SourceAppliedRecords = sourceAppliedRecords,
+                    PreservedTargetRecords = preservedTargetRecords,
+                    OutputRecords = finalMeta.Records,
+                    PreservedLatestSourceDate = preserveLatestSourceDate,
+                    FirstDateTicks = finalMeta.FirstDateTicks,
+                    LastDateTicks = finalMeta.LastDateTicks,
+                    ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
+                };
+            }
+            catch
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    try { File.Delete(temporaryPath); }
+                    catch { }
+                }
+
+                throw;
+            }
+        }
+    }
+
 }
 

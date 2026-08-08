@@ -38,15 +38,36 @@ if ($converterText -match '(?m)\bunsafe\b|\bfixed\s*\(') {
 }
 
 
+
+
+if ($converterText -match '\bHashSet\s*<') {
+    throw "Windows PowerShell 5.1 compatibility regression: HashSet/System.Core dependency found."
+}
+
 $appText = Get-Content -LiteralPath (Join-Path $RepoRoot "src\SierraHistoryBridge.ps1") -Raw
 
-if ($appText -notmatch 'RITHMIC YEAR COLLISION') {
-    throw "Safety regression: Rithmic decade-collision detection is missing."
+foreach ($requiredPolicyToken in @(
+    '$usableHistoryYears = 5',
+    '$historyBufferMonths = 3',
+    '$forwardBufferMonths = 6',
+    'archive-only',
+    'outside rolling Rithmic history window'
+)) {
+    if ($appText -notlike "*$requiredPolicyToken*") {
+        throw "Rithmic rolling-window regression: missing $requiredPolicyToken"
+    }
 }
 
-if ($appText -notmatch 'Group-Object TargetName') {
-    throw "Safety regression: target-filename collision grouping is missing."
+
+
+if ($converterText -notmatch 'public static class DailyBridge') {
+    throw "Historical Daily regression: DailyBridge is missing."
 }
+
+if ($appText -notmatch 'DailyNeeded') {
+    throw "Historical Daily regression: daily update planning is missing."
+}
+
 
 $required = @(
     "src\SierraHistoryBridge.ps1",

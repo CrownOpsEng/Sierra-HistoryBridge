@@ -1,15 +1,23 @@
 # Technical design
 
-## Purpose
+## Data files
 
-Sierra Chart data-service symbols and Rithmic symbols can use different filenames and different raw price representation inside SCID records. Sierra History Bridge converts the historical SC Data records into the verified Rithmic convention while retaining the richer SC Data trade information.
-
-## SCID structure
-
-The converter expects Sierra Chart's documented intraday structure:
+Sierra Chart uses separate files for intraday and Historical Daily data:
 
 ```text
-56-byte file header
+.scid   intraday data
+.dly    Historical Daily data
+```
+
+The bridge processes matching files for the same futures contract and Rithmic
+symbol mapping.
+
+## SCID conversion
+
+The converter expects Sierra Chart's documented SCID layout:
+
+```text
+56-byte header
 40-byte records
 ```
 
@@ -27,141 +35,81 @@ BidVolume
 AskVolume
 ```
 
-For a single-trade/tick record, Sierra Chart gives the price fields special meaning:
+For single-trade records, `Open` can contain Sierra control values instead of a
+price. `Open` is scaled only when positive. Zero and negative values are kept
+bit-for-bit.
 
-- `Open` can be zero or a control marker for unbundled trades
-- `High` contains the ask at the trade
-- `Low` contains the bid at the trade
-- `Close` contains the trade price
+The price scale is verified from overlapping SC Data and Rithmic files and
+stored per root/exchange group.
 
-The bridge therefore scales `Open` only when it is positive. Zero and negative control-marker values are preserved bit-for-bit.
+SC Data supplies records through the end of the source history. Rithmic records
+sufficiently newer than the source are retained. A short timestamp guard removes
+the normal overlap near the source boundary.
 
-## Scale verification
+SCID output is written to a temporary file, flushed, checked, and then moved
+into place. Existing targets receive a rolling backup.
 
-A service-specific scale is not assumed from the filename.
+If a source timestamp moves backward, record order is preserved. The condition
+is counted and written to the run log; timestamps are not sorted or rewritten.
 
-For each root/exchange group, the bridge finds an overlapping SC Data source and Rithmic target, samples prices across the shared time range, computes the target/source price ratio, and verifies that the observed median is close to a supported power-of-ten scale.
+## Historical Daily processing
 
-The verified scale is stored by group, for example:
-
-```text
-NQ|CME
-```
-
-Once verified, expired contracts in the same group can be created even when no original Rithmic file exists for that contract.
-
-## Historical authority and live tail
-
-For an existing Rithmic target:
-
-1. SC Data is authoritative through the latest source timestamp
-2. Rithmic records sufficiently newer than the SC source are retained
-3. a short boundary guard prevents common live/backfill overlap from being carried into the new file
-
-## Conversion sequence
-
-For each source:
-
-1. validate SCID header and record alignment
-2. read records in large chunks
-3. verify monotonic timestamps
-4. scale price-bearing fields
-5. preserve trade and volume fields
-6. append the eligible newer Rithmic tail
-7. flush the temporary output
-8. validate representative records
-9. atomically replace the target and create a rolling backup
-
-## Validation
-
-The converter verifies:
-
-- SCID magic and layout
-- record alignment
-- monotonic source timestamps
-- output record count
-- first timestamp
-- sampled timestamp preservation
-- `NumTrades`
-- `TotalVolume`
-- `BidVolume`
-- `AskVolume`
-- bitwise preservation of non-positive `Open` markers
-- expected scaled trade prices
-
-## Installation architecture
-
-Executable application files are installed separately from mutable state.
-
-Program files use the Windows application-program location appropriate to the selected installation scope. Per-user configuration and processing state remain under the user's local application-data directory.
-
-Explorer integration and the Installed apps entry are registered according to the selected installation scope.
-
-
-
-## Windows PowerShell compilation
-
-Setup, repair, the self-test, and normal application startup all load the
-embedded C# SCID engine through the same stock Windows PowerShell 5.1 command:
-
-```powershell
-Add-Type -Path $ConverterSource
-```
-
-The converter deliberately avoids unsafe code, LINQ, and custom compiler
-parameters so PowerShell's normal default framework references are retained.
-
-
-## Out-of-order source timestamps
-
-SCID files can occasionally contain a timestamp that moves backward even
-though the record sequence itself is the intended trade-data sequence.
-
-The bridge does not sort records or rewrite timestamps. It preserves the
-source record sequence exactly, counts timestamp inversions, reports the first
-one and the largest backward jump, and records those diagnostics in the run
-log.
-
-This policy avoids silently changing trade ordering while still allowing an
-otherwise usable SC Data file to be converted.
-
-
-## Processed-file state and target validation
-
-A source signature alone is not sufficient to skip a future conversion because
-the Rithmic target can be deleted, truncated, or recreated by Sierra Chart.
-
-After a successful conversion, state stores:
-
-- source signature
-- target path
-- minimum target record count
-- target first timestamp
-- minimum target last timestamp
-
-On the next run the target must still be a valid non-empty SCID file and satisfy
-those minimum metadata checks. Current-contract targets are allowed to grow as
-Rithmic appends live records.
-
-Older pre-release state entries that contain only a source signature are treated
-as unverifiable and are reprocessed once.
-
-
-## Rithmic single-digit year collisions
-
-Rithmic futures filenames encode only the final year digit. Therefore a source
-mapping based only on Rithmic's native naming cannot represent two contracts
-whose years differ by ten:
+Historical Daily files use the documented fields:
 
 ```text
-NQH16-CME.scid -> NQH6.CME.scid
-NQH26-CME.scid -> NQH6.CME.scid
+Date, Open, High, Low, Close, Volume, OpenInterest
 ```
 
-The bridge performs a collision check before any conversion. If more than one
-SC Data source maps to the same Rithmic target, the run stops before modifying
-files and reports every conflicting source.
+The daily processor validates the header, field count, numeric values, and
+strictly increasing dates. Prices use the same verified scale as the matching
+SCID contract.
 
-This is separate from Sierra Chart's continuous-futures limitation: Sierra
-Chart also limits continuous charts to about five years when the selected
-service uses single-digit-year symbols.
+Daily files are merged by date:
+
+1. Existing Rithmic dates are loaded.
+2. SC Data replaces dates in the source history.
+3. If the Rithmic target already contains the latest date present in SC Data,
+   the Rithmic row is retained for that date.
+4. Dates present only in the Rithmic target are retained.
+5. The result is sorted by date.
+
+The latest-date rule avoids replacing an actively updating Rithmic daily row
+with a less-current Historical Daily row. When SC Data advances, the previous
+date is replaced normally on the next run.
+
+Daily output is written to a temporary file, flushed, checked, and then moved
+into place. Existing `.dly` targets receive `.dly.bak` backups.
+
+## Processed-file state
+
+SCID and Historical Daily state are tracked independently for each contract.
+Either file can update without forcing the other to be rewritten.
+
+Saved checks include source signatures, target paths, record counts, and first
+and last timestamps/dates. A deleted, truncated, or recreated target is
+processed again.
+
+## Rolling Rithmic history window
+
+The default managed range is:
+
+```text
+current month - 5 years - 3 months
+through
+current month + 6 months
+```
+
+The three-month older buffer exceeds Sierra Chart's documented two-month
+contract-transition range. The six-month forward buffer allows nearby future
+contracts to be staged before rollover.
+
+SC Data files outside the range remain unchanged. Bridge-managed Rithmic files
+that leave the range are retired only after saved target metadata is checked.
+
+## Windows installation
+
+Setup supports current-user and all-users installation. Program files and
+mutable per-user state are stored separately.
+
+The C# engine is compiled with the standard Windows PowerShell 5.1 `Add-Type`
+path and does not require custom compiler options, LINQ, or unsafe code.
