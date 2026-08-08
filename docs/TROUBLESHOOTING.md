@@ -1,72 +1,98 @@
 # Troubleshooting
 
-## The Explorer command is missing
+## Explorer says "Application not found"
 
-Run `install.cmd` again.
-
-On Windows 11, check **Show more options** if the command is not shown in the compact context menu.
-
-The installed command is registered for both:
+Re-run:
 
 ```text
-Directory
-Directory\Background
+repair.cmd
 ```
 
-under the current user's shell classes.
+or:
 
-## The Explorer command opens the wrong folder
+```text
+setup.cmd
+```
 
-Run `run.cmd` once and select the correct Sierra Chart `Data` folder. The selected folder is remembered for manual launches.
+and choose **Repair / update**.
 
-When invoked from File Explorer, the folder you right-click is passed directly to the application.
+The repair process rewrites the Explorer integration to point directly to the installed Windows PowerShell executable and installed bridge script.
 
-## A symbol group is shown as unverified
+## The Explorer command is missing
 
-The bridge needs at least one SC Data source and Rithmic target with overlapping timestamps for that root/exchange group.
+Run a repair.
 
-For example:
+On Windows 11, also check **Show more options** in the context menu.
+
+## The wrong Sierra Chart folder is selected
+
+Run the bridge directly with `run.cmd` and enter the correct Sierra Chart `Data` folder when prompted.
+
+The selected folder is remembered.
+
+## A symbol group is "unverified"
+
+At least one SC Data source and Rithmic target in that root/exchange group need overlapping timestamps.
+
+Example:
 
 ```text
 NQU26-CME.scid
 NQU6.CME.scid
 ```
 
-Once the scale is verified, it is remembered and can be used for other NQ/CME contracts.
+After a scale is verified, it is remembered for the rest of that symbol group.
 
 ## Sierra Chart is open
 
-The application scans files while Sierra Chart is running, but it waits before replacing targets. Close all Sierra Chart instances and press Enter when prompted.
+The bridge can scan while Sierra Chart is running, but target files are not replaced while Sierra Chart is open.
+
+Close every Sierra Chart instance and continue when prompted.
 
 ## A conversion fails
 
-The previous Rithmic file remains available as a rolling backup under:
+Check:
 
 ```text
-SCID_Bridge_Backups
+SierraChart\Data\SCID_Bridge_Logs
 ```
 
-Check the latest log under:
+The previous Rithmic target should remain available as:
 
 ```text
-SCID_Bridge_Logs
+SierraChart\Data\SCID_Bridge_Backups\<target>.bak
 ```
 
-and include that log when opening a bug report.
+## Setup, repair, or uninstall fails
 
-## Reset saved state
+Check:
 
-Remove:
+```text
+%LOCALAPPDATA%\SierraHistoryBridge\setup.log
+```
+
+For an all-users installation, rerun setup and approve the administrator prompt.
+
+## Reset remembered settings
+
+Uninstall the application and choose to remove saved application settings.
+
+You can also manually remove:
 
 ```text
 %LOCALAPPDATA%\SierraHistoryBridge\config.json
 %LOCALAPPDATA%\SierraHistoryBridge\state.json
 ```
 
-or run:
 
-```text
-uninstall.cmd -RemoveSettings
-```
 
-and reinstall.
+
+## Setup reports a C# compiler or assembly-reference error
+
+Use the current v0.0.2 package and rerun `setup.cmd`.
+
+The installed SCID engine is compiled with the stock Windows PowerShell 5.1
+`Add-Type -Path` behavior. The converter does not require custom compiler
+parameters, unsafe compilation, LINQ, or optional framework references.
+
+If a compiler error still appears, attach `%LOCALAPPDATA%\SierraHistoryBridge\setup.log`.

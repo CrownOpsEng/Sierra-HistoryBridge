@@ -1,117 +1,90 @@
 # Usage
 
-## Install the File Explorer command
+## Run from File Explorer
 
-Run:
+Open the Sierra Chart `Data` folder.
 
-```text
-install.cmd
-```
-
-The installer copies the application into:
-
-```text
-%LOCALAPPDATA%\SierraHistoryBridge\app
-```
-
-and adds this File Explorer command:
+Right-click blank space and choose:
 
 ```text
 Update Sierra history from SC Data
 ```
 
-You can invoke it by right-clicking:
+You can also right-click the `Data` folder itself and choose the same command.
 
-- the Sierra Chart `Data` folder, or
-- blank space inside the `Data` folder
+## Run directly
 
-On Windows 11, legacy shell commands may appear under **Show more options** depending on Explorer configuration.
-
-## Run without installing the Explorer command
-
-Run:
+From the installed program folder:
 
 ```text
 run.cmd
 ```
 
-If no folder is supplied, Sierra History Bridge checks the remembered folder and common Sierra Chart locations. It shows the selected folder before scanning.
+or use the Start Menu shortcut if one was created.
 
-You can also pass a folder directly:
+The application remembers the Sierra Chart Data folder after it has been selected.
 
-```text
-run.cmd "C:\SierraChart\Data"
-```
-
-## Normal update flow
+## Normal update sequence
 
 The application:
 
 1. loads the SCID conversion engine
 2. locates the Sierra Chart Data folder
-3. finds SC Data futures files
-4. maps each source to its Rithmic filename
-5. verifies the raw-price scale from an overlapping source/target pair
-6. skips source files that have not changed since the last successful run
-7. displays the files that are ready to update
-8. waits for confirmation
-9. waits for Sierra Chart to close if it is running
+3. scans for SC Data futures files
+4. maps each source filename to the corresponding Rithmic filename
+5. verifies the raw-price scale from an overlapping pair
+6. skips unchanged source contracts
+7. shows the update plan
+8. asks for confirmation
+9. waits for Sierra Chart to close before target replacement
 10. converts, validates, backs up, and replaces each target
 
 ## Example
 
-If the Data folder contains:
+Source files:
 
 ```text
 NQU26-CME.scid
 NQZ26-CME.scid
-NQU6.CME.scid
 ```
 
-and the overlapping `NQU26-CME.scid` / `NQU6.CME.scid` pair verifies the NQ/CME scale, the bridge can update:
+Rithmic naming:
 
 ```text
 NQU6.CME.scid
-```
-
-and create:
-
-```text
 NQZ6.CME.scid
 ```
 
-from the SC Data sources.
+If `NQU26-CME.scid` and `NQU6.CME.scid` overlap, the bridge can verify the raw-price scale for the `NQ|CME` symbol group. That verified scale can then be used for other NQ/CME contracts.
 
-## Force a reprocess
+## Dry run
 
-From a command prompt in the repository:
+From PowerShell:
 
-```text
-run.cmd -Force
+```powershell
+.pp\SierraHistoryBridge.ps1 -DryRun -Interactive
 ```
 
-## Preview without changing files
+A dry run scans and displays the update plan without changing files.
 
-```text
-run.cmd -DryRun
+## Force reprocessing
+
+```powershell
+.pp\SierraHistoryBridge.ps1 -Force -Interactive
 ```
 
-## Uninstall the File Explorer command
+This ignores the processed-file state and reprocesses eligible source files.
 
-Run:
+## Backups and logs
+
+Existing Rithmic targets receive a rolling backup under:
 
 ```text
-uninstall.cmd
+SCID_Bridge_Backups
 ```
 
-The remembered Data folder, verified scales, and processed-file state remain in:
+Each bridge run writes a log under:
 
 ```text
-%LOCALAPPDATA%\SierraHistoryBridge
-```
-
-To remove those settings too:
-
-```text
-uninstall.cmd -RemoveSettings
+SCID_Bridge_Logs
 ```

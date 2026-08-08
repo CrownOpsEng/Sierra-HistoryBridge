@@ -1,6 +1,6 @@
 # Security and data integrity
 
-Sierra History Bridge modifies local Sierra Chart market-data files, so data integrity is the primary safety concern.
+Sierra History Bridge modifies local Sierra Chart market-data files. Data integrity is the primary safety concern.
 
 ## Reporting a vulnerability
 
@@ -9,21 +9,33 @@ private vulnerability reporting][private-report]. Do not open a public issue
 when a report contains an unpatched vulnerability, private data, credentials,
 or information that would make exploitation easier.
 
-## Reporting a non-sensitive integrity problem
+## Recovery design
 
-For a suspected data-corruption issue, include:
+For an existing Rithmic target, conversion is written to a temporary file first. The output is validated before the existing target is replaced, and the previous target is retained as a rolling backup.
+
+## Report a data-integrity problem
+
+Include:
 
 - Sierra History Bridge version
-- source and target symbol filenames
+- Windows version
+- Sierra Chart version
+- source and target filenames
 - the latest bridge log
-- whether the target existed before the run
-- whether Sierra Chart was running
-- the smallest reproducible copied dataset you can safely share
+- the setup log if installation integration is involved
+- whether Sierra Chart was open
+- the smallest copied dataset that reproduces the issue, if it can be shared safely
 
-Do not attach brokerage credentials, account secrets, or unrelated trading records.
+Do not include brokerage credentials, account secrets, or unrelated trading records.
 
-## Recovery
+## Recovery files
 
-Existing targets receive a rolling `.bak` file before replacement. Restore that backup with Sierra Chart closed if a converted target must be rolled back.
+Bridge backups are stored under:
+
+```text
+SierraChart\Data\SCID_Bridge_Backups
+```
+
+Restore a backup only with Sierra Chart closed.
 
 [private-report]: https://github.com/CrownOpsEng/Sierra-HistoryBridge/security/advisories/new

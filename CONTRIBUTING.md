@@ -65,11 +65,15 @@ pass.
 
 ## Testing
 
-Run the conversion self-test before proposing a change:
+Run both test suites before proposing a change:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-SelfTest.ps1
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
 ```
 
-Changes to real-data behavior must be validated against copied SCID files,
-never an active Sierra Chart Data folder.
+For a release candidate, also run:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1
+```

@@ -1,26 +1,52 @@
 # Changelog
 
-All notable changes to this project will be documented here.
+All notable changes to Sierra History Bridge are documented here.
 
-The project uses pre-stable semantic versioning while the file-conversion behavior and supported symbol mappings are being validated.
+The project uses pre-stable semantic versioning while conversion behavior and supported service/symbol mappings are validated.
 
-## v0.0.1 - 2026-08-07
+## v0.0.2 - 2026-08-07
 
 Initial Git-tracked version.
 
-### Added
+### Application
 
-- SC Data futures filename discovery
-- automatic mapping to Rithmic-style futures filenames
-- overlapping-file raw-price scale verification
-- chunked SCID conversion
-- preservation of Sierra single-trade and unbundled-trade `Open` markers
-- preservation of timestamps and trade/volume fields
-- preservation of genuinely newer Rithmic live records
-- boundary guard for live/backfill overlap
-- structural and sampled-record validation
-- rolling backups and per-run logs
-- processed-file state so unchanged contracts are skipped
-- File Explorer integration for folders and folder backgrounds
-- direct command-line launcher
-- Windows self-test and GitHub Actions workflow
+- scans SC Data futures `.scid` files
+- maps SC Data futures filenames to Rithmic-style filenames
+- verifies raw-price conversion scales from overlapping files
+- converts SCID records in large chunks
+- preserves timestamps, trade counts, total volume, bid volume, and ask volume
+- preserves Sierra single-trade and CME unbundled-trade `Open` markers
+- preserves genuinely newer Rithmic records after the SC Data historical section
+- uses a handoff guard to reduce live/backfill duplication
+- validates converted output before replacement
+- creates rolling Rithmic target backups
+- writes per-run logs
+- skips unchanged source contracts on later runs
+
+### Windows integration
+
+- Windows PowerShell 5.1-compatible embedded C# compilation using plain `Add-Type`
+- safe allocation-free price-field conversion with no custom compiler switches
+- allocation-free safe price-field conversion with no `/unsafe` compiler requirement
+- base-framework SCID converter with no LINQ/System.Core dependency during Windows PowerShell 5.1 compilation
+
+- current-user installation under the local Programs directory
+- optional all-users installation under Program Files
+- separate per-user mutable application data
+- File Explorer folder/background command
+- optional Start Menu / All apps shortcuts
+- Windows Installed apps registration
+- standard uninstall command
+- repair/update maintenance mode
+- clean repair payload stored with the installed setup files
+- migration cleanup for earlier development install locations
+
+### Project
+
+- public GitHub-ready repository layout
+- user, installation, technical, troubleshooting, development, and publishing documentation
+- contribution and security guidance
+- synthetic SCID self-test
+- release-package test
+- Windows GitHub Actions workflow
+- reproducible release builder
