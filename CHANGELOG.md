@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.20 - 2026-08-07
+## v0.0.21 - 2026-08-07
 
 Initial pre-stable release.
 
@@ -143,6 +143,12 @@ Initial pre-stable release.
 - metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
+
+- prune-on-delete defensively moves out of any directory tree it is about to remove and retries transient directory deletion
+
+- archive/restore now relocate both PowerShell and Win32 process current directories to the Sierra Data base before file operations
+
+- fixed context-menu restore holding its own archive year folder open as the process working directory
 
 - on-disk storage reporting now uses FILE_STANDARD_INFO allocation size
 

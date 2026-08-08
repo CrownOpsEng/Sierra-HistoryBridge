@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.20"
+$Version = "0.0.21"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1214,6 +1214,12 @@ function Invoke-SourceArchiveManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
 
+    Set-Location `
+        -LiteralPath $ResolvedDataFolder
+
+    [Environment]::CurrentDirectory =
+        $ResolvedDataFolder
+
     $window = Get-BridgeWindow
     $sourceFiles = Get-ScDataSourceFiles $ResolvedDataFolder
 
@@ -1497,6 +1503,80 @@ function Get-BridgeProtectedRootForPath(
     return $null
 }
 
+function Move-WorkingDirectoryOutsideTree(
+    [string]$Directory,
+    [string]$FallbackRoot) {
+
+    if ([string]::IsNullOrWhiteSpace($Directory) -or
+        [string]::IsNullOrWhiteSpace($FallbackRoot)) {
+        return $false
+    }
+
+    $tree =
+        [IO.Path]::GetFullPath(
+            $Directory).TrimEnd('\')
+
+    $fallback =
+        [IO.Path]::GetFullPath(
+            $FallbackRoot).TrimEnd('\')
+
+    $mustMove = $false
+
+    try {
+        $location =
+            Get-Location
+
+        if ($location.Provider.Name -eq "FileSystem") {
+            $providerPath =
+                [IO.Path]::GetFullPath(
+                    $location.ProviderPath).TrimEnd('\')
+
+            if ($providerPath.Equals(
+                    $tree,
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                $providerPath.StartsWith(
+                    $tree + '\',
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                $mustMove = $true
+            }
+        }
+    }
+    catch { }
+
+    try {
+        $processDirectory =
+            [IO.Path]::GetFullPath(
+                [Environment]::CurrentDirectory).TrimEnd('\')
+
+        if ($processDirectory.Equals(
+                $tree,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            $processDirectory.StartsWith(
+                $tree + '\',
+                [StringComparison]::OrdinalIgnoreCase)) {
+
+            $mustMove = $true
+        }
+    }
+    catch { }
+
+    if (-not $mustMove) {
+        return $false
+    }
+
+    # PowerShell's provider location and the Win32 process current directory
+    # are related but are not guaranteed to remain synchronized. Set both.
+    Set-Location `
+        -LiteralPath $fallback `
+        -ErrorAction Stop
+
+    [Environment]::CurrentDirectory =
+        $fallback
+
+    return $true
+}
+
 function Remove-EmptyParentChain(
     [string]$StartDirectory,
     [string]$ProtectedRoot) {
@@ -1557,10 +1637,24 @@ function Remove-EmptyParentChain(
             break
         }
 
+        try {
+            [void](Move-WorkingDirectoryOutsideTree `
+                $current `
+                $root)
+        }
+        catch {
+            Write-Host (
+                "  CLEANUP WARNING: could not move working directory away from " +
+                $current +
+                " | " +
+                $_.Exception.Message) `
+                -ForegroundColor Yellow
+        }
+
         $deleted = $false
 
         for ($attempt = 1;
-            $attempt -le 3;
+            $attempt -le 5;
             $attempt++) {
 
             try {
@@ -1574,9 +1668,9 @@ function Remove-EmptyParentChain(
                 break
             }
             catch {
-                if ($attempt -lt 3) {
+                if ($attempt -lt 5) {
                     Start-Sleep `
-                        -Milliseconds 50
+                        -Milliseconds 100
                 }
                 else {
                     Write-Host (
@@ -1936,6 +2030,12 @@ function Select-RestoreArchives(
 function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
+
+    Set-Location `
+        -LiteralPath $ResolvedDataFolder
+
+    [Environment]::CurrentDirectory =
+        $ResolvedDataFolder
 
     [void](Invoke-BridgeDirectoryHousekeeping $ResolvedDataFolder)
 

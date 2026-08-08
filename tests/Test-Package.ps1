@@ -332,6 +332,17 @@ foreach ($pruneToken in @(
     }
 }
 
+
+foreach ($cwdCleanupToken in @(
+    'Move-WorkingDirectoryOutsideTree',
+    '[Environment]::CurrentDirectory',
+    'Set-Location'
+)) {
+    if (-not $appText.Contains($cwdCleanupToken)) {
+        throw "Current-directory cleanup regression: missing $cwdCleanupToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

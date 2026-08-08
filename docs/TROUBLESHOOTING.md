@@ -89,7 +89,7 @@ You can also manually remove:
 
 ## Setup reports a C# compiler or assembly-reference error
 
-Use the current v0.0.20 package and rerun `setup.cmd`.
+Use the current v0.0.21 package and rerun `setup.cmd`.
 
 The installed SCID engine is compiled with the stock Windows PowerShell 5.1
 `Add-Type -Path` behavior. The converter does not require custom compiler
@@ -109,3 +109,15 @@ Nasdaq-100 trading, Sierra Chart can report zero-volume or missing-date
 conditions because the required early Daily history is incomplete. Reducing the
 continuous chart's loaded history avoids using those dates, but keeping the
 full historical files is valid when the limitation is understood.
+
+
+## CLEANUP WARNING: folder is in use
+
+If this occurs while restoring from File Explorer, older builds could have
+started PowerShell with its working directory inside the selected archive's
+year folder. The bridge was therefore the process preventing its own cleanup.
+
+Current builds move both PowerShell's provider location and the process current
+directory to the Sierra Data base before archive/restore and again before
+pruning. Simply having the folder visible in File Explorer normally does not
+require closing Explorer.

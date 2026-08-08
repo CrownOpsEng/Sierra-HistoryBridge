@@ -211,3 +211,18 @@ The same rule is used by restore, baseline removal, archive temporary cleanup,
 recovery cleanup, and target retirement. A final full housekeeping sweep remains
 as a fallback. Persistent cleanup failures are reported instead of silently
 leaving an unexplained orphan.
+
+
+## Context-menu working directory
+
+A File Explorer context-menu process can inherit a working directory inside the
+folder containing the selected archive. Windows does not allow a process to
+remove its own current directory.
+
+Archive/restore therefore relocates both the PowerShell FileSystem provider
+location and the Win32 process current directory to the configured Sierra Data
+base before file operations begin. The prune-on-delete routine also performs
+this check defensively before removing each empty directory.
+
+This prevents the bridge itself from holding `SC_Data\<group>\<year>` open
+while trying to delete it.
