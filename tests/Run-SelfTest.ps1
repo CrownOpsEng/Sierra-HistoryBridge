@@ -121,12 +121,34 @@ try {
         throw "Expected x100 scale; got x$($inference.Factor)"
     }
 
+    $pairValidation =
+        [SierraHistoryBridge.ScidBridge]::ValidatePair(
+            $source,
+            $target,
+            $inference.Factor,
+            "[test] validation")
+
+    if ($pairValidation.SourceOutOfOrderRecords -ne 0 -or
+        $pairValidation.TargetOutOfOrderRecords -ne 0) {
+        throw "Expected monotonic synthetic SCID files."
+    }
+
+    if ($pairValidation.CommonSeconds -ne 20) {
+        throw "Expected 20 common seconds in SCID pair validation."
+    }
+
+    if ($pairValidation.VolumeMatchPercent -ne 100.0 -or
+        $pairValidation.LastPriceMatchPercent -ne 100.0) {
+        throw "Expected exact synthetic SCID overlap agreement."
+    }
+
     $result = [SierraHistoryBridge.ScidBridge]::Convert(
         $source,
         $target,
         $inference.Factor,
         $backup,
         $false,
+        $true,
         "[test] synthetic")
 
     if ($result.SourceRecords -ne 20) {
@@ -145,8 +167,8 @@ try {
         throw "Expected monotonic source timestamps."
     }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $backup "NQU6.CME.scid.bak"))) {
-        throw "Expected backup file was not created."
+    if (-not (Test-Path -LiteralPath (Join-Path $backup "NQU6.CME.scid.rithmic-baseline.bak"))) {
+        throw "Expected immutable Rithmic baseline backup was not created."
     }
 
     $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($target)
@@ -250,6 +272,7 @@ try {
             100.0,
             $mergeBackup,
             $true,
+            $false,
             "[test] live merge")
 
     $expectedHandoff =
@@ -309,6 +332,7 @@ try {
             $unorderedTarget,
             100.0,
             $mergeBackup,
+            $false,
             $false,
             "[test] unordered source") | Out-Null
     }
@@ -453,10 +477,11 @@ try {
     }
 
     Write-Host "PASS: scale inference"
+    Write-Host "PASS: SCID pair preflight validation"
     Write-Host "PASS: historical SCID replacement"
     Write-Host "PASS: verified whole-second Rithmic tail handoff"
     Write-Host "PASS: non-monotonic source rejection without publication"
-    Write-Host "PASS: backup creation"
+    Write-Host "PASS: immutable Rithmic baseline creation"
     Write-Host "PASS: Sierra Open-field marker preservation"
     Write-Host "PASS: Historical Daily independent scale inference"
     Write-Host "PASS: Historical Daily merge and scale conversion"

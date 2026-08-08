@@ -22,6 +22,66 @@ namespace SierraHistoryBridge
         public int Samples;
     }
 
+    public sealed class ScidFileValidation
+    {
+        public long Records;
+        public long FirstDateTime;
+        public long LastDateTime;
+        public long Length;
+        public long WriteTimeUtcTicks;
+        public long OutOfOrderRecords;
+        public long RichRecords;
+        public long ControlOpenRecords;
+        public long UnclassifiedVolumeRecords;
+        public double RichPercent;
+        public double ElapsedSeconds;
+    }
+
+    public sealed class ScidPairValidation
+    {
+        public long SourceRecords;
+        public long TargetRecords;
+        public long SourceFirstDateTime;
+        public long SourceLastDateTime;
+        public long TargetFirstDateTime;
+        public long TargetLastDateTime;
+        public long SourceLength;
+        public long TargetLength;
+        public long SourceWriteTimeUtcTicks;
+        public long TargetWriteTimeUtcTicks;
+
+        public long SourceOutOfOrderRecords;
+        public long TargetOutOfOrderRecords;
+        public long SourceRichRecords;
+        public long TargetRichRecords;
+        public long SourceControlOpenRecords;
+        public long TargetControlOpenRecords;
+        public long SourceUnclassifiedVolumeRecords;
+        public long TargetUnclassifiedVolumeRecords;
+
+        public long SourceOverlapSeconds;
+        public long TargetOverlapSeconds;
+        public long CommonSeconds;
+        public long SourceOnlySeconds;
+        public long TargetOnlySeconds;
+        public long CommonVolumeEqualSeconds;
+        public long CommonBidEqualSeconds;
+        public long CommonAskEqualSeconds;
+        public long CommonLastPriceEqualSeconds;
+        public long SourceOverlapVolume;
+        public long TargetOverlapVolume;
+
+        public double CommonCoveragePercent;
+        public double VolumeMatchPercent;
+        public double BidMatchPercent;
+        public double AskMatchPercent;
+        public double LastPriceMatchPercent;
+        public double AggregateVolumeDifferencePercent;
+        public double SourceRichPercent;
+        public double TargetRichPercent;
+        public double ElapsedSeconds;
+    }
+
     public sealed class ConvertResult
     {
         public long SourceRecords;
@@ -192,6 +252,7 @@ namespace SierraHistoryBridge
 
         private struct SecondAggregate
         {
+            public long Second;
             public long Volume;
             public long BidVolume;
             public long AskVolume;
@@ -244,7 +305,7 @@ namespace SierraHistoryBridge
                     SecondAggregate aggregate;
 
                     if (!result.TryGetValue(second, out aggregate))
-                        aggregate = new SecondAggregate();
+                        aggregate = new SecondAggregate { Second = second };
 
                     aggregate.Volume += BitConverter.ToUInt32(buffer, offset + 28);
                     aggregate.BidVolume += BitConverter.ToUInt32(buffer, offset + 32);
@@ -442,6 +503,452 @@ namespace SierraHistoryBridge
             long after = ReadDateTimeAt(stream, index);
 
             return Math.Abs(value - before) <= Math.Abs(after - value) ? index - 1 : index;
+        }
+
+        private struct RawScidRecord
+        {
+            public long DateTime;
+            public float Open;
+            public float High;
+            public float Low;
+            public float Close;
+            public uint NumTrades;
+            public uint TotalVolume;
+            public uint BidVolume;
+            public uint AskVolume;
+        }
+
+        private sealed class SequentialRecordReader : IDisposable
+        {
+            private readonly FileStream _stream;
+            private readonly byte[] _buffer;
+            private readonly long _records;
+            private long _recordsRead;
+            private int _bufferOffset;
+            private int _bufferBytes;
+            private bool _hasPending;
+            private RawScidRecord _pending;
+            private long _previousDateTime = Int64.MinValue;
+
+            public long OutOfOrderRecords;
+            public long RichRecords;
+            public long ControlOpenRecords;
+            public long UnclassifiedVolumeRecords;
+
+            public long RecordsRead
+            {
+                get { return _recordsRead; }
+            }
+
+            public long Records
+            {
+                get { return _records; }
+            }
+
+            public SequentialRecordReader(string path)
+            {
+                _stream = new FileStream(
+                    path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                    8 * 1024 * 1024, FileOptions.SequentialScan);
+
+                ValidateHeader(_stream, path);
+                _records = (_stream.Length - HeaderSize) / RecordSize;
+                _stream.Position = HeaderSize;
+                _buffer = new byte[100000 * RecordSize];
+            }
+
+            private bool TryReadRecord(out RawScidRecord record)
+            {
+                if (_recordsRead >= _records)
+                {
+                    record = new RawScidRecord();
+                    return false;
+                }
+
+                if (_bufferOffset >= _bufferBytes)
+                {
+                    long remaining = _records - _recordsRead;
+                    int recordsToRead =
+                        (int)Math.Min(100000L, remaining);
+                    int bytesToRead = recordsToRead * RecordSize;
+
+                    ReadExact(_stream, _buffer, bytesToRead);
+                    _bufferOffset = 0;
+                    _bufferBytes = bytesToRead;
+                }
+
+                int offset = _bufferOffset;
+                record = new RawScidRecord
+                {
+                    DateTime = BitConverter.ToInt64(_buffer, offset),
+                    Open = BitConverter.ToSingle(_buffer, offset + 8),
+                    High = BitConverter.ToSingle(_buffer, offset + 12),
+                    Low = BitConverter.ToSingle(_buffer, offset + 16),
+                    Close = BitConverter.ToSingle(_buffer, offset + 20),
+                    NumTrades = BitConverter.ToUInt32(_buffer, offset + 24),
+                    TotalVolume = BitConverter.ToUInt32(_buffer, offset + 28),
+                    BidVolume = BitConverter.ToUInt32(_buffer, offset + 32),
+                    AskVolume = BitConverter.ToUInt32(_buffer, offset + 36)
+                };
+
+                _bufferOffset += RecordSize;
+                _recordsRead++;
+
+                if (record.DateTime < _previousDateTime)
+                    OutOfOrderRecords++;
+
+                _previousDateTime = record.DateTime;
+
+                if (record.High != record.Low)
+                    RichRecords++;
+
+                if (record.Open <= 0)
+                    ControlOpenRecords++;
+
+                if ((ulong)record.BidVolume + (ulong)record.AskVolume !=
+                    (ulong)record.TotalVolume)
+                    UnclassifiedVolumeRecords++;
+
+                return true;
+            }
+
+            public bool TryReadSecond(out SecondAggregate aggregate)
+            {
+                RawScidRecord first;
+
+                if (_hasPending)
+                {
+                    first = _pending;
+                    _hasPending = false;
+                }
+                else if (!TryReadRecord(out first))
+                {
+                    aggregate = new SecondAggregate();
+                    return false;
+                }
+
+                long second = first.DateTime / 1000000L;
+                long volume = first.TotalVolume;
+                long bid = first.BidVolume;
+                long ask = first.AskVolume;
+                float lastClose = first.Close;
+
+                RawScidRecord record;
+                while (TryReadRecord(out record))
+                {
+                    long recordSecond = record.DateTime / 1000000L;
+                    if (recordSecond != second)
+                    {
+                        _pending = record;
+                        _hasPending = true;
+                        break;
+                    }
+
+                    volume += record.TotalVolume;
+                    bid += record.BidVolume;
+                    ask += record.AskVolume;
+                    lastClose = record.Close;
+                }
+
+                aggregate = new SecondAggregate
+                {
+                    Second = second,
+                    Volume = volume,
+                    BidVolume = bid,
+                    AskVolume = ask,
+                    LastClose = lastClose
+                };
+
+                return true;
+            }
+
+            public void Dispose()
+            {
+                _stream.Dispose();
+            }
+        }
+
+        private static double Percent(long numerator, long denominator)
+        {
+            if (denominator <= 0)
+                return 0.0;
+
+            return 100.0 * (double)numerator / (double)denominator;
+        }
+
+        public static ScidFileValidation ValidateFile(
+            string path,
+            string statusPrefix)
+        {
+            DateTime started = DateTime.UtcNow;
+            ScidMeta metaBefore = GetMeta(path);
+            DateTime writeBefore = File.GetLastWriteTimeUtc(path);
+
+            if (metaBefore.Records <= 0)
+                throw new IOException("SCID validation requires a non-empty file.");
+
+            using (var reader = new SequentialRecordReader(path))
+            {
+                SecondAggregate aggregate;
+                long lastProgressRecords = 0;
+
+                while (reader.TryReadSecond(out aggregate))
+                {
+                    if (reader.RecordsRead - lastProgressRecords >= 2000000)
+                    {
+                        lastProgressRecords = reader.RecordsRead;
+                        int percent = reader.Records > 0
+                            ? (int)Math.Min(99.0,
+                                100.0 * reader.RecordsRead / (double)reader.Records)
+                            : 0;
+
+                        UpdateStatusLine(
+                            statusPrefix +
+                            " | VALIDATE " +
+                            percent.ToString() + "%");
+                    }
+                }
+
+                ScidMeta metaAfter = GetMeta(path);
+                DateTime writeAfter = File.GetLastWriteTimeUtc(path);
+
+                if (metaAfter.Length != metaBefore.Length ||
+                    metaAfter.Records != metaBefore.Records ||
+                    metaAfter.FirstDateTime != metaBefore.FirstDateTime ||
+                    metaAfter.LastDateTime != metaBefore.LastDateTime ||
+                    writeAfter != writeBefore)
+                {
+                    throw new IOException(
+                        "SOURCE_CHANGED_DURING_VALIDATION: the SCID source changed " +
+                        "while the preflight scan was running.");
+                }
+
+                return new ScidFileValidation
+                {
+                    Records = metaBefore.Records,
+                    FirstDateTime = metaBefore.FirstDateTime,
+                    LastDateTime = metaBefore.LastDateTime,
+                    Length = metaBefore.Length,
+                    WriteTimeUtcTicks = writeBefore.Ticks,
+                    OutOfOrderRecords = reader.OutOfOrderRecords,
+                    RichRecords = reader.RichRecords,
+                    ControlOpenRecords = reader.ControlOpenRecords,
+                    UnclassifiedVolumeRecords = reader.UnclassifiedVolumeRecords,
+                    RichPercent = Percent(reader.RichRecords, metaBefore.Records),
+                    ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
+                };
+            }
+        }
+
+        public static ScidPairValidation ValidatePair(
+            string sourcePath,
+            string targetPath,
+            double scale,
+            string statusPrefix)
+        {
+            DateTime started = DateTime.UtcNow;
+            ScidMeta sourceMetaBefore = GetMeta(sourcePath);
+            ScidMeta targetMetaBefore = GetMeta(targetPath);
+            DateTime sourceWriteBefore = File.GetLastWriteTimeUtc(sourcePath);
+            DateTime targetWriteBefore = File.GetLastWriteTimeUtc(targetPath);
+
+            if (sourceMetaBefore.Records <= 0 || targetMetaBefore.Records <= 0)
+                throw new IOException(
+                    "Pair validation requires non-empty SCID source and target files.");
+
+            long targetFirstSecond = targetMetaBefore.FirstDateTime / 1000000L;
+            long targetLastSecond = targetMetaBefore.LastDateTime / 1000000L;
+            long sourceFirstSecond = sourceMetaBefore.FirstDateTime / 1000000L;
+            long sourceLastSecond = sourceMetaBefore.LastDateTime / 1000000L;
+
+            long sourceOverlapSeconds = 0;
+            long targetOverlapSeconds = 0;
+            long commonSeconds = 0;
+            long sourceOnlySeconds = 0;
+            long targetOnlySeconds = 0;
+            long commonVolumeEqualSeconds = 0;
+            long commonBidEqualSeconds = 0;
+            long commonAskEqualSeconds = 0;
+            long commonLastPriceEqualSeconds = 0;
+            long sourceOverlapVolume = 0;
+            long targetOverlapVolume = 0;
+
+            using (var source = new SequentialRecordReader(sourcePath))
+            using (var target = new SequentialRecordReader(targetPath))
+            {
+                SecondAggregate sourceSecond;
+                SecondAggregate targetSecond;
+                bool haveSource = source.TryReadSecond(out sourceSecond);
+                bool haveTarget = target.TryReadSecond(out targetSecond);
+                long lastProgressRecords = 0;
+
+                while (haveSource || haveTarget)
+                {
+                    long progressRecords = source.RecordsRead + target.RecordsRead;
+                    if (progressRecords - lastProgressRecords >= 2000000)
+                    {
+                        lastProgressRecords = progressRecords;
+                        double denominator =
+                            (double)(source.Records + target.Records);
+                        int percent = denominator > 0
+                            ? (int)Math.Min(99.0,
+                                100.0 * progressRecords / denominator)
+                            : 0;
+
+                        UpdateStatusLine(
+                            statusPrefix +
+                            " | VALIDATE " +
+                            percent.ToString() + "%");
+                    }
+
+                    if (!haveTarget ||
+                        (haveSource && sourceSecond.Second < targetSecond.Second))
+                    {
+                        if (sourceSecond.Second >= targetFirstSecond &&
+                            sourceSecond.Second <= targetLastSecond)
+                        {
+                            sourceOverlapSeconds++;
+                            sourceOverlapVolume += sourceSecond.Volume;
+                            sourceOnlySeconds++;
+                        }
+
+                        haveSource = source.TryReadSecond(out sourceSecond);
+                        continue;
+                    }
+
+                    if (!haveSource || targetSecond.Second < sourceSecond.Second)
+                    {
+                        if (targetSecond.Second >= sourceFirstSecond &&
+                            targetSecond.Second <= sourceLastSecond)
+                        {
+                            targetOverlapSeconds++;
+                            targetOverlapVolume += targetSecond.Volume;
+                            targetOnlySeconds++;
+                        }
+
+                        haveTarget = target.TryReadSecond(out targetSecond);
+                        continue;
+                    }
+
+                    // Both feeds have data in this second.
+                    sourceOverlapSeconds++;
+                    targetOverlapSeconds++;
+                    sourceOverlapVolume += sourceSecond.Volume;
+                    targetOverlapVolume += targetSecond.Volume;
+                    commonSeconds++;
+
+                    if (sourceSecond.Volume == targetSecond.Volume)
+                        commonVolumeEqualSeconds++;
+                    if (sourceSecond.BidVolume == targetSecond.BidVolume)
+                        commonBidEqualSeconds++;
+                    if (sourceSecond.AskVolume == targetSecond.AskVolume)
+                        commonAskEqualSeconds++;
+
+                    double scaledClose =
+                        (double)sourceSecond.LastClose * scale;
+
+                    if (Math.Abs(scaledClose - (double)targetSecond.LastClose) <= 0.001)
+                        commonLastPriceEqualSeconds++;
+
+                    haveSource = source.TryReadSecond(out sourceSecond);
+                    haveTarget = target.TryReadSecond(out targetSecond);
+                }
+
+                ScidMeta sourceMetaAfter = GetMeta(sourcePath);
+                ScidMeta targetMetaAfter = GetMeta(targetPath);
+                DateTime sourceWriteAfter = File.GetLastWriteTimeUtc(sourcePath);
+                DateTime targetWriteAfter = File.GetLastWriteTimeUtc(targetPath);
+
+                if (sourceMetaAfter.Length != sourceMetaBefore.Length ||
+                    sourceMetaAfter.Records != sourceMetaBefore.Records ||
+                    sourceMetaAfter.FirstDateTime != sourceMetaBefore.FirstDateTime ||
+                    sourceMetaAfter.LastDateTime != sourceMetaBefore.LastDateTime ||
+                    sourceWriteAfter != sourceWriteBefore)
+                {
+                    throw new IOException(
+                        "SOURCE_CHANGED_DURING_VALIDATION: the SC Data source changed " +
+                        "while the preflight comparison was running.");
+                }
+
+                if (targetMetaAfter.Length != targetMetaBefore.Length ||
+                    targetMetaAfter.Records != targetMetaBefore.Records ||
+                    targetMetaAfter.FirstDateTime != targetMetaBefore.FirstDateTime ||
+                    targetMetaAfter.LastDateTime != targetMetaBefore.LastDateTime ||
+                    targetWriteAfter != targetWriteBefore)
+                {
+                    throw new IOException(
+                        "TARGET_CHANGED_DURING_VALIDATION: the Rithmic target changed " +
+                        "while the preflight comparison was running.");
+                }
+
+                long overlapDenominator =
+                    Math.Max(sourceOverlapSeconds, targetOverlapSeconds);
+
+                long volumeBase =
+                    Math.Max(sourceOverlapVolume, targetOverlapVolume);
+
+                double aggregateVolumeDifferencePercent =
+                    volumeBase > 0
+                    ? 100.0 * Math.Abs(
+                        (double)sourceOverlapVolume -
+                        (double)targetOverlapVolume) /
+                        (double)volumeBase
+                    : 0.0;
+
+                return new ScidPairValidation
+                {
+                    SourceRecords = sourceMetaBefore.Records,
+                    TargetRecords = targetMetaBefore.Records,
+                    SourceFirstDateTime = sourceMetaBefore.FirstDateTime,
+                    SourceLastDateTime = sourceMetaBefore.LastDateTime,
+                    TargetFirstDateTime = targetMetaBefore.FirstDateTime,
+                    TargetLastDateTime = targetMetaBefore.LastDateTime,
+                    SourceLength = sourceMetaBefore.Length,
+                    TargetLength = targetMetaBefore.Length,
+                    SourceWriteTimeUtcTicks = sourceWriteBefore.Ticks,
+                    TargetWriteTimeUtcTicks = targetWriteBefore.Ticks,
+
+                    SourceOutOfOrderRecords = source.OutOfOrderRecords,
+                    TargetOutOfOrderRecords = target.OutOfOrderRecords,
+                    SourceRichRecords = source.RichRecords,
+                    TargetRichRecords = target.RichRecords,
+                    SourceControlOpenRecords = source.ControlOpenRecords,
+                    TargetControlOpenRecords = target.ControlOpenRecords,
+                    SourceUnclassifiedVolumeRecords = source.UnclassifiedVolumeRecords,
+                    TargetUnclassifiedVolumeRecords = target.UnclassifiedVolumeRecords,
+
+                    SourceOverlapSeconds = sourceOverlapSeconds,
+                    TargetOverlapSeconds = targetOverlapSeconds,
+                    CommonSeconds = commonSeconds,
+                    SourceOnlySeconds = sourceOnlySeconds,
+                    TargetOnlySeconds = targetOnlySeconds,
+                    CommonVolumeEqualSeconds = commonVolumeEqualSeconds,
+                    CommonBidEqualSeconds = commonBidEqualSeconds,
+                    CommonAskEqualSeconds = commonAskEqualSeconds,
+                    CommonLastPriceEqualSeconds = commonLastPriceEqualSeconds,
+                    SourceOverlapVolume = sourceOverlapVolume,
+                    TargetOverlapVolume = targetOverlapVolume,
+
+                    CommonCoveragePercent =
+                        Percent(commonSeconds, overlapDenominator),
+                    VolumeMatchPercent =
+                        Percent(commonVolumeEqualSeconds, commonSeconds),
+                    BidMatchPercent =
+                        Percent(commonBidEqualSeconds, commonSeconds),
+                    AskMatchPercent =
+                        Percent(commonAskEqualSeconds, commonSeconds),
+                    LastPriceMatchPercent =
+                        Percent(commonLastPriceEqualSeconds, commonSeconds),
+                    AggregateVolumeDifferencePercent =
+                        aggregateVolumeDifferencePercent,
+                    SourceRichPercent =
+                        Percent(source.RichRecords, sourceMetaBefore.Records),
+                    TargetRichPercent =
+                        Percent(target.RichRecords, targetMetaBefore.Records),
+                    ElapsedSeconds =
+                        (DateTime.UtcNow - started).TotalSeconds
+                };
+            }
         }
 
         public static ScaleInference InferScale(string sourcePath, string targetPath)
@@ -693,6 +1200,7 @@ namespace SierraHistoryBridge
             double scale,
             string backupDirectory,
             bool preserveTargetTail,
+            bool createRithmicBaseline,
             string statusPrefix)
         {
             DateTime started = DateTime.UtcNow;
@@ -1106,13 +1614,45 @@ namespace SierraHistoryBridge
                 if (File.Exists(targetPath))
                 {
                     Directory.CreateDirectory(backupDirectory);
-                    string backupPath =
-                        Path.Combine(backupDirectory, Path.GetFileName(targetPath) + ".bak");
 
-                    if (File.Exists(backupPath))
-                        File.Delete(backupPath);
+                    string baselinePath =
+                        Path.Combine(
+                            backupDirectory,
+                            Path.GetFileName(targetPath) +
+                            ".rithmic-baseline.bak");
 
-                    File.Replace(temporaryPath, targetPath, backupPath, true);
+                    if (createRithmicBaseline &&
+                        !File.Exists(baselinePath))
+                    {
+                        // Preserve the untouched Rithmic file with same-volume
+                        // moves instead of copying a multi-gigabyte SCID.
+                        File.Move(targetPath, baselinePath);
+
+                        try
+                        {
+                            File.Move(temporaryPath, targetPath);
+                        }
+                        catch
+                        {
+                            if (!File.Exists(targetPath) &&
+                                File.Exists(baselinePath))
+                                File.Move(baselinePath, targetPath);
+
+                            throw;
+                        }
+                    }
+                    else
+                    {
+                        string backupPath =
+                            Path.Combine(
+                                backupDirectory,
+                                Path.GetFileName(targetPath) + ".bak");
+
+                        if (File.Exists(backupPath))
+                            File.Delete(backupPath);
+
+                        File.Replace(temporaryPath, targetPath, backupPath, true);
+                    }
                 }
                 else
                 {

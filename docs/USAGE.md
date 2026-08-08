@@ -170,3 +170,26 @@ Rithmic target is left untouched.
 Only a live-sensitive contract can show `SCID live-merge`, and the log records
 the source total, source records used, preserved Rithmic records, and the
 handoff timestamp and number of matching trade seconds used to verify it.
+
+## Preflight data comparison
+
+Existing Rithmic SCID data is used as an independent validation source before it
+is replaced. The bridge shows a preflight line similar to:
+
+```text
+NQZ21-CME -> NQZ1.CME | STRONG | coverage=99.987% | volume/sec=99.562% | last-price=99.852% | aggregate-volume-diff=0.000153%
+```
+
+If the SC Data source is incomplete or the feeds disagree beyond the normal
+comparison thresholds, the bridge stops for that contract and asks for a
+decision before any history file is changed.
+
+The safe default is always to keep the existing target and defer the SCID
+update. A temporary SC Data/Rithmic merge is offered only when the overlap is
+strongly validated and Rithmic contributes later coverage without an earlier
+coverage segment that would be lost.
+
+The first time an existing Rithmic SCID is replaced, the bridge preserves an
+immutable `<SC-source>__<Rithmic-target>.rithmic-baseline.bak` when the target has not previously been
+managed. Future comparisons prefer that baseline. The normal `.bak` file
+continues to hold the immediately previous target and may change on later runs.

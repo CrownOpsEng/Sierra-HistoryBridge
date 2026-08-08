@@ -1,5 +1,5 @@
 SIERRA HISTORY BRIDGE
-Version 0.0.13
+Version 0.0.14
 
 Updates Rithmic-named Sierra Chart history files from matching SC Data files.
 
@@ -29,3 +29,11 @@ LOGS
   SierraChart\Data\SCID_Bridge_Logs
 
 The backup directory can contain both .scid.bak and .dly.bak files.
+
+DATA VALIDATION
+---------------
+When both SC Data and Rithmic SCID files exist, Sierra History Bridge compares
+the overlapping data before replacement. Incomplete coverage, timestamp-order
+problems, or material feed differences are reported before history files are
+changed. Ambiguous cases default to keeping the existing Rithmic file and
+waiting for review.

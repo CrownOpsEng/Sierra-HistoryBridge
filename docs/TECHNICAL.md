@@ -228,3 +228,70 @@ temporary output to be discarded.
 Historical sources are also deferred when a matching Historical Daily source
 shows that the SCID file has not yet reached the end of the contract, or when
 the SCID source was modified within the last five seconds.
+
+## SCID preflight validation
+
+When both an SC Data source and an existing Rithmic SCID target are available,
+the bridge compares them before any history file is replaced.
+
+The comparison is performed over the complete overlapping time range at
+one-second resolution. It records:
+
+- structural validity and record alignment
+- source and target timestamp ordering
+- first and last timestamps and record counts
+- overlap coverage in seconds
+- exact per-second total-volume agreement
+- exact per-second bid-volume and ask-volume agreement
+- exact last-price agreement after the verified raw-price scale is applied
+- aggregate overlap-volume difference
+- the proportion of records containing bid/ask spread information
+
+A strong comparison currently requires at least 100 common seconds, at least
+99% common-second coverage, at least 98% exact per-second volume agreement, at
+least 99% exact last-price agreement, and no more than 0.5% aggregate overlap
+volume difference. These thresholds classify cross-feed consistency; a failure
+does not by itself prove that either feed is corrupt.
+
+Structural faults, out-of-order source records, incomplete coverage, or weak
+cross-feed agreement are surfaced before conversion. Ambiguous cases require a
+user decision. With unattended `-Yes` operation, ambiguous SCID work is deferred
+rather than forced.
+
+### Incomplete historical sources
+
+If Historical Daily coverage or the existing Rithmic target shows that an SCID
+source ends early, the bridge does not silently replace the more complete
+Rithmic file.
+
+If the overlapping data validates strongly and the Rithmic target only extends
+later than the source, the interactive choices are:
+
+1. keep the Rithmic target and defer the SCID update (default)
+2. create a temporary merge using verified SC Data for the overlap and Rithmic
+   only beyond the source boundary
+3. cancel the run
+
+A temporary merge is deliberately not marked current in bridge state. A later
+run re-evaluates the contract and rebuilds it when the SC Data source is
+complete.
+
+The bridge also rechecks source and target metadata after validation and after
+conversion. If either file changes during either operation, the temporary work
+is discarded and the SCID update is deferred.
+
+### Independent Rithmic baseline
+
+On the first bridge replacement of an existing Rithmic SCID target, the bridge
+can preserve an immutable validation copy in `SCID_Bridge_Backups` using the
+suffix `<SC-source>__<Rithmic-target>.rithmic-baseline.bak`. Later preflight runs prefer this baseline over a
+target that has already been modified by the bridge, avoiding circular
+validation against the bridge's own prior output.
+
+The existing `.bak` file remains the rolling immediately-previous target used
+for ordinary recovery. The immutable Rithmic baseline is not overwritten.
+
+For installations that were already processed by an older bridge version and
+do not have an immutable baseline, the current target can still be compared but
+is labeled `managed target`; it is not presented as independent Rithmic
+evidence.

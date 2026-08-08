@@ -1,10 +1,30 @@
 # Changelog
 
-## v0.0.13 - 2026-08-07
+## v0.0.14 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- previously managed targets without a baseline are labeled as non-independent validation references
+
+- later preflight checks prefer the immutable Rithmic baseline instead of validating against bridge-generated output
+
+- first-use Rithmic SCID targets are preserved as immutable `.rithmic-baseline.bak` validation references
+
+- live SCID overlap validation runs after disconnect/close and before conversion
+
+- ambiguous preflight results require an interactive decision; unattended runs defer them
+
+- temporary historical merges remain pending and are rebuilt when SC Data becomes complete
+
+- strongly validated incomplete sources can optionally use a temporary SC Data/Rithmic tail merge
+
+- incomplete historical SCID sources no longer silently replace more complete Rithmic targets
+
+- preflight reports timestamp coverage, ordering, per-second volume, bid/ask volume, last-price agreement, aggregate-volume difference, and data richness
+
+- added full SCID preflight comparison between overlapping SC Data and Rithmic files before replacement
 
 - historical SCID sources that have not reached the matching Daily contract endpoint are deferred
 

@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge contributors"
-$Version = "0.0.13"
+$Version = "0.0.14"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -136,7 +136,7 @@ function Get-ExistingInstallation {
         }
     }
 
-    # Development builds before v0.0.13 stored program files below the mutable
+    # Development builds before v0.0.14 stored program files below the mutable
     # application-data folder. Detect them so setup can migrate cleanly.
     $legacyApp = Join-Path $UserDataRoot "app"
     if (Test-Path -LiteralPath (Join-Path $legacyApp "SierraHistoryBridge.ps1")) {
@@ -449,7 +449,14 @@ function Test-InstalledPayload([string]$InstallDirectory) {
     ) | Out-Null
 
     if ($parseErrors.Count -gt 0) {
-        throw "The installed application script did not pass PowerShell syntax validation: $($parseErrors[0].Message)"
+        $firstParseError = $parseErrors[0]
+        $parseLine = $firstParseError.Extent.StartLineNumber
+        $parseColumn = $firstParseError.Extent.StartColumnNumber
+
+        throw (
+            "The installed application script did not pass PowerShell syntax validation " +
+            "at line $parseLine, column $parseColumn`: " +
+            $firstParseError.Message)
     }
 
     # Compile the SCID engine once during installation/repair so a compiler

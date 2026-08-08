@@ -89,7 +89,7 @@ You can also manually remove:
 
 ## Setup reports a C# compiler or assembly-reference error
 
-Use the current v0.0.13 package and rerun `setup.cmd`.
+Use the current v0.0.14 package and rerun `setup.cmd`.
 
 The installed SCID engine is compiled with the stock Windows PowerShell 5.1
 `Add-Type -Path` behavior. The converter does not require custom compiler

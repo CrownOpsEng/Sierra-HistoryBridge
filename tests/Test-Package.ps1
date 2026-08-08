@@ -168,7 +168,7 @@ foreach ($integrityToken in @(
     'SOURCE_OUT_OF_ORDER',
     'Historical replacement size validation failed',
     'Get-HistoricalScidDeferReason',
-    'SCID live-merge',
+    'live-merge',
     'SCID replace'
 )) {
     if ($converterText -notlike "*$integrityToken*" -and
@@ -179,6 +179,28 @@ foreach ($integrityToken in @(
 
 if ($appText -match 'tailGuardSeconds') {
     throw "SCID integrity does not permit a fixed time-gap tail guard."
+}
+
+foreach ($preflightToken in @(
+    'ValidatePair',
+    'ValidateFile',
+    'Get-ScidPairGrade',
+    'SCID preflight validation',
+    'temporary-merge',
+    'Keep the Rithmic target and defer',
+    'SOURCE_CHANGED_DURING_VALIDATION',
+    'TARGET_CHANGED_DURING_VALIDATION',
+    'rithmic-baseline.bak',
+    'Get-ScidValidationReference'
+)) {
+    if ($converterText -notlike "*$preflightToken*" -and
+        $appText -notlike "*$preflightToken*") {
+        throw "SCID preflight regression: missing $preflightToken"
+    }
+}
+
+if ($appText -match '(?ms)(?<!\$)\(\s*(if|foreach|for|switch|try|while|do)\b') {
+    throw "PowerShell syntax regression: a statement block is being used directly inside parenthesized expression syntax."
 }
 
 $required = @(

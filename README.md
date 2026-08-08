@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.13 — pre-stable**
+**Version 0.0.14 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -140,7 +140,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.13 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.14 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -200,3 +200,20 @@ For historical contracts with matching Daily data, the bridge also checks that
 the intraday source reaches the end of the Daily contract history. A source
 that is still being downloaded is deferred rather than converted as a partial
 historical file.
+
+## Validation before replacement
+
+When an SC Data SCID and an existing Rithmic SCID overlap, the bridge uses both
+files to validate the proposed history update before replacing anything. It
+compares timestamp coverage, ordering, per-second volume, bid/ask volume,
+last price after scale conversion, aggregate volume, and data richness.
+
+Incomplete downloads and material cross-feed differences are reported before
+processing. The default action is to leave the existing Rithmic file untouched.
+When the overlap validates strongly and Rithmic only supplies a later missing
+segment, an optional temporary merge can be used without marking the contract
+complete; the bridge will revisit it on the next run.
+
+For repeatable cross-feed validation, the first untouched Rithmic target is
+preserved separately as an immutable `<SC-source>__<Rithmic-target>.rithmic-baseline.bak` before replacement.
+The ordinary `.bak` remains a rolling recovery backup.

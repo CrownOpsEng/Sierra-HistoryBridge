@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.13"
+$Version = "0.0.14"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -313,31 +313,302 @@ function Get-HistoricalScidDeferReason($Candidate) {
     }
     catch { }
 
-    if ($Candidate.DailyAvailable -and
-        $Candidate.DailyLastDateTicks -gt 0 -and
-        $Candidate.Last -gt 0) {
+    return $null
+}
 
-        $scidLast =
-            Convert-ScDateTimeToUtc `
-                ([long]$Candidate.Last)
+function Format-ScidDate([long]$Value) {
+    $date = Convert-ScDateTimeToUtc $Value
+    if ($date) {
+        return $date.ToString("yyyy-MM-dd")
+    }
+
+    return "unknown"
+}
+
+function Get-ScidPairGrade($Validation) {
+    if ($null -eq $Validation) {
+        return "NONE"
+    }
+
+    if ($Validation.SourceOutOfOrderRecords -gt 0) {
+        return "SOURCE-ANOMALY"
+    }
+
+    if ($Validation.CommonSeconds -lt 100) {
+        return "INSUFFICIENT"
+    }
+
+    if ($Validation.CommonCoveragePercent -ge 99.0 -and
+        $Validation.VolumeMatchPercent -ge 98.0 -and
+        $Validation.LastPriceMatchPercent -ge 99.0 -and
+        $Validation.AggregateVolumeDifferencePercent -le 0.5) {
+
+        return "STRONG"
+    }
+
+    if ($Validation.CommonCoveragePercent -ge 95.0 -and
+        $Validation.VolumeMatchPercent -ge 90.0 -and
+        $Validation.LastPriceMatchPercent -ge 95.0 -and
+        $Validation.AggregateVolumeDifferencePercent -le 2.0) {
+
+        return "WARNING"
+    }
+
+    return "POOR"
+}
+
+function Get-ScidCoverageAssessment($Candidate, $Validation) {
+    $sourceLast =
+        Convert-ScDateTimeToUtc ([long]$Candidate.Last)
+
+    $sourceFirst =
+        Convert-ScDateTimeToUtc ([long]$Candidate.First)
+
+    $targetLast = $null
+    $targetFirst = $null
+
+    if ($Validation) {
+        $targetLast =
+            Convert-ScDateTimeToUtc (
+                [long]$Validation.TargetLastDateTime)
+
+        $targetFirst =
+            Convert-ScDateTimeToUtc (
+                [long]$Validation.TargetFirstDateTime)
+    }
+
+    $dailyLast = $null
+    if ($Candidate.DailyAvailable -and
+        $Candidate.DailyLastDateTicks -gt 0) {
 
         $dailyLast =
             [datetime]::MinValue.AddTicks(
                 [long]$Candidate.DailyLastDateTicks)
+    }
 
-        if ($scidLast -and
-            $scidLast.Date -lt
-                $dailyLast.Date.AddDays(-1)) {
+    $sourceIncomplete = $false
+    $targetExtendsLater = $false
+    $targetStartsEarlier = $false
+    $reasons =
+        New-Object System.Collections.Generic.List[string]
 
-            return (
-                "SCID ends {0:yyyy-MM-dd}; Daily history ends {1:yyyy-MM-dd}" -f
-                $scidLast,
-                $dailyLast)
+    if ($sourceLast -and $dailyLast -and
+        $sourceLast.Date -lt $dailyLast.Date.AddDays(-1)) {
+
+        $sourceIncomplete = $true
+        $reasons.Add(
+            "source ends $($sourceLast.ToString('yyyy-MM-dd')); Daily history ends $($dailyLast.ToString('yyyy-MM-dd'))")
+    }
+
+    if ($sourceLast -and $targetLast -and
+        $targetLast -gt $sourceLast.AddDays(1)) {
+
+        $targetExtendsLater = $true
+        $reasons.Add(
+            "Rithmic target extends to $($targetLast.ToString('yyyy-MM-dd'))")
+    }
+
+    if ($sourceFirst -and $targetFirst -and
+        $sourceFirst -gt $targetFirst.AddDays(1)) {
+
+        $targetStartsEarlier = $true
+        $reasons.Add(
+            "Rithmic target starts earlier at $($targetFirst.ToString('yyyy-MM-dd'))")
+    }
+
+    return [pscustomobject]@{
+        SourceIncomplete = $sourceIncomplete
+        TargetExtendsLater = $targetExtendsLater
+        TargetStartsEarlier = $targetStartsEarlier
+        SourceFirst = $sourceFirst
+        SourceLast = $sourceLast
+        TargetFirst = $targetFirst
+        TargetLast = $targetLast
+        DailyLast = $dailyLast
+        Summary = ($reasons -join "; ")
+    }
+}
+
+function Get-ScidValidationSummary($Candidate) {
+    if ($Candidate.ScidDeferred) {
+        return "DEFERRED | $($Candidate.ScidDeferReason)"
+    }
+
+    if (-not $Candidate.ScidNeeded) {
+        return "current"
+    }
+
+    if ($Candidate.LiveScidUpdate) {
+        return "LIVE | overlap validation after disconnect/close"
+    }
+
+    if (-not $Candidate.TargetStatus.Exists) {
+        if ($Candidate.ScidCoverage -and
+            $Candidate.ScidCoverage.SourceIncomplete) {
+            return "INCOMPLETE SOURCE | no Rithmic target available for comparison"
+        }
+
+        return "CREATE | no Rithmic target available for comparison"
+    }
+
+    if ($Candidate.TargetStatus.Kind -ne "data") {
+        return "TARGET $($Candidate.TargetStatus.Kind.ToUpperInvariant()) | source will be used only if complete"
+    }
+
+    $v = $Candidate.ScidValidation
+    if (-not $v) {
+        return "validation unavailable"
+    }
+
+    $coverage =
+        "coverage={0:0.000}%" -f
+        $v.CommonCoveragePercent
+
+    $volume =
+        "volume/sec={0:0.000}%" -f
+        $v.VolumeMatchPercent
+
+    $price =
+        "last-price={0:0.000}%" -f
+        $v.LastPriceMatchPercent
+
+    $aggregate =
+        "aggregate-volume-diff={0:0.000000}%" -f
+        $v.AggregateVolumeDifferencePercent
+
+    $reference =
+        if ($Candidate.ScidValidationReference) {
+            "ref=$($Candidate.ScidValidationReference.Kind)"
+        }
+        else {
+            "ref=unknown"
+        }
+
+    return (
+        "$($Candidate.ScidPairGrade) | $reference | $coverage | $volume | $price | $aggregate")
+}
+
+
+function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
+    if (-not $Candidate.TargetStatus.Exists -or
+        $Candidate.TargetStatus.Kind -ne "data") {
+
+        return [pscustomobject]@{
+            Path = $null
+            Kind = "none"
+            Independent = $false
+            CreateBaseline = $false
         }
     }
 
-    return $null
+    $backupDirectory =
+        Join-Path $DataFolder "SCID_Bridge_Backups"
+
+    $baselineName =
+        $Candidate.SourceName +
+        "__" +
+        $Candidate.TargetName +
+        ".rithmic-baseline.bak"
+
+    $baselinePath =
+        Join-Path `
+            $backupDirectory `
+            $baselineName
+
+    if (Test-Path -LiteralPath $baselinePath -PathType Leaf) {
+        return [pscustomobject]@{
+            Path = $baselinePath
+            Kind = "Rithmic baseline"
+            Independent = $true
+            CreateBaseline = $false
+        }
+    }
+
+    $previouslyManaged = $false
+
+    if ($Candidate.PreviousState) {
+        $managedProperty =
+            $Candidate.PreviousState.PSObject.Properties[
+                "scid_managed_by_bridge"]
+
+        if ($managedProperty) {
+            $previouslyManaged =
+                [bool]$managedProperty.Value
+        }
+        elseif ($Candidate.PreviousState.source_signature) {
+            # Legacy state did not record provenance explicitly. A saved SCID
+            # source signature is the conservative signal that the target may
+            # already have been bridge-managed.
+            $previouslyManaged = $true
+        }
+    }
+
+    if (-not $previouslyManaged) {
+        return [pscustomobject]@{
+            Path = $Candidate.Target
+            Kind = "current Rithmic target"
+            Independent = $true
+            CreateBaseline = $true
+        }
+    }
+
+    return [pscustomobject]@{
+        Path = $Candidate.Target
+        Kind = "managed target"
+        Independent = $false
+        CreateBaseline = $false
+    }
 }
+
+function Test-ScidPreflightSnapshotCurrent($Candidate) {
+    try {
+        $sourceMeta =
+            [SierraHistoryBridge.ScidBridge]::GetMeta(
+                $Candidate.Source)
+
+        $sourceWriteTicks =
+            (Get-Item -LiteralPath $Candidate.Source).LastWriteTimeUtc.Ticks
+
+        if ($Candidate.ScidValidation) {
+            $referencePath =
+                $Candidate.ScidValidationReference.Path
+
+            $targetMeta =
+                [SierraHistoryBridge.ScidBridge]::GetMeta(
+                    $referencePath)
+
+            $targetWriteTicks =
+                (Get-Item -LiteralPath $referencePath).LastWriteTimeUtc.Ticks
+
+            return (
+                $sourceMeta.Records -eq $Candidate.ScidValidation.SourceRecords -and
+                $sourceMeta.FirstDateTime -eq $Candidate.ScidValidation.SourceFirstDateTime -and
+                $sourceMeta.LastDateTime -eq $Candidate.ScidValidation.SourceLastDateTime -and
+                $sourceMeta.Length -eq $Candidate.ScidValidation.SourceLength -and
+                $sourceWriteTicks -eq $Candidate.ScidValidation.SourceWriteTimeUtcTicks -and
+                $targetMeta.Records -eq $Candidate.ScidValidation.TargetRecords -and
+                $targetMeta.FirstDateTime -eq $Candidate.ScidValidation.TargetFirstDateTime -and
+                $targetMeta.LastDateTime -eq $Candidate.ScidValidation.TargetLastDateTime -and
+                $targetMeta.Length -eq $Candidate.ScidValidation.TargetLength -and
+                $targetWriteTicks -eq $Candidate.ScidValidation.TargetWriteTimeUtcTicks)
+        }
+
+        if ($Candidate.ScidFileValidation) {
+            return (
+                $sourceMeta.Records -eq $Candidate.ScidFileValidation.Records -and
+                $sourceMeta.FirstDateTime -eq $Candidate.ScidFileValidation.FirstDateTime -and
+                $sourceMeta.LastDateTime -eq $Candidate.ScidFileValidation.LastDateTime -and
+                $sourceMeta.Length -eq $Candidate.ScidFileValidation.Length -and
+                $sourceWriteTicks -eq $Candidate.ScidFileValidation.WriteTimeUtcTicks)
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 
 function Get-CandidateSourceDisplay($Candidate) {
     if ($Candidate.HasScid -and $Candidate.SourceName) {
@@ -1210,6 +1481,9 @@ function Invoke-SierraHistoryBridge {
 
     $ready = @()
     $deferredScid = @()
+    $decisionCandidates = @()
+    $preflightLines =
+        New-Object System.Collections.Generic.List[string]
     $unchanged = 0
     $unverified = 0
 
@@ -1378,6 +1652,67 @@ function Invoke-SierraHistoryBridge {
                 -NotePropertyName ScidDeferReason `
                 -NotePropertyValue $null
 
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidValidation `
+                -NotePropertyValue $null
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidFileValidation `
+                -NotePropertyValue $null
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidPairGrade `
+                -NotePropertyValue "NONE"
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidCoverage `
+                -NotePropertyValue $null
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidNeedsDecision `
+                -NotePropertyValue $false
+
+        $initialScidAction =
+            if ($candidate.LiveScidUpdate) {
+                "live-merge"
+            }
+            else {
+                "replace"
+            }
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidAction `
+                -NotePropertyValue $initialScidAction
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidTemporaryMerge `
+                -NotePropertyValue $false
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidValidationReference `
+                -NotePropertyValue (
+                    Get-ScidValidationReference `
+                        $candidate `
+                        $resolvedDataFolder)
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName CreateRithmicBaseline `
+                -NotePropertyValue $false
+
+        if ($candidate.ScidValidationReference) {
+            $candidate.CreateRithmicBaseline =
+                [bool]$candidate.ScidValidationReference.CreateBaseline
+        }
+
         if ($candidate.ScidNeeded) {
             $deferReason =
                 Get-HistoricalScidDeferReason `
@@ -1388,16 +1723,435 @@ function Invoke-SierraHistoryBridge {
                 $candidate.ScidSkipped = $true
                 $candidate.ScidDeferReason =
                     $deferReason
-
+                $candidate.ScidAction = "defer"
                 $candidate.ScidNeeded = $false
                 $deferredScid += $candidate
             }
+        }
+
+        if ($candidate.HasScid -and
+            -not $candidate.ScidDeferred) {
+
+            if ($candidate.ScidNeeded -and
+                -not $candidate.LiveScidUpdate -and
+                $candidate.TargetStatus.Exists -and
+                $candidate.TargetStatus.Kind -eq "data" -and
+                $scales.ContainsKey($candidate.Group)) {
+
+                try {
+                    $validationPrefix =
+                        "VALIDATE {0} <-> {1}" -f
+                        (Get-CandidateSourceDisplay $candidate),
+                        (Get-CandidateTargetDisplay $candidate)
+
+                    $candidate.ScidValidation =
+                        [SierraHistoryBridge.ScidBridge]::ValidatePair(
+                            $candidate.Source,
+                            $candidate.ScidValidationReference.Path,
+                            [double]$scales[$candidate.Group],
+                            $validationPrefix)
+
+                    [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                        "$validationPrefix | OK")
+
+                    $candidate.ScidPairGrade =
+                        Get-ScidPairGrade `
+                            $candidate.ScidValidation
+
+                    $candidate.Records =
+                        [long]$candidate.ScidValidation.SourceRecords
+                    $candidate.First =
+                        [long]$candidate.ScidValidation.SourceFirstDateTime
+                    $candidate.Last =
+                        [long]$candidate.ScidValidation.SourceLastDateTime
+                    $candidate.Size =
+                        [long]$candidate.ScidValidation.SourceLength
+                    $candidate.ModifiedTicks =
+                        [long]$candidate.ScidValidation.SourceWriteTimeUtcTicks
+                    $candidate.Signature =
+                        "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+                }
+                catch {
+                    [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                        "VALIDATE $(Get-CandidateSourceDisplay $candidate) | DEFERRED | $($_.Exception.Message)")
+
+                    $candidate.ScidDeferred = $true
+                    $candidate.ScidSkipped = $true
+                    $candidate.ScidDeferReason =
+                        $_.Exception.Message
+                    $candidate.ScidAction = "defer"
+                    $candidate.ScidNeeded = $false
+                    $deferredScid += $candidate
+                }
+            }
+
+            if ($candidate.ScidNeeded -and
+                -not $candidate.LiveScidUpdate -and
+                -not $candidate.ScidValidation) {
+
+                try {
+                    $fileValidationPrefix =
+                        "VALIDATE {0}" -f
+                        (Get-CandidateSourceDisplay $candidate)
+
+                    $candidate.ScidFileValidation =
+                        [SierraHistoryBridge.ScidBridge]::ValidateFile(
+                            $candidate.Source,
+                            $fileValidationPrefix)
+
+                    [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                        "$fileValidationPrefix | OK")
+
+                    $candidate.Records =
+                        [long]$candidate.ScidFileValidation.Records
+                    $candidate.First =
+                        [long]$candidate.ScidFileValidation.FirstDateTime
+                    $candidate.Last =
+                        [long]$candidate.ScidFileValidation.LastDateTime
+                    $candidate.Size =
+                        [long]$candidate.ScidFileValidation.Length
+                    $candidate.ModifiedTicks =
+                        [long]$candidate.ScidFileValidation.WriteTimeUtcTicks
+                    $candidate.Signature =
+                        "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+                }
+                catch {
+                    [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                        "VALIDATE $(Get-CandidateSourceDisplay $candidate) | DEFERRED | $($_.Exception.Message)")
+
+                    $candidate.ScidDeferred = $true
+                    $candidate.ScidSkipped = $true
+                    $candidate.ScidDeferReason =
+                        $_.Exception.Message
+                    $candidate.ScidAction = "defer"
+                    $candidate.ScidNeeded = $false
+                    $deferredScid += $candidate
+                }
+            }
+
+            $candidate.ScidCoverage =
+                Get-ScidCoverageAssessment `
+                    $candidate `
+                    $candidate.ScidValidation
+
+            if ($candidate.ScidNeeded -and
+                -not $candidate.LiveScidUpdate) {
+
+                $sourceOutOfOrder =
+                    if ($candidate.ScidValidation) {
+                        [long]$candidate.ScidValidation.SourceOutOfOrderRecords
+                    }
+                    elseif ($candidate.ScidFileValidation) {
+                        [long]$candidate.ScidFileValidation.OutOfOrderRecords
+                    }
+                    else {
+                        0
+                    }
+
+                $targetOutOfOrder =
+                    if ($candidate.ScidValidation) {
+                        [long]$candidate.ScidValidation.TargetOutOfOrderRecords
+                    }
+                    else {
+                        0
+                    }
+
+                $ambiguousCoverage =
+                    $candidate.ScidCoverage.TargetStartsEarlier -or
+                    (
+                        $candidate.ScidCoverage.TargetExtendsLater -and
+                        -not $candidate.ScidCoverage.SourceIncomplete -and
+                        -not $candidate.DailyAvailable
+                    )
+
+                $comparisonIssue =
+                    $candidate.ScidValidation -and
+                    $candidate.ScidPairGrade -ne "STRONG"
+
+                if ($sourceOutOfOrder -gt 0 -and
+                    (-not $candidate.TargetStatus.Exists -or
+                     $candidate.TargetStatus.Kind -ne "data")) {
+
+                    $candidate.ScidDeferred = $true
+                    $candidate.ScidSkipped = $true
+                    $candidate.ScidDeferReason =
+                        "source contains $sourceOutOfOrder out-of-order timestamp record(s)"
+                    $candidate.ScidAction = "defer"
+                    $candidate.ScidNeeded = $false
+                    $deferredScid += $candidate
+                }
+                elseif ($candidate.ScidCoverage.SourceIncomplete) {
+                    if ($candidate.TargetStatus.Exists -and
+                        $candidate.TargetStatus.Kind -eq "data") {
+
+                        $candidate.ScidNeedsDecision = $true
+                        $candidate.ScidAction = "decision"
+                        $decisionCandidates += $candidate
+                    }
+                    else {
+                        $candidate.ScidDeferred = $true
+                        $candidate.ScidSkipped = $true
+                        $candidate.ScidDeferReason =
+                            $candidate.ScidCoverage.Summary
+                        $candidate.ScidAction = "defer"
+                        $candidate.ScidNeeded = $false
+                        $deferredScid += $candidate
+                    }
+                }
+                elseif ($sourceOutOfOrder -gt 0 -or
+                    $ambiguousCoverage -or
+                    $comparisonIssue) {
+
+                    $candidate.ScidNeedsDecision = $true
+                    $candidate.ScidAction = "decision"
+                    $decisionCandidates += $candidate
+                }
+                elseif ($targetOutOfOrder -gt 0) {
+                    # The source is complete and the pair comparison is strong;
+                    # replacing the anomalous target is an unambiguous repair.
+                    $candidate.ScidAction = "replace"
+                }
+            }
+        }
+
+        if ($candidate.HasScid) {
+            $preflightLine =
+                "{0} -> {1} | {2}" -f
+                (Get-CandidateSourceDisplay $candidate),
+                (Get-CandidateTargetDisplay $candidate),
+                (Get-ScidValidationSummary $candidate)
+
+            if ($candidate.ScidCoverage -and
+                $candidate.ScidCoverage.Summary) {
+                $preflightLine +=
+                    " | $($candidate.ScidCoverage.Summary)"
+            }
+
+            if ($candidate.ScidValidation) {
+                $richness =
+                    " | rich source={0:0.00}% target={1:0.00}%" -f
+                    $candidate.ScidValidation.SourceRichPercent,
+                    $candidate.ScidValidation.TargetRichPercent
+
+                $preflightLine += $richness
+            }
+            elseif ($candidate.ScidFileValidation) {
+                $preflightLine +=
+                    " | source rich={0:0.00}%" -f
+                    $candidate.ScidFileValidation.RichPercent
+
+                if ($candidate.ScidFileValidation.OutOfOrderRecords -gt 0) {
+                    $preflightLine +=
+                        " | source out-of-order={0:N0}" -f
+                        $candidate.ScidFileValidation.OutOfOrderRecords
+                }
+            }
+
+            $preflightLines.Add($preflightLine)
         }
 
         if ($candidate.ScidNeeded -or
             $candidate.DailyNeeded) {
             $ready += $candidate
         }
+    }
+
+    $preflightLogPath = $null
+
+    if ($preflightLines.Count -gt 0) {
+        $preflightLogDirectory =
+            Join-Path $resolvedDataFolder "SCID_Bridge_Logs"
+
+        New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $preflightLogDirectory |
+            Out-Null
+
+        $preflightTimestamp =
+            Get-Date -Format "yyyyMMdd-HHmmss"
+
+        $preflightLogPath =
+            Join-Path `
+                $preflightLogDirectory `
+                "preflight-$preflightTimestamp.log"
+
+        $preflightOutput =
+            New-Object System.Collections.Generic.List[string]
+
+        $preflightOutput.Add(
+            "Sierra History Bridge v$Version - SCID preflight")
+        $preflightOutput.Add(
+            "Data folder: $resolvedDataFolder")
+        $preflightOutput.Add(
+            "Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+        $preflightOutput.Add(
+            "Strong-match thresholds: coverage >=99%, volume/sec >=98%, last-price >=99%, aggregate-volume-diff <=0.5%")
+        $preflightOutput.Add("")
+
+        foreach ($line in $preflightLines) {
+            $preflightOutput.Add($line)
+        }
+
+        $preflightOutput |
+            Set-Content `
+                -LiteralPath $preflightLogPath `
+                -Encoding UTF8
+
+        Write-Host
+        Write-Host "SCID preflight validation:"
+
+        foreach ($line in $preflightLines) {
+            Write-Host "  $line"
+        }
+
+        Write-Host "  Report: $preflightLogPath"
+    }
+
+    if ($decisionCandidates.Count -gt 0) {
+        Write-Host
+        Write-Host (
+            "{0} SCID update(s) require a decision before any history files are changed." -f
+            $decisionCandidates.Count) `
+            -ForegroundColor Yellow
+
+        foreach ($candidate in $decisionCandidates) {
+            Write-Host
+            Write-Host (
+                "Decision: {0} -> {1}" -f
+                (Get-CandidateSourceDisplay $candidate),
+                (Get-CandidateTargetDisplay $candidate)) `
+                -ForegroundColor Yellow
+
+            Write-Host (
+                "  Validation: {0}" -f
+                (Get-ScidValidationSummary $candidate))
+
+            if ($candidate.ScidCoverage -and
+                $candidate.ScidCoverage.Summary) {
+                Write-Host (
+                    "  Coverage:   {0}" -f
+                    $candidate.ScidCoverage.Summary)
+            }
+
+            if ($candidate.ScidValidation) {
+                Write-Host (
+                    "  Records:    source {0:N0} | Rithmic {1:N0}" -f
+                    $candidate.ScidValidation.SourceRecords,
+                    $candidate.ScidValidation.TargetRecords)
+
+                if ($candidate.ScidValidation.SourceOutOfOrderRecords -gt 0 -or
+                    $candidate.ScidValidation.TargetOutOfOrderRecords -gt 0) {
+
+                    Write-Host (
+                        "  Ordering:   source {0:N0} out-of-order | Rithmic {1:N0}" -f
+                        $candidate.ScidValidation.SourceOutOfOrderRecords,
+                        $candidate.ScidValidation.TargetOutOfOrderRecords) `
+                        -ForegroundColor Yellow
+                }
+            }
+
+            $canTemporaryMerge =
+                $candidate.ScidCoverage -and
+                $candidate.ScidCoverage.SourceIncomplete -and
+                $candidate.ScidCoverage.TargetExtendsLater -and
+                -not $candidate.ScidCoverage.TargetStartsEarlier -and
+                $candidate.ScidValidation -and
+                $candidate.ScidValidationReference.Independent -and
+                $candidate.ScidPairGrade -eq "STRONG" -and
+                $candidate.ScidValidation.SourceOutOfOrderRecords -eq 0 -and
+                $candidate.ScidValidation.TargetOutOfOrderRecords -eq 0
+
+            $sourceStructuralIssue =
+                ($candidate.ScidValidation -and
+                 $candidate.ScidValidation.SourceOutOfOrderRecords -gt 0) -or
+                ($candidate.ScidFileValidation -and
+                 $candidate.ScidFileValidation.OutOfOrderRecords -gt 0)
+
+            if ($Yes) {
+                $selection = "1"
+            }
+            else {
+                Write-Host "  1. Keep the Rithmic target and defer this SCID update. [recommended]"
+
+                if ($sourceStructuralIssue) {
+                    Write-Host "  2. Cancel the entire run."
+                    $validSelections = @("1", "2")
+                }
+                elseif ($canTemporaryMerge) {
+                    Write-Host (
+                        "  2. Temporary merge: verified SC Data overlap + Rithmic coverage beyond the source.")
+                    Write-Host (
+                        "     The SCID remains pending and will be rebuilt when SC Data is complete.")
+                    Write-Host "  3. Cancel the entire run."
+                    $validSelections = @("1", "2", "3")
+                }
+                elseif (-not $candidate.ScidCoverage.SourceIncomplete) {
+                    Write-Host "  2. Replace the Rithmic target with the SC Data source despite the warning."
+                    Write-Host "  3. Cancel the entire run."
+                    $validSelections = @("1", "2", "3")
+                }
+                else {
+                    Write-Host "  2. Cancel the entire run."
+                    $validSelections = @("1", "2")
+                }
+
+                do {
+                    $selection =
+                        (Read-Host "Selection").Trim()
+                }
+                until ($validSelections -contains $selection)
+            }
+
+            if ($selection -eq "1") {
+                $candidate.ScidDeferred = $true
+                $candidate.ScidSkipped = $true
+                $candidate.ScidNeedsDecision = $false
+                $candidate.ScidAction = "defer"
+                $candidate.ScidNeeded = $false
+
+                if (-not $candidate.ScidDeferReason) {
+                    $candidate.ScidDeferReason =
+                        if ($candidate.ScidCoverage.Summary) {
+                            $candidate.ScidCoverage.Summary
+                        }
+                        else {
+                            "preflight validation requires review"
+                        }
+                }
+
+                if ($deferredScid -notcontains $candidate) {
+                    $deferredScid += $candidate
+                }
+            }
+            elseif ($selection -eq "2" -and $canTemporaryMerge) {
+                $candidate.ScidTemporaryMerge = $true
+                $candidate.ScidNeedsDecision = $false
+                $candidate.ScidAction = "temporary-merge"
+                $candidate.ScidNeeded = $true
+            }
+            elseif ($selection -eq "2" -and
+                -not $sourceStructuralIssue -and
+                -not $candidate.ScidCoverage.SourceIncomplete) {
+
+                $candidate.ScidNeedsDecision = $false
+                $candidate.ScidAction = "replace-override"
+                $candidate.ScidNeeded = $true
+            }
+            else {
+                Write-Host "Cancelled. No files were changed."
+                return 0
+            }
+        }
+
+        $ready =
+            @(
+                $ready |
+                Where-Object {
+                    $_.ScidNeeded -or
+                    $_.DailyNeeded
+                }
+            )
     }
 
     Write-Host
@@ -1419,14 +2173,23 @@ function Invoke-SierraHistoryBridge {
                 "SCID not present"
             }
             elseif ($candidate.ScidNeeded) {
-                if (-not $candidate.TargetStatus.Exists) {
+                if ($candidate.ScidTemporaryMerge) {
+                    "SCID temporary merge [pending]"
+                }
+                elseif ($candidate.ScidAction -eq "replace-override") {
+                    "SCID replace [user override]"
+                }
+                elseif (-not $candidate.TargetStatus.Exists) {
                     "SCID create"
                 }
                 elseif ($candidate.TargetStatus.Kind -eq "placeholder") {
                     "SCID replace placeholder"
                 }
+                elseif ($candidate.LiveScidUpdate) {
+                    "SCID live merge"
+                }
                 else {
-                    "SCID update"
+                    "SCID validated replace"
                 }
             }
             else {
@@ -1695,6 +2458,138 @@ function Invoke-SierraHistoryBridge {
             "Sierra Chart can remain open.")
     }
 
+    $liveValidationCandidates =
+        @(
+            $ready |
+            Where-Object {
+                $_.ScidNeeded -and
+                $_.LiveScidUpdate -and
+                $_.TargetStatus.Exists -and
+                $_.TargetStatus.Kind -eq "data"
+            }
+        )
+
+    if ($liveValidationCandidates.Count -gt 0) {
+        Write-Host
+        Write-Host "Live SCID overlap validation:"
+
+        foreach ($candidate in $liveValidationCandidates) {
+            try {
+                $candidate.ScidValidationReference =
+                    [pscustomobject]@{
+                        Path = $candidate.Target
+                        Kind = "live Rithmic target"
+                        Independent = $true
+                        CreateBaseline = $candidate.CreateRithmicBaseline
+                    }
+
+                $validationPrefix =
+                    "VALIDATE LIVE {0} <-> {1}" -f
+                    (Get-CandidateSourceDisplay $candidate),
+                    (Get-CandidateTargetDisplay $candidate)
+
+                $candidate.ScidValidation =
+                    [SierraHistoryBridge.ScidBridge]::ValidatePair(
+                        $candidate.Source,
+                        $candidate.Target,
+                        [double]$scales[$candidate.Group],
+                        $validationPrefix)
+
+                $candidate.ScidPairGrade =
+                    Get-ScidPairGrade `
+                        $candidate.ScidValidation
+
+                $candidate.Records =
+                    [long]$candidate.ScidValidation.SourceRecords
+                $candidate.First =
+                    [long]$candidate.ScidValidation.SourceFirstDateTime
+                $candidate.Last =
+                    [long]$candidate.ScidValidation.SourceLastDateTime
+                $candidate.Size =
+                    [long]$candidate.ScidValidation.SourceLength
+                $candidate.ModifiedTicks =
+                    [long]$candidate.ScidValidation.SourceWriteTimeUtcTicks
+                $candidate.Signature =
+                    "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$validationPrefix | $($candidate.ScidPairGrade)")
+
+                $liveValidationIssue =
+                    $candidate.ScidPairGrade -ne "STRONG" -or
+                    $candidate.ScidValidation.SourceOutOfOrderRecords -gt 0 -or
+                    $candidate.ScidValidation.TargetOutOfOrderRecords -gt 0
+
+                if ($liveValidationIssue) {
+                    Write-Host
+                    Write-Host (
+                        "Live data comparison warning: {0}" -f
+                        (Get-ScidValidationSummary $candidate)) `
+                        -ForegroundColor Yellow
+
+                    if ($Yes) {
+                        $liveChoice = "1"
+                    }
+                    else {
+                        Write-Host "  1. Skip this live SCID update. [recommended]"
+                        Write-Host "  2. Continue with the live merge despite the warning."
+                        Write-Host "  3. Cancel the entire run."
+
+                        do {
+                            $liveChoice =
+                                (Read-Host "Selection").Trim()
+                        }
+                        until (@("1", "2", "3") -contains $liveChoice)
+                    }
+
+                    if ($liveChoice -eq "1") {
+                        $candidate.ScidSkipped = $true
+                        $candidate.ScidDeferred = $true
+                        $candidate.ScidDeferReason =
+                            "live preflight validation requires review"
+                        $candidate.ScidAction = "defer"
+                        $candidate.ScidNeeded = $false
+
+                        if ($deferredScid -notcontains $candidate) {
+                            $deferredScid += $candidate
+                        }
+                    }
+                    elseif ($liveChoice -eq "3") {
+                        Write-Host "Cancelled. No files were changed."
+                        return 0
+                    }
+                }
+            }
+            catch {
+                $candidate.ScidSkipped = $true
+                $candidate.ScidDeferred = $true
+                $candidate.ScidDeferReason =
+                    $_.Exception.Message
+                $candidate.ScidAction = "defer"
+                $candidate.ScidNeeded = $false
+
+                if ($deferredScid -notcontains $candidate) {
+                    $deferredScid += $candidate
+                }
+
+                Write-Host (
+                    "  DEFER {0}: {1}" -f
+                    (Get-CandidateTargetDisplay $candidate),
+                    $_.Exception.Message) `
+                    -ForegroundColor Yellow
+            }
+        }
+
+        $ready =
+            @(
+                $ready |
+                Where-Object {
+                    $_.ScidNeeded -or
+                    $_.DailyNeeded
+                }
+            )
+    }
+
     Write-Host
     Write-Host "[4/4] Update"
 
@@ -1774,6 +2669,19 @@ function Invoke-SierraHistoryBridge {
     $log.Add("Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     $log.Add("")
 
+    if ($preflightLogPath) {
+        $log.Add("Preflight report: $preflightLogPath")
+        $log.Add("")
+    }
+
+    if ($preflightLines.Count -gt 0) {
+        $log.Add("SCID preflight validation:")
+        foreach ($line in $preflightLines) {
+            $log.Add("  $line")
+        }
+        $log.Add("")
+    }
+
     # Create the log before file updates begin.
     $log | Set-Content -LiteralPath $logPath -Encoding UTF8
 
@@ -1803,13 +2711,25 @@ function Invoke-SierraHistoryBridge {
 
         try {
             if ($candidate.ScidNeeded) {
+                if (($candidate.ScidValidation -or
+                     $candidate.ScidFileValidation) -and
+                    -not (Test-ScidPreflightSnapshotCurrent $candidate)) {
+
+                    throw (
+                        "PREFLIGHT_SNAPSHOT_CHANGED: source or target changed after validation. " +
+                        "No SCID replacement was performed; rerun preflight.")
+                }
+
                 $scidResult =
                     [SierraHistoryBridge.ScidBridge]::Convert(
                         $candidate.Source,
                         $candidate.Target,
                         [double]$scales[$candidate.Group],
                         $backupDirectory,
-                        [bool]$candidate.LiveScidUpdate,
+                        [bool](
+                            $candidate.LiveScidUpdate -or
+                            $candidate.ScidTemporaryMerge),
+                        [bool]$candidate.CreateRithmicBaseline,
                         $statusPrefix)
 
                 [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
@@ -1872,7 +2792,8 @@ function Invoke-SierraHistoryBridge {
 
             $stateTable[$candidate.StateKey] = [pscustomobject]@{
                 source_signature =
-                    if ($candidate.ScidSkipped) {
+                    if ($candidate.ScidSkipped -or
+                        $candidate.ScidTemporaryMerge) {
                         if ($previousState) {
                             $previousState.source_signature
                         }
@@ -1888,7 +2809,8 @@ function Invoke-SierraHistoryBridge {
                     }
                 target_path = $candidate.Target
                 minimum_target_records =
-                    if ($candidate.ScidSkipped) {
+                    if ($candidate.ScidSkipped -or
+                        $candidate.ScidTemporaryMerge) {
                         if ($previousState -and
                             $previousState.minimum_target_records) {
                             [long]$previousState.minimum_target_records
@@ -1904,7 +2826,8 @@ function Invoke-SierraHistoryBridge {
                         0
                     }
                 target_first_datetime =
-                    if ($candidate.ScidSkipped) {
+                    if ($candidate.ScidSkipped -or
+                        $candidate.ScidTemporaryMerge) {
                         if ($previousState -and
                             $previousState.target_first_datetime) {
                             [long]$previousState.target_first_datetime
@@ -1920,7 +2843,8 @@ function Invoke-SierraHistoryBridge {
                         0
                     }
                 minimum_target_last_datetime =
-                    if ($candidate.ScidSkipped) {
+                    if ($candidate.ScidSkipped -or
+                        $candidate.ScidTemporaryMerge) {
                         if ($previousState -and
                             $previousState.minimum_target_last_datetime) {
                             [long]$previousState.minimum_target_last_datetime
@@ -1934,6 +2858,33 @@ function Invoke-SierraHistoryBridge {
                     }
                     else {
                         0
+                    }
+                scid_managed_by_bridge =
+                    if ($candidate.ScidSkipped) {
+                        if ($previousState -and
+                            $previousState.PSObject.Properties["scid_managed_by_bridge"]) {
+                            [bool]$previousState.scid_managed_by_bridge
+                        }
+                        elseif ($previousState -and
+                            $previousState.source_signature) {
+                            $true
+                        }
+                        else {
+                            $false
+                        }
+                    }
+                    elseif ($candidate.ScidTemporaryMerge) {
+                        $true
+                    }
+                    elseif ($candidate.ScidNeeded -or $scidResult) {
+                        $true
+                    }
+                    elseif ($previousState -and
+                        $previousState.PSObject.Properties["scid_managed_by_bridge"]) {
+                        [bool]$previousState.scid_managed_by_bridge
+                    }
+                    else {
+                        $false
                     }
                 daily_source_signature =
                     if ($candidate.DailyAvailable) {
@@ -1987,8 +2938,17 @@ function Invoke-SierraHistoryBridge {
             }
             elseif ($scidResult) {
                 if ($scidResult.TailRecords -gt 0) {
+                    $mergeLabel =
+                        if ($candidate.ScidTemporaryMerge) {
+                            "temporary-merge"
+                        }
+                        else {
+                            "live-merge"
+                        }
+
                     $scidStatus =
-                        "SCID live-merge source={0:N0} used={1:N0} + Rithmic={2:N0} -> out={3:N0}" -f
+                        "SCID {0} source={1:N0} used={2:N0} + Rithmic={3:N0} -> out={4:N0}" -f
+                        $mergeLabel,
                         $scidResult.SourceRecords,
                         $scidResult.SourceRecordsWritten,
                         $scidResult.TailRecords,
@@ -2071,7 +3031,10 @@ function Invoke-SierraHistoryBridge {
 
             if ($scidResult) {
                 $scidMode =
-                    if ($scidResult.TailRecords -gt 0) {
+                    if ($candidate.ScidTemporaryMerge) {
+                        "temporary-merge"
+                    }
+                    elseif ($scidResult.TailRecords -gt 0) {
                         "live-merge"
                     }
                     else {
@@ -2094,6 +3057,15 @@ function Invoke-SierraHistoryBridge {
                     "validation_seconds=$($scidResult.ValidationSeconds) " +
                     "replace_seconds=$($scidResult.ReplaceSeconds) " +
                     "elapsed=$($scidResult.ElapsedSeconds)"
+
+                if ($candidate.ScidValidation) {
+                    $entry +=
+                        " preflight_grade=$($candidate.ScidPairGrade)" +
+                        " preflight_coverage_pct=$($candidate.ScidValidation.CommonCoveragePercent)" +
+                        " preflight_volume_match_pct=$($candidate.ScidValidation.VolumeMatchPercent)" +
+                        " preflight_last_price_match_pct=$($candidate.ScidValidation.LastPriceMatchPercent)" +
+                        " preflight_aggregate_volume_diff_pct=$($candidate.ScidValidation.AggregateVolumeDifferencePercent)"
+                }
 
                 $log.Add($entry)
                 Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
@@ -2151,7 +3123,9 @@ function Invoke-SierraHistoryBridge {
             if ($_.Exception.Message.StartsWith(
                     "SOURCE_CHANGED_DURING_CONVERSION:") -or
                 $_.Exception.Message.StartsWith(
-                    "TARGET_CHANGED_DURING_CONVERSION:")) {
+                    "TARGET_CHANGED_DURING_CONVERSION:") -or
+                $_.Exception.Message.StartsWith(
+                    "PREFLIGHT_SNAPSHOT_CHANGED:")) {
 
                 $runtimeDeferred++
 
