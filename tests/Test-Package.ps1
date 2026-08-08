@@ -343,6 +343,21 @@ foreach ($cwdCleanupToken in @(
     }
 }
 
+
+foreach ($deferredCleanupToken in @(
+    'Add-DeferredDirectoryCleanup',
+    'Start-DeferredDirectoryCleanupWorker',
+    'CLEANUP DEFERRED:',
+    'cleanup-{0}.log',
+    'Start-UtilityOperationLog',
+    'Start-Transcript',
+    'Stop-Transcript'
+)) {
+    if ($appText -notlike "*$deferredCleanupToken*") {
+        throw "Deferred-cleanup/logging regression: missing $deferredCleanupToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

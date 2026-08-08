@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.21 - 2026-08-07
+## v0.0.22 - 2026-08-07
 
 Initial pre-stable release.
 
@@ -143,6 +143,14 @@ Initial pre-stable release.
 - metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
+
+- post-exit cleanup retains the same non-empty-directory and configured-base safety boundaries as immediate prune-on-delete
+
+- deferred cleanup waits for the bridge process to exit, retries for up to 30 seconds, and records the outcome in cleanup logs
+
+- empty bridge directories that remain locked are queued for a detached post-exit cleanup worker instead of producing duplicate immediate warnings
+
+- Archive, Restore, and Storage now write timestamped operation logs to the configured Logs folder
 
 - prune-on-delete defensively moves out of any directory tree it is about to remove and retries transient directory deletion
 

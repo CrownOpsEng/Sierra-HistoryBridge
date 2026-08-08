@@ -267,3 +267,18 @@ This is intentionally not automatic. The bridge performs one final full
 cross-feed validation before deleting each independent baseline. Baselines that
 are incomplete, inconsistent, unavailable, or otherwise uncertain remain
 untouched.
+
+
+## Logs
+
+Utility modes now log separately:
+
+```text
+archive-YYYYMMDD-HHMMSS.log
+restore-YYYYMMDD-HHMMSS.log
+storage-YYYYMMDD-HHMMSS.log
+cleanup-YYYYMMDD-HHMMSS.log
+```
+
+The cleanup log is created only when an empty bridge-owned directory has to be
+retried after the main process exits.

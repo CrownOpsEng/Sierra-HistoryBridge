@@ -89,7 +89,7 @@ You can also manually remove:
 
 ## Setup reports a C# compiler or assembly-reference error
 
-Use the current v0.0.21 package and rerun `setup.cmd`.
+Use the current v0.0.22 package and rerun `setup.cmd`.
 
 The installed SCID engine is compiled with the stock Windows PowerShell 5.1
 `Add-Type -Path` behavior. The converter does not require custom compiler
@@ -121,3 +121,17 @@ Current builds move both PowerShell's provider location and the process current
 directory to the Sierra Data base before archive/restore and again before
 pruning. Simply having the folder visible in File Explorer normally does not
 require closing Explorer.
+
+
+## Folder remains locked after restore
+
+If immediate cleanup reports `CLEANUP DEFERRED`, press Enter to close the bridge
+window. A detached helper then retries for up to 30 seconds.
+
+Check the printed `cleanup-*.log` path. If it says `REMOVED`, the lock was tied
+to the original process/context-menu lifetime. If it says `FAILED after parent
+exit`, another process still owns the directory; that log is the useful next
+diagnostic artifact.
+
+Archive, Restore, and Storage now also have their own timestamped operation logs
+in the configured Logs folder.

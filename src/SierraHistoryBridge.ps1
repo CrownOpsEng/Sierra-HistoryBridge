@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.21"
+$Version = "0.0.22"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -26,6 +26,11 @@ $SourceDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConverterSource = Join-Path $SourceDirectory "ScidBridge.cs"
 
 New-Item -ItemType Directory -Force -Path $AppDataDirectory | Out-Null
+
+$script:DeferredCleanupDirectories = @()
+$script:CleanupDataFolder = $null
+$script:UtilityTranscriptActive = $false
+$script:UtilityLogPath = $null
 
 function Show-Banner {
     Clear-Host
@@ -346,6 +351,382 @@ function Get-BridgePaths([string]$ResolvedDataFolder) {
         Recovery = $recovery
         Logs = $logs
     }
+}
+
+function Start-UtilityOperationLog(
+    [string]$Operation,
+    [string]$ResolvedDataFolder) {
+
+    if ($Operation -eq "Update") {
+        return $null
+    }
+
+    $bridgePaths =
+        Get-BridgePaths $ResolvedDataFolder
+
+    New-Item `
+        -ItemType Directory `
+        -Path $bridgePaths.Logs `
+        -Force |
+        Out-Null
+
+    $stamp =
+        (Get-Date).ToUniversalTime().ToString(
+            "yyyyMMdd-HHmmss")
+
+    $safeOperation =
+        $Operation.ToLowerInvariant()
+
+    $logPath =
+        Join-Path `
+            $bridgePaths.Logs `
+            ("{0}-{1}.log" -f
+                $safeOperation,
+                $stamp)
+
+    try {
+        Start-Transcript `
+            -Path $logPath `
+            -Force |
+            Out-Null
+
+        $script:UtilityTranscriptActive = $true
+        $script:UtilityLogPath = $logPath
+
+        Write-Host "Log:       $logPath"
+
+        return $logPath
+    }
+    catch {
+        Write-Host (
+            "LOG WARNING: could not start operation log: " +
+            $_.Exception.Message) `
+            -ForegroundColor Yellow
+
+        return $null
+    }
+}
+
+function Stop-UtilityOperationLog {
+    if (-not $script:UtilityTranscriptActive) {
+        return
+    }
+
+    try {
+        Stop-Transcript |
+            Out-Null
+    }
+    catch { }
+
+    $script:UtilityTranscriptActive = $false
+}
+
+function Add-DeferredDirectoryCleanup(
+    [string]$Directory,
+    [string]$ProtectedRoot) {
+
+    if ([string]::IsNullOrWhiteSpace($Directory) -or
+        [string]::IsNullOrWhiteSpace($ProtectedRoot)) {
+        return $false
+    }
+
+    $directoryPath =
+        [IO.Path]::GetFullPath(
+            $Directory).TrimEnd('\')
+
+    $rootPath =
+        [IO.Path]::GetFullPath(
+            $ProtectedRoot).TrimEnd('\')
+
+    foreach ($item in $script:DeferredCleanupDirectories) {
+        if ($item.Directory.Equals(
+                $directoryPath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    $script:DeferredCleanupDirectories +=
+        [pscustomobject]@{
+            Directory = $directoryPath
+            ProtectedRoot = $rootPath
+        }
+
+    return $true
+}
+
+function Start-DeferredDirectoryCleanupWorker {
+    if ($script:DeferredCleanupDirectories.Count -eq 0 -or
+        [string]::IsNullOrWhiteSpace(
+            $script:CleanupDataFolder)) {
+        return $null
+    }
+
+    $bridgePaths =
+        Get-BridgePaths `
+            $script:CleanupDataFolder
+
+    New-Item `
+        -ItemType Directory `
+        -Path $bridgePaths.Logs `
+        -Force |
+        Out-Null
+
+    $stamp =
+        (Get-Date).ToUniversalTime().ToString(
+            "yyyyMMdd-HHmmss")
+
+    $logPath =
+        Join-Path `
+            $bridgePaths.Logs `
+            ("cleanup-{0}.log" -f $stamp)
+
+    $payloadJson =
+        @($script:DeferredCleanupDirectories) |
+        ConvertTo-Json `
+            -Depth 4 `
+            -Compress
+
+    $payload64 =
+        [Convert]::ToBase64String(
+            [Text.Encoding]::Unicode.GetBytes(
+                $payloadJson))
+
+    $log64 =
+        [Convert]::ToBase64String(
+            [Text.Encoding]::Unicode.GetBytes(
+                $logPath))
+
+    $parentPid =
+        [int]$PID
+
+    $worker = @'
+$ErrorActionPreference = "Continue"
+
+$parentPid = __PARENT_PID__
+$payload64 = "__PAYLOAD64__"
+$log64 = "__LOG64__"
+
+$payloadJson =
+    [Text.Encoding]::Unicode.GetString(
+        [Convert]::FromBase64String(
+            $payload64))
+
+$logPath =
+    [Text.Encoding]::Unicode.GetString(
+        [Convert]::FromBase64String(
+            $log64))
+
+$items =
+    @(
+        $payloadJson |
+        ConvertFrom-Json
+    )
+
+$lines = @()
+$lines +=
+    "Sierra History Bridge deferred cleanup"
+$lines +=
+    "Started UTC: " +
+    (Get-Date).ToUniversalTime().ToString("o")
+$lines +=
+    "Waiting for parent PID: " +
+    $parentPid
+
+try {
+    Wait-Process `
+        -Id $parentPid `
+        -ErrorAction SilentlyContinue
+}
+catch { }
+
+Start-Sleep -Milliseconds 250
+
+foreach ($item in $items) {
+    $current =
+        [IO.Path]::GetFullPath(
+            [string]$item.Directory).TrimEnd('\')
+
+    $root =
+        [IO.Path]::GetFullPath(
+            [string]$item.ProtectedRoot).TrimEnd('\')
+
+    $lines +=
+        "Cleanup root: " +
+        $root
+
+    while (
+        -not $current.Equals(
+            $root,
+            [StringComparison]::OrdinalIgnoreCase) -and
+        $current.StartsWith(
+            $root + '\',
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $current `
+                -PathType Container)) {
+
+            $parent =
+                Split-Path `
+                    -Parent `
+                    $current
+
+            if ([string]::IsNullOrWhiteSpace(
+                $parent)) {
+                break
+            }
+
+            $current =
+                [IO.Path]::GetFullPath(
+                    $parent).TrimEnd('\')
+
+            continue
+        }
+
+        $remaining =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $current `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            )
+
+        if ($remaining.Count -gt 0) {
+            $lines +=
+                "KEEP non-empty: " +
+                $current
+            break
+        }
+
+        $deleted = $false
+        $lastError = $null
+
+        for ($attempt = 1;
+            $attempt -le 150;
+            $attempt++) {
+
+            try {
+                Remove-Item `
+                    -LiteralPath $current `
+                    -Force `
+                    -ErrorAction Stop
+
+                $deleted = $true
+                break
+            }
+            catch {
+                $lastError =
+                    $_.Exception.Message
+
+                Start-Sleep `
+                    -Milliseconds 200
+            }
+        }
+
+        if (-not $deleted) {
+            $lines +=
+                "FAILED after parent exit: " +
+                $current +
+                " | " +
+                $lastError
+            break
+        }
+
+        $lines +=
+            "REMOVED: " +
+            $current
+
+        $parent =
+            Split-Path `
+                -Parent `
+                $current
+
+        if ([string]::IsNullOrWhiteSpace(
+            $parent)) {
+            break
+        }
+
+        $current =
+            [IO.Path]::GetFullPath(
+                $parent).TrimEnd('\')
+    }
+}
+
+$lines +=
+    "Finished UTC: " +
+    (Get-Date).ToUniversalTime().ToString("o")
+
+try {
+    $directory =
+        Split-Path `
+            -Parent `
+            $logPath
+
+    New-Item `
+        -ItemType Directory `
+        -Path $directory `
+        -Force |
+        Out-Null
+
+    $lines |
+        Set-Content `
+            -LiteralPath $logPath `
+            -Encoding UTF8
+}
+catch { }
+'@
+
+    $worker =
+        $worker.Replace(
+            "__PARENT_PID__",
+            [string]$parentPid)
+
+    $worker =
+        $worker.Replace(
+            "__PAYLOAD64__",
+            $payload64)
+
+    $worker =
+        $worker.Replace(
+            "__LOG64__",
+            $log64)
+
+    $encoded =
+        [Convert]::ToBase64String(
+            [Text.Encoding]::Unicode.GetBytes(
+                $worker))
+
+    $powershellExe =
+        Join-Path `
+            $PSHOME `
+            "powershell.exe"
+
+    Start-Process `
+        -FilePath $powershellExe `
+        -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            $encoded
+        ) `
+        -WorkingDirectory $script:CleanupDataFolder `
+        -WindowStyle Hidden |
+        Out-Null
+
+    Write-Host
+    Write-Host (
+        "Cleanup deferred until this window closes. " +
+        "A helper will retry for up to 30 seconds.") `
+        -ForegroundColor Yellow
+    Write-Host "Cleanup log: $logPath"
+
+    return $logPath
 }
 
 function Wait-ForSierraChartClosed(
@@ -1673,12 +2054,18 @@ function Remove-EmptyParentChain(
                         -Milliseconds 100
                 }
                 else {
-                    Write-Host (
-                        "  CLEANUP WARNING: could not remove empty folder: " +
-                        $current +
-                        " | " +
-                        $_.Exception.Message) `
-                        -ForegroundColor Yellow
+                    $queued =
+                        Add-DeferredDirectoryCleanup `
+                            $current `
+                            $root
+
+                    if ($queued) {
+                        Write-Host (
+                            "  CLEANUP DEFERRED: empty folder is still in use; " +
+                            "it will be retried after this window closes: " +
+                            $current) `
+                            -ForegroundColor Yellow
+                    }
                 }
             }
         }
@@ -1708,6 +2095,9 @@ function Remove-BridgeOwnedFileAndPrune(
     [string]$Path,
     [string]$DataFolder,
     [switch]$IgnoreMissing) {
+
+    $script:CleanupDataFolder =
+        $DataFolder
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
         throw "Bridge-owned file path is empty."
@@ -1862,6 +2252,9 @@ function Remove-EmptyBridgeDirectories(
 
 function Invoke-BridgeDirectoryHousekeeping(
     [string]$DataFolder) {
+
+    $script:CleanupDataFolder =
+        $DataFolder
 
     $bridgePaths =
         Get-BridgePaths $DataFolder
@@ -6503,6 +6896,13 @@ function Invoke-SierraHistoryUtilityMode {
 
     Write-Host "[2/2] Data       $resolvedDataFolder"
 
+    $script:CleanupDataFolder =
+        $resolvedDataFolder
+
+    [void](Start-UtilityOperationLog `
+        $Mode `
+        $resolvedDataFolder)
+
     switch ($Mode) {
         "Archive" {
             return Invoke-SourceArchiveManager `
@@ -6544,6 +6944,20 @@ catch {
     $exitCode = 1
 }
 finally {
+    Stop-UtilityOperationLog
+
+    if ($script:DeferredCleanupDirectories.Count -gt 0) {
+        try {
+            [void](Start-DeferredDirectoryCleanupWorker)
+        }
+        catch {
+            Write-Host (
+                "CLEANUP WARNING: could not start deferred cleanup helper: " +
+                $_.Exception.Message) `
+                -ForegroundColor Yellow
+        }
+    }
+
     if ($Interactive) {
         Write-Host
         Read-Host "Press Enter to close" | Out-Null

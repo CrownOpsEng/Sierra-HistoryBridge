@@ -226,3 +226,20 @@ this check defensively before removing each empty directory.
 
 This prevents the bridge itself from holding `SC_Data\<group>\<year>` open
 while trying to delete it.
+
+
+## Deferred cleanup for externally locked folders
+
+Immediate prune-on-delete remains the normal path. If Windows reports an empty
+bridge folder as `in use`, the bridge no longer repeats the same warning and
+give up.
+
+The folder is queued for post-exit cleanup. A separate hidden PowerShell process
+waits for the main Sierra History Bridge process to exit, then retries the
+empty-directory chain for up to 30 seconds. This specifically handles locks
+whose lifetime is tied to a File Explorer context-menu invocation or the
+launched process.
+
+The helper never removes non-empty directories and never crosses the configured
+Data/Archive/Recovery/Logs base boundary. Results are written to
+`SCID_Bridge_Logs\cleanup-*.log`.
