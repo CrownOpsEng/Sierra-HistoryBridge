@@ -367,6 +367,276 @@ namespace SierraHistoryBridge
             }
         }
 
+        public static string GetQuickSignature(string path)
+        {
+            ScidMeta before = GetMeta(path);
+            DateTime writeBefore = File.GetLastWriteTimeUtc(path);
+
+            const int sampleCount = 65;
+            byte[] header = new byte[HeaderSize];
+            byte[] record = new byte[RecordSize];
+
+            using (var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            using (var sha = SHA256.Create())
+            {
+                stream.Position = 0;
+                ReadExact(stream, header, header.Length);
+                sha.TransformBlock(
+                    header, 0, header.Length, header, 0);
+
+                byte[] metaBytes = new byte[32];
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(before.Length),
+                    0, metaBytes, 0, 8);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(before.Records),
+                    0, metaBytes, 8, 8);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(before.FirstDateTime),
+                    0, metaBytes, 16, 8);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(before.LastDateTime),
+                    0, metaBytes, 24, 8);
+
+                sha.TransformBlock(
+                    metaBytes, 0, metaBytes.Length,
+                    metaBytes, 0);
+
+                if (before.Records > 0)
+                {
+                    int actualSamples =
+                        (int)Math.Min(
+                            (long)sampleCount,
+                            before.Records);
+
+                    for (int i = 0; i < actualSamples; i++)
+                    {
+                        long index =
+                            actualSamples == 1
+                            ? 0
+                            : (before.Records - 1) * i /
+                                (actualSamples - 1);
+
+                        stream.Position =
+                            HeaderSize +
+                            index * RecordSize;
+
+                        ReadExact(
+                            stream,
+                            record,
+                            RecordSize);
+
+                        sha.TransformBlock(
+                            record, 0, RecordSize,
+                            record, 0);
+                    }
+                }
+
+                sha.TransformFinalBlock(
+                    new byte[0], 0, 0);
+
+                ScidMeta after = GetMeta(path);
+                DateTime writeAfter =
+                    File.GetLastWriteTimeUtc(path);
+
+                if (before.Length != after.Length ||
+                    before.Records != after.Records ||
+                    before.FirstDateTime != after.FirstDateTime ||
+                    before.LastDateTime != after.LastDateTime ||
+                    writeBefore != writeAfter)
+                {
+                    throw new IOException(
+                        "SOURCE_CHANGED_DURING_FINGERPRINT: " +
+                        "the SCID file changed while its quick signature was read.");
+                }
+
+                return
+                    "v2|" +
+                    before.Length.ToString(
+                        CultureInfo.InvariantCulture) +
+                    "|" +
+                    before.FirstDateTime.ToString(
+                        CultureInfo.InvariantCulture) +
+                    "|" +
+                    before.LastDateTime.ToString(
+                        CultureInfo.InvariantCulture) +
+                    "|" +
+                    BytesToHex(sha.Hash);
+            }
+        }
+
+        private static bool RecordMatchesScaledSource(
+            byte[] source,
+            byte[] target,
+            double scale)
+        {
+            if (BitConverter.ToInt64(source, 0) !=
+                BitConverter.ToInt64(target, 0))
+                return false;
+
+            float sourceOpen =
+                BitConverter.ToSingle(source, 8);
+            float sourceHigh =
+                BitConverter.ToSingle(source, 12);
+            float sourceLow =
+                BitConverter.ToSingle(source, 16);
+            float sourceClose =
+                BitConverter.ToSingle(source, 20);
+
+            float expectedOpen =
+                sourceOpen > 0
+                ? (float)(sourceOpen * scale)
+                : sourceOpen;
+
+            float expectedHigh =
+                (float)(sourceHigh * scale);
+            float expectedLow =
+                (float)(sourceLow * scale);
+            float expectedClose =
+                (float)(sourceClose * scale);
+
+            if (BitConverter.ToInt32(
+                    BitConverter.GetBytes(expectedOpen), 0) !=
+                BitConverter.ToInt32(target, 8))
+                return false;
+
+            if (BitConverter.ToInt32(
+                    BitConverter.GetBytes(expectedHigh), 0) !=
+                BitConverter.ToInt32(target, 12))
+                return false;
+
+            if (BitConverter.ToInt32(
+                    BitConverter.GetBytes(expectedLow), 0) !=
+                BitConverter.ToInt32(target, 16))
+                return false;
+
+            if (BitConverter.ToInt32(
+                    BitConverter.GetBytes(expectedClose), 0) !=
+                BitConverter.ToInt32(target, 20))
+                return false;
+
+            for (int offset = 24; offset < RecordSize; offset++)
+            {
+                if (source[offset] != target[offset])
+                    return false;
+            }
+
+            return true;
+        }
+
+        public static bool QuickConvertedPairMatches(
+            string sourcePath,
+            string targetPath,
+            double scale)
+        {
+            ScidMeta sourceMeta = GetMeta(sourcePath);
+            ScidMeta targetMeta = GetMeta(targetPath);
+
+            if (sourceMeta.Length != targetMeta.Length ||
+                sourceMeta.Records != targetMeta.Records ||
+                sourceMeta.FirstDateTime != targetMeta.FirstDateTime ||
+                sourceMeta.LastDateTime != targetMeta.LastDateTime)
+                return false;
+
+            if (sourceMeta.Records <= 0)
+                return false;
+
+            const int maximumSamples = 257;
+            int actualSamples =
+                (int)Math.Min(
+                    (long)maximumSamples,
+                    sourceMeta.Records);
+
+            byte[] sourceRecord =
+                new byte[RecordSize];
+            byte[] targetRecord =
+                new byte[RecordSize];
+
+            DateTime sourceWrite =
+                File.GetLastWriteTimeUtc(sourcePath);
+            DateTime targetWrite =
+                File.GetLastWriteTimeUtc(targetPath);
+
+            using (var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            using (var target = new FileStream(
+                targetPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            {
+                ValidateHeader(source, sourcePath);
+                ValidateHeader(target, targetPath);
+
+                for (int i = 0; i < actualSamples; i++)
+                {
+                    long index =
+                        actualSamples == 1
+                        ? 0
+                        : (sourceMeta.Records - 1) * i /
+                            (actualSamples - 1);
+
+                    source.Position =
+                        HeaderSize +
+                        index * RecordSize;
+                    target.Position =
+                        HeaderSize +
+                        index * RecordSize;
+
+                    ReadExact(
+                        source,
+                        sourceRecord,
+                        RecordSize);
+                    ReadExact(
+                        target,
+                        targetRecord,
+                        RecordSize);
+
+                    if (!RecordMatchesScaledSource(
+                            sourceRecord,
+                            targetRecord,
+                            scale))
+                        return false;
+                }
+            }
+
+            ScidMeta sourceAfter =
+                GetMeta(sourcePath);
+            ScidMeta targetAfter =
+                GetMeta(targetPath);
+
+            if (sourceAfter.Length != sourceMeta.Length ||
+                sourceAfter.Records != sourceMeta.Records ||
+                sourceAfter.FirstDateTime != sourceMeta.FirstDateTime ||
+                sourceAfter.LastDateTime != sourceMeta.LastDateTime ||
+                targetAfter.Length != targetMeta.Length ||
+                targetAfter.Records != targetMeta.Records ||
+                targetAfter.FirstDateTime != targetMeta.FirstDateTime ||
+                targetAfter.LastDateTime != targetMeta.LastDateTime ||
+                File.GetLastWriteTimeUtc(sourcePath) != sourceWrite ||
+                File.GetLastWriteTimeUtc(targetPath) != targetWrite)
+            {
+                throw new IOException(
+                    "PAIR_CHANGED_DURING_QUICK_CHECK: " +
+                    "source or target changed during quick comparison.");
+            }
+
+            return true;
+        }
+
         public static string HashFileSha256(string path)
         {
             byte[] buffer = new byte[8 * 1024 * 1024];

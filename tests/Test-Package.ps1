@@ -289,6 +289,24 @@ if ($setupText -match 'Directory\\Background\\shell\\\$ProductKey"\s*`?\r?\n\s*C
     throw "Explorer integration regression: global folder-background verb was reintroduced."
 }
 
+
+foreach ($dirtyCheckToken in @(
+    'GetQuickSignature',
+    'QuickConvertedPairMatches',
+    'Test-LegacyScidSignatureEquivalent',
+    'full SCID validation skipped by user',
+    'Run full SCID validation now?'
+)) {
+    if ($appText -notlike "*$dirtyCheckToken*" -and
+        $converterText -notlike "*$dirtyCheckToken*") {
+        throw "SCID dirty-check/validation regression: missing $dirtyCheckToken"
+    }
+}
+
+if ($appText -match '"\$\(\$candidate\.Size\)\|"\s*\+') {
+    throw "SCID dirty-check regression: modification-time source signature was reintroduced."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

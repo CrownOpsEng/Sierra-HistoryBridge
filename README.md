@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.17 — pre-stable**
+**Version 0.0.18 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -170,7 +170,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.17 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.18 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -331,9 +331,28 @@ Explorer commands are deliberately scoped rather than added to every folder:
 The bridge does not install a global blank-space/background command. Windows'
 static `Directory\Background` verbs cannot be reliably filtered by the current
 folder using `AppliesTo`; making that menu truly dynamic requires an in-process
-Shell extension. Avoiding that Explorer-loaded component keeps v0.0.17 simpler
+Shell extension. Avoiding that Explorer-loaded component keeps v0.0.18 simpler
 and reduces the risk of slowing or destabilizing File Explorer.
 
 Archive and restore now wait interactively when Sierra Chart is open. Close all
 Sierra Chart instances and press Enter; the operation continues in the same
 window after the process is gone.
+
+
+## Fast change detection and full validation
+
+Normal runs do not use Windows file modification time as proof that an SCID
+source changed. SCID state now uses a stable structural/content fingerprint
+(length, first/last timestamps, and deterministic record samples). Existing
+v0.0.18 state which used modification time is migrated without rewriting files
+when the structural source identity is unchanged.
+
+If saved provenance is stale or missing but the current Rithmic-named target
+already has the expected converted structure and sampled record contents, the
+bridge restores its managed-state metadata instead of needlessly rewriting the
+contract.
+
+Complete cross-feed/file validation remains available when a historical SCID
+really changed or its state is unknown. Because that operation scans entire
+multi-gigabyte files, interactive runs ask once before beginning it. Choosing
+No defers those SCID updates and leaves all affected files untouched.

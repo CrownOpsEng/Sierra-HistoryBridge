@@ -146,3 +146,13 @@ Archive, recovery, and log folders may be configured on separate locations.
 The storage report displays those configured paths. Free-space reporting remains
 anchored to the Sierra Data drive; individual archive/restore operations perform
 their own destination-drive free-space checks before writing.
+
+
+## Recovery staging
+
+`Recovery staging` is the configured `SCID_Bridge_Backups` directory. It is not
+a second archive. It is short-lived transactional storage used while a target
+is being replaced. Verified historical backups are normally removed after a
+successful replacement; live rollback evidence is compressed into the bridge
+archive. A steady-state installation can therefore show zero bytes in Recovery
+staging.

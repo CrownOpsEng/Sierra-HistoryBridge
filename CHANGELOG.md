@@ -1,10 +1,20 @@
 # Changelog
 
-## v0.0.17 - 2026-08-07
+## v0.0.18 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- storage output calls SCID_Bridge_Backups Recovery staging to clarify that it is temporary transactional storage
+
+- interactive runs ask before starting lengthy full historical SCID validation; declining defers those SCIDs without changing them
+
+- already-converted targets can recover managed-state metadata through a fast structural/sample equivalence check
+
+- legacy modification-time SCID state migrates to a stable sampled content fingerprint without rewriting unchanged targets
+
+- SCID dirty checking no longer uses source modification time as a rewrite trigger
 
 - scan output summarizes zero-volume and header-only Historical Daily source files as preserved source-quality notes
 

@@ -354,3 +354,24 @@ Two-digit SC Data contract years use a sliding century window. With a current
 year of 2026, `99` resolves to 1999 rather than 2099. This is required for
 1999-2026 source-history archive filtering and prevents early history from being
 misclassified as future data.
+
+
+## SCID dirty checking
+
+The old pre-release signature included `LastWriteTimeUtc`, which could cause a
+semantically unchanged Sierra source to be treated as dirty after Sierra or
+Windows touched the file. v0.0.18 now stores:
+
+```text
+v2 | byte length | first SCID timestamp | last SCID timestamp | sampled SHA-256
+```
+
+The sampled SHA-256 includes the SCID header, structural metadata, and 65
+deterministically distributed records. It is a fast dirty-check fingerprint,
+not a substitute for full validation.
+
+When state is missing/stale, `QuickConvertedPairMatches` compares structural
+metadata and 257 deterministic records using the exact source-to-Rithmic price
+conversion. This is used only to recover "already converted" state and avoid a
+gratuitous rewrite. Full validation remains the authority when an actual change
+or anomaly requires a processing decision.

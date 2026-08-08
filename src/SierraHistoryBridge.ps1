@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.17"
+$Version = "0.0.18"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -991,7 +991,7 @@ function Show-StorageDelta($Before, $After) {
         [pscustomobject]@{ Name = "SC Data sources"; Before = $Before.SourcesDisk; After = $After.SourcesDisk },
         [pscustomobject]@{ Name = "Rithmic targets"; Before = $Before.RithmicDisk; After = $After.RithmicDisk },
         [pscustomobject]@{ Name = "Bridge archive"; Before = $Before.ArchiveDisk; After = $After.ArchiveDisk },
-        [pscustomobject]@{ Name = "Recovery"; Before = $Before.RecoveryDisk; After = $After.RecoveryDisk },
+        [pscustomobject]@{ Name = "Recovery staging"; Before = $Before.RecoveryDisk; After = $After.RecoveryDisk },
         [pscustomobject]@{ Name = "Logs"; Before = $Before.LogsDisk; After = $After.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Before = $Before.OtherDisk; After = $After.OtherDisk },
         [pscustomobject]@{ Name = "Data folder"; Before = $Before.TotalDisk; After = $After.TotalDisk },
@@ -1849,7 +1849,7 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
         [pscustomobject]@{ Name = "SC Data sources"; Logical = $snapshot.SourcesLogical; Disk = $snapshot.SourcesDisk },
         [pscustomobject]@{ Name = "Rithmic targets"; Logical = $snapshot.RithmicLogical; Disk = $snapshot.RithmicDisk },
         [pscustomobject]@{ Name = "Bridge archive"; Logical = $snapshot.ArchiveLogical; Disk = $snapshot.ArchiveDisk },
-        [pscustomobject]@{ Name = "Recovery"; Logical = $snapshot.RecoveryLogical; Disk = $snapshot.RecoveryDisk },
+        [pscustomobject]@{ Name = "Recovery staging"; Logical = $snapshot.RecoveryLogical; Disk = $snapshot.RecoveryDisk },
         [pscustomobject]@{ Name = "Logs"; Logical = $snapshot.LogsLogical; Disk = $snapshot.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Logical = $snapshot.OtherLogical; Disk = $snapshot.OtherDisk },
         [pscustomobject]@{ Name = "Data folder"; Logical = $snapshot.TotalLogical; Disk = $snapshot.TotalDisk }
@@ -2661,6 +2661,87 @@ function Get-TargetStatus([string]$TargetPath) {
     }
 }
 
+function Test-LegacyScidSignatureEquivalent(
+    [string]$LegacySignature,
+    [string]$CurrentSignature) {
+
+    if ([string]::IsNullOrWhiteSpace($LegacySignature) -or
+        [string]::IsNullOrWhiteSpace($CurrentSignature) -or
+        -not $CurrentSignature.StartsWith("v2|")) {
+        return $false
+    }
+
+    $oldParts = $LegacySignature.Split('|')
+    $newParts = $CurrentSignature.Split('|')
+
+    if ($oldParts.Count -ne 3 -or
+        $newParts.Count -lt 5) {
+        return $false
+    }
+
+    try {
+        # Legacy: size | LastWriteTimeUtc.Ticks | last SCID timestamp
+        # v2:     v2 | size | first timestamp | last timestamp | quick hash
+        return (
+            [long]$oldParts[0] -eq [long]$newParts[1] -and
+            [long]$oldParts[2] -eq [long]$newParts[3])
+    }
+    catch {
+        return $false
+    }
+}
+
+function Update-ScidStateMetadata(
+    $StateEntry,
+    $Candidate,
+    [string]$SourceSignature,
+    $TargetStatus) {
+
+    if ($null -eq $StateEntry -or
+        $StateEntry -is [string]) {
+
+        $StateEntry = [pscustomobject]@{}
+    }
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName source_signature `
+            -NotePropertyValue $SourceSignature `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName target_path `
+            -NotePropertyValue $Candidate.Target `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName minimum_target_records `
+            -NotePropertyValue ([long]$TargetStatus.Records) `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName target_first_datetime `
+            -NotePropertyValue ([long]$TargetStatus.FirstDateTime) `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName minimum_target_last_datetime `
+            -NotePropertyValue ([long]$TargetStatus.LastDateTime) `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName scid_managed_by_bridge `
+            -NotePropertyValue $true `
+            -Force
+
+    return $StateEntry
+}
+
 function Test-ProcessedTargetStillValid(
     $StateEntry,
     [string]$SourceSignature,
@@ -2673,8 +2754,17 @@ function Test-ProcessedTargetStillValid(
     }
 
     if ($null -eq $StateEntry -or
-        -not $StateEntry.source_signature -or
-        [string]$StateEntry.source_signature -ne $SourceSignature) {
+        -not $StateEntry.source_signature) {
+        return $false
+    }
+
+    $savedSignature =
+        [string]$StateEntry.source_signature
+
+    if ($savedSignature -ne $SourceSignature -and
+        -not (Test-LegacyScidSignatureEquivalent `
+            $savedSignature `
+            $SourceSignature)) {
         return $false
     }
 
@@ -3563,6 +3653,9 @@ function Invoke-SierraHistoryBridge {
     $unchanged = 0
     $unverified = 0
 
+    $fullValidationChoiceMade = $false
+    $allowFullValidation = $true
+
     foreach ($candidate in $candidates) {
         if (-not $scales.ContainsKey($candidate.Group)) {
             $unverified++
@@ -3574,9 +3667,8 @@ function Invoke-SierraHistoryBridge {
 
         if ($candidate.HasScid) {
             $signature =
-                "$($candidate.Size)|" +
-                "$($candidate.ModifiedTicks)|" +
-                "$($candidate.Last)"
+                [SierraHistoryBridge.ScidBridge]::GetQuickSignature(
+                    $candidate.Source)
 
             $targetStatus =
                 Get-TargetStatus $candidate.Target
@@ -3612,6 +3704,66 @@ function Invoke-SierraHistoryBridge {
                     $signature `
                     $targetStatus)
             }
+
+        $scidStateRefreshed = $false
+
+        if ($candidate.HasScid -and
+            -not $Force -and
+            $targetStatus -and
+            $targetStatus.Exists -and
+            $targetStatus.Kind -eq "data") {
+
+            if ($scidCurrent -and
+                $stateEntry -and
+                $stateEntry -isnot [string] -and
+                [string]$stateEntry.source_signature -ne $signature) {
+
+                $stateEntry =
+                    Update-ScidStateMetadata `
+                        $stateEntry `
+                        $candidate `
+                        $signature `
+                        $targetStatus
+
+                $stateTable[$candidate.StateKey] =
+                    $stateEntry
+
+                $stateDirty = $true
+                $scidStateRefreshed = $true
+            }
+            elseif (-not $scidCurrent -and
+                $scales.ContainsKey($candidate.Group)) {
+
+                try {
+                    $alreadyConverted =
+                        [SierraHistoryBridge.ScidBridge]::QuickConvertedPairMatches(
+                            $candidate.Source,
+                            $candidate.Target,
+                            [double]$scales[$candidate.Group])
+
+                    if ($alreadyConverted) {
+                        $scidCurrent = $true
+
+                        $stateEntry =
+                            Update-ScidStateMetadata `
+                                $stateEntry `
+                                $candidate `
+                                $signature `
+                                $targetStatus
+
+                        $stateTable[$candidate.StateKey] =
+                            $stateEntry
+
+                        $stateDirty = $true
+                        $scidStateRefreshed = $true
+                    }
+                }
+                catch {
+                    # A changing pair remains dirty and will go through normal
+                    # preflight/defer handling below.
+                }
+            }
+        }
 
         $dailySignature = $null
         $dailyTargetStatus = $null
@@ -3671,6 +3823,14 @@ function Invoke-SierraHistoryBridge {
                     $dailyCurrent = $false
                 }
             }
+        }
+
+        if ($scidStateRefreshed) {
+            $candidate |
+                Add-Member `
+                    -NotePropertyName PreviousState `
+                    -NotePropertyValue $stateEntry `
+                    -Force
         }
 
         if ($dailyStateRefreshed) {
@@ -3810,6 +3970,44 @@ function Invoke-SierraHistoryBridge {
 
             if ($candidate.ScidNeeded -and
                 -not $candidate.LiveScidUpdate -and
+                -not $fullValidationChoiceMade) {
+
+                $fullValidationChoiceMade = $true
+
+                if ($Interactive -and -not $Yes) {
+                    Write-Host
+                    Write-Host (
+                        "Full SCID validation is needed for changed or unknown historical files.") `
+                        -ForegroundColor Yellow
+                    Write-Host (
+                        "It scans complete multi-GB files and can take several minutes.")
+                    Write-Host (
+                        "If skipped, those SCID updates are left untouched and deferred.")
+
+                    $answer =
+                        Read-Host "Run full SCID validation now? [Y/n]"
+
+                    if ($answer.Trim().ToLowerInvariant() -in @("n", "no")) {
+                        $allowFullValidation = $false
+                    }
+                }
+            }
+
+            if ($candidate.ScidNeeded -and
+                -not $candidate.LiveScidUpdate -and
+                -not $allowFullValidation) {
+
+                $candidate.ScidDeferred = $true
+                $candidate.ScidSkipped = $true
+                $candidate.ScidDeferReason =
+                    "full SCID validation skipped by user"
+                $candidate.ScidAction = "defer"
+                $candidate.ScidNeeded = $false
+                $deferredScid += $candidate
+            }
+
+            if ($candidate.ScidNeeded -and
+                -not $candidate.LiveScidUpdate -and
                 $candidate.TargetStatus.Exists -and
                 $candidate.TargetStatus.Kind -eq "data" -and
                 $scales.ContainsKey($candidate.Group)) {
@@ -3861,7 +4059,8 @@ function Invoke-SierraHistoryBridge {
                     $candidate.ModifiedTicks =
                         [long]$candidate.ScidValidation.SourceWriteTimeUtcTicks
                     $candidate.Signature =
-                        "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+                        [SierraHistoryBridge.ScidBridge]::GetQuickSignature(
+                            $candidate.Source)
                 }
                 catch {
                     [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -3905,7 +4104,8 @@ function Invoke-SierraHistoryBridge {
                     $candidate.ModifiedTicks =
                         [long]$candidate.ScidFileValidation.WriteTimeUtcTicks
                     $candidate.Signature =
-                        "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+                        [SierraHistoryBridge.ScidBridge]::GetQuickSignature(
+                            $candidate.Source)
                 }
                 catch {
                     [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
