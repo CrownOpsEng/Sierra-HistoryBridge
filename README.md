@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.10 — pre-stable**
+**Version 0.0.11 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -94,6 +94,33 @@ The bridge manages:
 Older SC Data files remain under their two-digit-year names and are not
 converted to conflicting Rithmic filenames.
 
+
+## Sierra Chart while updating
+
+Sierra Chart does not normally need to be closed for historical updates.
+
+The bridge distinguishes recent SCID targets from historical files. A SCID
+update is treated as live-sensitive when its source/target contains data from
+the last seven days or the target file was modified within the last ten
+minutes. The time window is a conservative safety check for weekends and
+exchange holidays.
+
+When Sierra Chart is running and a live-sensitive SCID update is required, the
+application offers:
+
+1. disconnect Sierra Chart and close the affected chartbooks, then update all
+2. close Sierra Chart, then update all
+3. skip the live SCID update and continue with the remaining historical/DLY
+   work, when remaining work exists
+4. cancel
+
+When only historical files are being updated, Sierra Chart can remain open.
+Charts that were already open should use **Chart > Reload and Recalculate**
+afterward so they reread their chart-data files from disk.
+
+The application does not silently mark a skipped live SCID source as processed.
+It will remain eligible on the next run.
+
 ## Backups and logs
 
 Existing Rithmic files are backed up before replacement.
@@ -113,7 +140,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.10 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.11 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 

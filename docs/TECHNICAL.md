@@ -141,3 +141,37 @@ When a one-digit Rithmic symbol is reused by a newer decade, the eligible source
 replaces the old target content. SCID conversion keeps only target records newer
 than the source boundary. Historical Daily processing keeps only the latest
 overlapping date and target dates newer than the source boundary.
+
+
+## Live-file handling
+
+Sierra Chart opens SCID files with shared read/write access and can buffer
+streaming data before flushing it to disk. Replacing a file that can still
+receive streaming writes therefore requires a different policy from replacing
+an expired historical contract.
+
+A pending SCID update is classified as live-sensitive when any of the following
+is true:
+
+- the SC Data source ends within the last seven days
+- the existing Rithmic target ends within the last seven days
+- the Rithmic target was modified within the last ten minutes
+
+The seven-day interval is a safety margin for weekends and exchange holidays.
+It is not used to decide contract rollover or trading eligibility.
+
+When Sierra Chart is running, live-sensitive SCID replacement requires either:
+
+- disconnecting the data feed and closing the affected chartbooks, or
+- closing Sierra Chart
+
+The user can instead skip those SCID files and continue with independent
+Historical Daily or expired-contract updates.
+
+Historical files are attempted while Sierra Chart remains open. If an open file
+handle prevents replacement, the operation fails without replacing the target
+and the user can close the affected chart/chartbook and retry.
+
+After a successful historical replacement, **Chart > Reload and Recalculate**
+causes an already-open chart to reread its chart-data file.
+

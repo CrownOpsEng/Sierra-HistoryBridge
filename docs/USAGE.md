@@ -60,6 +60,37 @@ normal historical data and is replaced from SC Data.
 
 Rithmic dates newer than the latest SC Data date are retained. Older target-only dates are not carried forward.
 
+
+## Updating while Sierra Chart is running
+
+Historical updates do not require Sierra Chart to be closed.
+
+If the update plan contains a recent SCID target, the bridge treats it as a
+possible live file and asks how to proceed:
+
+```text
+1. Update all - disconnect Sierra Chart and close affected chartbooks
+2. Update all - close Sierra Chart
+3. Skip live SCID updates and continue with remaining updates
+4. Cancel
+```
+
+Option 3 is shown only when there is other work to perform.
+
+For option 1, use **File > Disconnect** and close the chartbooks using the live
+symbol. **File > Close All Chartbooks** is the simplest choice when several
+charts use that symbol.
+
+For historical-only updates, Sierra Chart can remain open. If an affected chart
+was already open, use **Chart > Reload and Recalculate** after the update.
+
+If Windows reports that a historical target is in use, close the affected
+chart/chartbook and run the bridge again.
+
+When `-Yes` is used while Sierra Chart is running, live SCID updates are skipped
+when other work is available. The switch does not bypass the live-file safety
+check.
+
 ## Dry run
 
 ```powershell

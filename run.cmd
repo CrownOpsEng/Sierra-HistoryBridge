@@ -17,5 +17,14 @@ if exist "%~dp0app\SierraHistoryBridge.ps1" (
 )
 
 "%PWSH%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%APP%" -Interactive %*
-exit /b %ERRORLEVEL%
+set "RC=%ERRORLEVEL%"
+
+if not "%RC%"=="0" (
+    echo.
+    echo Sierra History Bridge exited with error code %RC%.
+    echo If no error was shown above, run repair.cmd and try again.
+    pause
+)
+
+exit /b %RC%
 

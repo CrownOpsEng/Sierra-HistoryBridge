@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.10 - 2026-08-07
+## v0.0.11 - 2026-08-07
 
 Initial pre-stable release.
 
@@ -29,6 +29,24 @@ Initial pre-stable release.
 - metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
+
+- run.cmd now keeps nonzero startup failures visible
+
+- package tests now parse every PowerShell source file
+
+- removed an unnecessary type literal from SCID timestamp conversion
+
+- fixed a PowerShell parse error in the live-aware final warning condition
+
+- updated open historical charts are directed to Chart > Reload and Recalculate
+
+- skipped live SCID sources remain pending for a later run
+
+- live SCID updates offer disconnect/close-chartbooks, close-Sierra, skip-live, or cancel choices
+
+- recent SCID targets receive live-file handling instead of a global Sierra Chart shutdown requirement
+
+- Sierra Chart can remain open for historical-only updates
 
 - current-user and all-users installation
 - File Explorer folder/background command

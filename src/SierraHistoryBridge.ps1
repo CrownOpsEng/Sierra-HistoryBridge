@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.10"
+$Version = "0.0.11"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -241,6 +241,95 @@ function Test-SierraChartRunning {
         Select-Object -First 1
 
     return $null -ne $process
+}
+
+function Convert-ScDateTimeToUtc([long]$Value) {
+    if ($Value -le 0) {
+        return $null
+    }
+
+    try {
+        $epoch =
+            [datetime]::SpecifyKind(
+                [datetime]"1899-12-30",
+                [DateTimeKind]::Utc)
+
+        return $epoch.AddTicks(
+            ($Value * 10L))
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-LiveScidCandidate($Candidate) {
+    if (-not $Candidate.ScidNeeded) {
+        return $false
+    }
+
+    # A seven-day data lookback covers normal weekends and exchange holidays.
+    # It is intentionally conservative: the purpose is to identify intraday
+    # targets that can still plausibly receive current service writes.
+    $cutoff =
+        (Get-Date).ToUniversalTime().AddDays(-7)
+
+    $sourceLast =
+        Convert-ScDateTimeToUtc ([long]$Candidate.Last)
+
+    if ($sourceLast -and $sourceLast -ge $cutoff) {
+        return $true
+    }
+
+    if ($Candidate.TargetStatus -and
+        $Candidate.TargetStatus.LastDateTime -gt 0) {
+
+        $targetLast =
+            Convert-ScDateTimeToUtc (
+                [long]$Candidate.TargetStatus.LastDateTime)
+
+        if ($targetLast -and $targetLast -ge $cutoff) {
+            return $true
+        }
+    }
+
+    try {
+        if (Test-Path -LiteralPath $Candidate.Target -PathType Leaf) {
+            $targetItem =
+                Get-Item -LiteralPath $Candidate.Target
+
+            if ($targetItem.LastWriteTimeUtc -ge
+                (Get-Date).ToUniversalTime().AddMinutes(-10)) {
+                return $true
+            }
+        }
+    }
+    catch { }
+
+    return $false
+}
+
+function Get-CandidateSourceDisplay($Candidate) {
+    if ($Candidate.HasScid -and $Candidate.SourceName) {
+        return Get-CompactName $Candidate.SourceName
+    }
+
+    if ($Candidate.DailySourceName) {
+        return Get-CompactName $Candidate.DailySourceName
+    }
+
+    return $Candidate.ContractKey
+}
+
+function Get-CandidateTargetDisplay($Candidate) {
+    if ($Candidate.HasScid -and $Candidate.TargetName) {
+        return Get-CompactName $Candidate.TargetName
+    }
+
+    if ($Candidate.DailyTargetName) {
+        return Get-CompactName $Candidate.DailyTargetName
+    }
+
+    return $Candidate.ContractKey
 }
 
 function Get-ScaleTable($Config) {
@@ -1066,6 +1155,11 @@ function Invoke-SierraHistoryBridge {
                 $null
             }
 
+        $candidate |
+            Add-Member `
+                -NotePropertyName PreviousState `
+                -NotePropertyValue $stateEntry
+
         $scidCurrent =
             if (-not $candidate.HasScid) {
                 $true
@@ -1126,6 +1220,17 @@ function Invoke-SierraHistoryBridge {
             continue
         }
 
+        $candidate |
+            Add-Member `
+                -NotePropertyName LiveScidUpdate `
+                -NotePropertyValue (
+                    Test-LiveScidCandidate $candidate)
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidSkipped `
+                -NotePropertyValue $false
+
         $ready += $candidate
     }
 
@@ -1179,10 +1284,14 @@ function Invoke-SierraHistoryBridge {
                 "DLY current"
             }
 
+        if ($candidate.LiveScidUpdate) {
+            $scidPlan += " [LIVE]"
+        }
+
         Write-Host (
             "  UPDATE  {0} -> {1} | {2} | {3}" -f
-            (Get-CompactName $candidate.SourceName),
-            (Get-CompactName $candidate.TargetName),
+            (Get-CandidateSourceDisplay $candidate),
+            (Get-CandidateTargetDisplay $candidate),
             $scidPlan,
             $dailyPlan)
     }
@@ -1227,15 +1336,155 @@ function Invoke-SierraHistoryBridge {
         }
     }
 
-    if (Test-SierraChartRunning) {
-        Write-Host
-        Write-Host "Sierra Chart: RUNNING - close all instances before update." -ForegroundColor Yellow
+    $sierraWasRunning =
+        Test-SierraChartRunning
 
-        while (Test-SierraChartRunning) {
-            Read-Host "Press Enter after Sierra Chart is closed" | Out-Null
+    $sierraHandling = "not-running"
+    $reloadAfterUpdate = $false
+    $skippedLiveNames =
+        New-Object System.Collections.Generic.List[string]
+
+    $liveScidCandidates =
+        @(
+            $ready |
+            Where-Object {
+                $_.ScidNeeded -and
+                $_.LiveScidUpdate
+            }
+        )
+
+    $remainingWorkIfLiveSkipped =
+        @(
+            $ready |
+            Where-Object {
+                $_.DailyNeeded -or
+                (
+                    $_.ScidNeeded -and
+                    -not $_.LiveScidUpdate
+                )
+            }
+        ).Count + $retire.Count
+
+    if ($sierraWasRunning -and
+        $liveScidCandidates.Count -gt 0) {
+
+        Write-Host
+        Write-Host "Live intraday update(s) detected:" -ForegroundColor Yellow
+
+        foreach ($candidate in $liveScidCandidates) {
+            Write-Host (
+                "  {0}" -f
+                (Get-CandidateTargetDisplay $candidate))
         }
 
-        Write-Host "Sierra Chart: CLOSED"
+        Write-Host
+        Write-Host (
+            "These SCID files contain recent data and can still receive writes " +
+            "while Sierra Chart is connected.")
+
+        if ($Yes) {
+            if ($remainingWorkIfLiveSkipped -gt 0) {
+                $choice = "3"
+            }
+            else {
+                $choice = "4"
+            }
+        }
+        else {
+            Write-Host
+            Write-Host "Choose how to continue:"
+            Write-Host "  1. Update all - disconnect Sierra Chart and close affected chartbooks."
+            Write-Host "  2. Update all - close Sierra Chart."
+            if ($remainingWorkIfLiveSkipped -gt 0) {
+                Write-Host "  3. Skip live SCID updates and continue with the remaining updates."
+            }
+            Write-Host "  4. Cancel."
+
+            do {
+                $choice =
+                    (Read-Host "Selection").Trim()
+
+                $validChoices =
+                    if ($remainingWorkIfLiveSkipped -gt 0) {
+                        @("1", "2", "3", "4")
+                    }
+                    else {
+                        @("1", "2", "4")
+                    }
+            }
+            until ($validChoices -contains $choice)
+        }
+
+        switch ($choice) {
+            "1" {
+                $sierraHandling = "disconnected"
+
+                Write-Host
+                Write-Host "In Sierra Chart:"
+                Write-Host "  1. File > Disconnect"
+                Write-Host "  2. Close chartbooks using the live file(s)."
+                Write-Host "     File > Close All Chartbooks is the simplest option."
+                Write-Host
+
+                Read-Host "Press Enter when Sierra Chart is disconnected and the affected charts are closed" |
+                    Out-Null
+            }
+
+            "2" {
+                $sierraHandling = "closed"
+
+                Write-Host
+                Write-Host "Close Sierra Chart to continue."
+
+                while (Test-SierraChartRunning) {
+                    Read-Host "Press Enter after Sierra Chart is closed" |
+                        Out-Null
+                }
+
+                Write-Host "Sierra Chart: CLOSED"
+            }
+
+            "3" {
+                $sierraHandling = "skip-live"
+                $reloadAfterUpdate = $true
+
+                foreach ($candidate in $liveScidCandidates) {
+                    $candidate.ScidSkipped = $true
+                    $candidate.ScidNeeded = $false
+
+                    $skippedLiveNames.Add(
+                        (Get-CandidateTargetDisplay $candidate))
+                }
+
+                $ready =
+                    @(
+                        $ready |
+                        Where-Object {
+                            $_.ScidNeeded -or
+                            $_.DailyNeeded
+                        }
+                    )
+
+                Write-Host
+                Write-Host (
+                    "Live SCID update(s) skipped. Continuing with {0} remaining contract update(s)." -f
+                    $ready.Count)
+            }
+
+            "4" {
+                Write-Host "Cancelled. No files were changed."
+                return 0
+            }
+        }
+    }
+    elseif ($sierraWasRunning) {
+        $sierraHandling = "open-historical"
+        $reloadAfterUpdate = $true
+
+        Write-Host
+        Write-Host (
+            "Sierra Chart is running. No live SCID files are being updated; " +
+            "Sierra Chart can remain open.")
     }
 
     Write-Host
@@ -1328,8 +1577,10 @@ function Invoke-SierraHistoryBridge {
     for ($index = 0; $index -lt $ready.Count; $index++) {
         $candidate = $ready[$index]
 
-        $sourceDisplay = Get-CompactName $candidate.SourceName
-        $targetDisplay = Get-CompactName $candidate.TargetName
+        $sourceDisplay =
+            Get-CandidateSourceDisplay $candidate
+        $targetDisplay =
+            Get-CandidateTargetDisplay $candidate
         $statusPrefix =
             "[{0}/{1}] {2} -> {3}" -f
             ($index + 1),
@@ -1406,9 +1657,20 @@ function Invoke-SierraHistoryBridge {
                 $dailyTargetMeta = $null
             }
 
+            $previousState =
+                $candidate.PreviousState
+
             $stateTable[$candidate.StateKey] = [pscustomobject]@{
                 source_signature =
-                    if ($candidate.HasScid) {
+                    if ($candidate.ScidSkipped) {
+                        if ($previousState) {
+                            $previousState.source_signature
+                        }
+                        else {
+                            $null
+                        }
+                    }
+                    elseif ($candidate.HasScid) {
                         $candidate.Signature
                     }
                     else {
@@ -1416,21 +1678,48 @@ function Invoke-SierraHistoryBridge {
                     }
                 target_path = $candidate.Target
                 minimum_target_records =
-                    if ($targetMeta) {
+                    if ($candidate.ScidSkipped) {
+                        if ($previousState -and
+                            $previousState.minimum_target_records) {
+                            [long]$previousState.minimum_target_records
+                        }
+                        else {
+                            0
+                        }
+                    }
+                    elseif ($targetMeta) {
                         [long]$targetMeta.Records
                     }
                     else {
                         0
                     }
                 target_first_datetime =
-                    if ($targetMeta) {
+                    if ($candidate.ScidSkipped) {
+                        if ($previousState -and
+                            $previousState.target_first_datetime) {
+                            [long]$previousState.target_first_datetime
+                        }
+                        else {
+                            0
+                        }
+                    }
+                    elseif ($targetMeta) {
                         [long]$targetMeta.FirstDateTime
                     }
                     else {
                         0
                     }
                 minimum_target_last_datetime =
-                    if ($targetMeta) {
+                    if ($candidate.ScidSkipped) {
+                        if ($previousState -and
+                            $previousState.minimum_target_last_datetime) {
+                            [long]$previousState.minimum_target_last_datetime
+                        }
+                        else {
+                            0
+                        }
+                    }
+                    elseif ($targetMeta) {
                         [long]$targetMeta.LastDateTime
                     }
                     else {
@@ -1476,7 +1765,10 @@ function Invoke-SierraHistoryBridge {
             $statusParts =
                 New-Object System.Collections.Generic.List[string]
 
-            if ($scidResult) {
+            if ($candidate.ScidSkipped) {
+                $statusParts.Add("SCID skipped")
+            }
+            elseif ($scidResult) {
                 if ($scidResult.TailRecords -gt 0) {
                     $statusParts.Add(
                         "SCID src={0:N0} + newer={1:N0} -> out={2:N0}" -f
@@ -1623,7 +1915,8 @@ function Invoke-SierraHistoryBridge {
                 "$statusPrefix | FAILED | $compactError")
 
             $entry =
-                "ERROR $($candidate.SourceName) -> $($candidate.TargetName): " +
+                "ERROR $(Get-CandidateSourceDisplay $candidate) -> " +
+                "$(Get-CandidateTargetDisplay $candidate): " +
                 $_.Exception.Message
 
             $log.Add($entry)
@@ -1651,6 +1944,52 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host "Log:     $logPath"
     Write-Host "Backups: $backupDirectory"
+
+    if ($skippedLiveNames.Count -gt 0) {
+        Write-Host
+        Write-Host "Skipped live SCID update(s):"
+        foreach ($name in $skippedLiveNames) {
+            Write-Host "  $name"
+        }
+        Write-Host "Run the bridge again when you are ready to update them."
+    }
+
+    switch ($sierraHandling) {
+        "open-historical" {
+            Write-Host
+            Write-Host (
+                "Sierra Chart remained open. For any updated chart that was " +
+                "already open, use Chart > Reload and Recalculate.")
+        }
+
+        "skip-live" {
+            Write-Host
+            Write-Host (
+                "Sierra Chart remained open. For any updated historical/daily " +
+                "chart that was already open, use Chart > Reload and Recalculate.")
+        }
+
+        "disconnected" {
+            Write-Host
+            Write-Host (
+                "You can reopen the affected chartbooks and use " +
+                "File > Connect to Data Feed.")
+        }
+
+        "closed" {
+            Write-Host
+            Write-Host "You can start Sierra Chart."
+        }
+    }
+
+    if ($failed -gt 0 -and
+        (Test-SierraChartRunning)) {
+
+        Write-Host
+        Write-Host (
+            "If a historical file failed because it was in use, close the " +
+            "affected chart/chartbook and run the bridge again.") -ForegroundColor Yellow
+    }
 
     if ($failed -gt 0) {
         return 2

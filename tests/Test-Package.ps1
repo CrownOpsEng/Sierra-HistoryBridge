@@ -46,6 +46,12 @@ if ($converterText -match '\bHashSet\s*<') {
 
 $appText = Get-Content -LiteralPath (Join-Path $RepoRoot "src\SierraHistoryBridge.ps1") -Raw
 
+
+if ($appText -match '(?m)-and\s*\r?\n\s*Test-SierraChartRunning\)') {
+    throw "Sierra-running regression: command invocation is not parenthesized inside a boolean expression."
+}
+
+
 foreach ($requiredPolicyToken in @(
     '$usableHistoryYears = 5',
     '$historyBufferMonths = 3',
@@ -82,6 +88,23 @@ if ($converterText -notmatch 'public static ScaleInference InferScale') {
     throw "Historical Daily regression: Daily scale inference is missing."
 }
 
+
+if ($appText -match 'close all instances before update') {
+    throw "Sierra-running regression: global shutdown requirement was reintroduced."
+}
+
+foreach ($requiredLiveToken in @(
+    'Test-LiveScidCandidate',
+    'Skip live SCID updates',
+    'File > Disconnect',
+    'Reload and Recalculate',
+    'ScidSkipped'
+)) {
+    if ($appText -notlike "*$requiredLiveToken*") {
+        throw "Sierra-running regression: missing $requiredLiveToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",
@@ -107,28 +130,26 @@ foreach ($relative in $required) {
     }
 }
 
-$tokens = $null
-$errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $RepoRoot "scripts\Setup.ps1"),
-    [ref]$tokens,
-    [ref]$errors
-) | Out-Null
+$powerShellFiles =
+    Get-ChildItem -LiteralPath $RepoRoot -Recurse -File -Filter "*.ps1"
 
-if ($errors.Count -gt 0) {
-    throw "Setup.ps1 parse error: $($errors[0].Message)"
-}
+foreach ($powerShellFile in $powerShellFiles) {
+    $tokens = $null
+    $errors = $null
 
-$tokens = $null
-$errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $RepoRoot "src\SierraHistoryBridge.ps1"),
-    [ref]$tokens,
-    [ref]$errors
-) | Out-Null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $powerShellFile.FullName,
+        [ref]$tokens,
+        [ref]$errors
+    ) | Out-Null
 
-if ($errors.Count -gt 0) {
-    throw "SierraHistoryBridge.ps1 parse error: $($errors[0].Message)"
+    if ($errors.Count -gt 0) {
+        throw (
+            "{0} parse error at line {1}: {2}" -f
+            $powerShellFile.FullName,
+            $errors[0].Extent.StartLineNumber,
+            $errors[0].Message)
+    }
 }
 
 $dist = Join-Path $env:TEMP ("SierraHistoryBridge-PackageTest-" + [guid]::NewGuid().ToString("N"))
