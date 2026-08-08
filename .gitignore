@@ -1,0 +1,25 @@
+# Local application state
+config.json
+state.json
+
+# Sierra Chart data
+*.scid
+*.depth
+SCID_Bridge_Backups/
+SCID_Bridge_Logs/
+
+# Temporary conversion files
+*.scbridge.tmp
+
+# Release archives
+*.zip
+
+# Python development tools
+__pycache__/
+*.py[cod]
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

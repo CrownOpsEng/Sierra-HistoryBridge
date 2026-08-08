@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: MPL-2.0
+name: Bug report
+description: Report a reproducible Sierra History Bridge problem
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use copied market-data files only. Remove credentials, account details,
+        and unrelated trading records before submitting logs or attachments.
+  - type: input
+    id: version
+    attributes:
+      label: Sierra History Bridge version
+      placeholder: v0.0.35
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+    validations:
+      required: true
+  - type: input
+    id: sierra
+    attributes:
+      label: Sierra Chart version
+    validations:
+      required: true
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Operation
+      options:
+        - Update
+        - Archive
+        - Restore
+        - Rollback
+        - Storage
+        - Setup or Repair
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: Include the smallest reproducible sequence and sanitized filenames.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or additional context
+      description: Do not include credentials, account details, or unrelated trading data.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data-safety confirmation
+      options:
+        - label: I reproduced this only with copied data, not an active Sierra Chart Data folder.
+          required: true

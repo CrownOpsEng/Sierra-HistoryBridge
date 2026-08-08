@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: MPL-2.0
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+validator="$repo_root/scripts/validate_commit_messages.py"
+
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$validator" --message-file "$1"
+fi
+
+if command -v py >/dev/null 2>&1; then
+    exec py -3 "$validator" --message-file "$1"
+fi
+
+if command -v python >/dev/null 2>&1; then
+    exec python "$validator" --message-file "$1"
+fi
+
+echo "Python 3 is required to validate the commit message." >&2
+exit 1

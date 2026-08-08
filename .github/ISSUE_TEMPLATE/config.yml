@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MPL-2.0
+blank_issues_enabled: false
+contact_links:
+  - name: Security or privately reportable integrity issue
+    url: https://github.com/CrownOpsEng/Sierra-HistoryBridge/security/advisories/new
+    about: Report vulnerabilities and sensitive integrity problems privately.
+  - name: Support guidance
+    url: https://github.com/CrownOpsEng/Sierra-HistoryBridge/blob/main/SUPPORT.md
+    about: Review supported help channels and safe reporting guidance.
