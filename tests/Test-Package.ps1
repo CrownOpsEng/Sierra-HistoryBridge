@@ -105,6 +105,15 @@ foreach ($requiredLiveToken in @(
     }
 }
 
+
+if ($appText -match '(?s)\.Add\(\s*"[^"]+"\s*-f\s*[\r\n ]+\$[^)]*,') {
+    throw "Formatting regression: a comma-separated -f expression is being passed directly to .Add(...)."
+}
+
+if ($appText -notmatch 'REPORTING WARNING') {
+    throw "Reporting-safety regression: committed updates are not protected from reporting failures."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

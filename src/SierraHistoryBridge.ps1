@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.11"
+$Version = "0.0.12"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1590,6 +1590,7 @@ function Invoke-SierraHistoryBridge {
 
         $scidResult = $null
         $dailyResult = $null
+        $operationCommitted = $false
 
         try {
             if ($candidate.ScidNeeded) {
@@ -1762,6 +1763,9 @@ function Invoke-SierraHistoryBridge {
                     }
             }
 
+            $operationCommitted = $true
+            $updated++
+
             $statusParts =
                 New-Object System.Collections.Generic.List[string]
 
@@ -1770,41 +1774,51 @@ function Invoke-SierraHistoryBridge {
             }
             elseif ($scidResult) {
                 if ($scidResult.TailRecords -gt 0) {
-                    $statusParts.Add(
+                    $scidStatus =
                         "SCID src={0:N0} + newer={1:N0} -> out={2:N0}" -f
                         $scidResult.SourceRecords,
                         $scidResult.TailRecords,
-                        $scidResult.OutputRecords)
+                        $scidResult.OutputRecords
+
+                    $statusParts.Add($scidStatus)
                 }
                 else {
-                    $statusParts.Add(
+                    $scidStatus =
                         "SCID src={0:N0} -> out={1:N0}" -f
                         $scidResult.SourceRecords,
-                        $scidResult.OutputRecords)
+                        $scidResult.OutputRecords
+
+                    $statusParts.Add($scidStatus)
                 }
             }
             elseif ($targetMeta) {
-                $statusParts.Add(
+                $scidStatus =
                     "SCID current={0:N0}" -f
-                    $targetMeta.Records)
+                    $targetMeta.Records
+
+                $statusParts.Add($scidStatus)
             }
             else {
                 $statusParts.Add("SCID none")
             }
 
             if ($dailyResult) {
-                $statusParts.Add(
+                $dailyStatus =
                     "DLY src={0:N0} applied={1:N0} kept={2:N0} replaced={3:N0} -> out={4:N0}" -f
                     $dailyResult.SourceRecords,
                     $dailyResult.SourceAppliedRecords,
                     $dailyResult.PreservedTargetRecords,
                     $dailyResult.ReplacedOrDroppedTargetRecords,
-                    $dailyResult.OutputRecords)
+                    $dailyResult.OutputRecords
+
+                $statusParts.Add($dailyStatus)
             }
             elseif ($dailyTargetMeta) {
-                $statusParts.Add(
+                $dailyStatus =
                     "DLY current={0:N0}" -f
-                    $dailyTargetMeta.Records)
+                    $dailyTargetMeta.Records
+
+                $statusParts.Add($dailyStatus)
             }
             else {
                 $statusParts.Add("DLY none")
@@ -1840,8 +1854,6 @@ function Invoke-SierraHistoryBridge {
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
                 $finalStatus)
-
-            $updated++
 
             if ($scidResult) {
                 $entry =
@@ -1904,23 +1916,73 @@ function Invoke-SierraHistoryBridge {
             }
         }
         catch {
-            $failed++
-
             $compactError = $_.Exception.Message
             if ($compactError.Length -gt 100) {
-                $compactError = $compactError.Substring(0, 97) + "..."
+                $compactError =
+                    $compactError.Substring(0, 97) + "..."
             }
 
-            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "$statusPrefix | FAILED | $compactError")
+            if ($operationCommitted) {
+                $warningFiles++
 
-            $entry =
-                "ERROR $(Get-CandidateSourceDisplay $candidate) -> " +
-                "$(Get-CandidateTargetDisplay $candidate): " +
-                $_.Exception.Message
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$statusPrefix | OK | reporting warning: $compactError")
 
-            $log.Add($entry)
-            Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
+                $entry =
+                    "REPORTING WARNING " +
+                    "$(Get-CandidateSourceDisplay $candidate) -> " +
+                    "$(Get-CandidateTargetDisplay $candidate): " +
+                    $_.Exception.Message
+
+                $log.Add($entry)
+                Add-Content `
+                    -LiteralPath $logPath `
+                    -Value $entry `
+                    -Encoding UTF8
+            }
+            else {
+                $failed++
+
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$statusPrefix | FAILED | $compactError")
+
+                $entry =
+                    "ERROR $(Get-CandidateSourceDisplay $candidate) -> " +
+                    "$(Get-CandidateTargetDisplay $candidate): " +
+                    $_.Exception.Message
+
+                $log.Add($entry)
+                Add-Content `
+                    -LiteralPath $logPath `
+                    -Value $entry `
+                    -Encoding UTF8
+
+                if ($_.ScriptStackTrace) {
+                    $stackEntry =
+                        "STACK " +
+                        ($_.ScriptStackTrace -replace "[\r\n]+", " | ")
+
+                    $log.Add($stackEntry)
+                    Add-Content `
+                        -LiteralPath $logPath `
+                        -Value $stackEntry `
+                        -Encoding UTF8
+                }
+
+                if ($_.InvocationInfo -and
+                    $_.InvocationInfo.PositionMessage) {
+
+                    $positionEntry =
+                        "POSITION " +
+                        ($_.InvocationInfo.PositionMessage -replace "[\r\n]+", " | ")
+
+                    $log.Add($positionEntry)
+                    Add-Content `
+                        -LiteralPath $logPath `
+                        -Value $positionEntry `
+                        -Encoding UTF8
+                }
+            }
         }
     }
 
@@ -1956,17 +2018,21 @@ function Invoke-SierraHistoryBridge {
 
     switch ($sierraHandling) {
         "open-historical" {
-            Write-Host
-            Write-Host (
-                "Sierra Chart remained open. For any updated chart that was " +
-                "already open, use Chart > Reload and Recalculate.")
+            if ($updated -gt 0 -or $retiredTargets -gt 0) {
+                Write-Host
+                Write-Host (
+                    "Sierra Chart remained open. For any updated chart that was " +
+                    "already open, use Chart > Reload and Recalculate.")
+            }
         }
 
         "skip-live" {
-            Write-Host
-            Write-Host (
-                "Sierra Chart remained open. For any updated historical/daily " +
-                "chart that was already open, use Chart > Reload and Recalculate.")
+            if ($updated -gt 0 -or $retiredTargets -gt 0) {
+                Write-Host
+                Write-Host (
+                    "Sierra Chart remained open. For any updated historical/daily " +
+                    "chart that was already open, use Chart > Reload and Recalculate.")
+            }
         }
 
         "disconnected" {

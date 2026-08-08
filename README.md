@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.11 — pre-stable**
+**Version 0.0.12 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -140,7 +140,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.11 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.12 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 

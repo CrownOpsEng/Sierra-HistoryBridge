@@ -1,10 +1,18 @@
 # Changelog
 
-## v0.0.11 - 2026-08-07
+## v0.0.12 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- reload/recalculate guidance is shown only when at least one update or retirement completed
+
+- failed operations now record PowerShell stack and position details in the run log
+
+- reporting/status errors no longer classify an already committed file update as a conversion failure
+
+- fixed PowerShell status formatting that could report every completed contract as failed
 
 - DLY-only contracts are included even when no matching SCID source exists
 - Historical Daily scale can be verified from overlapping DLY files
