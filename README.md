@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.19 — pre-stable**
+**Version 0.0.20 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -170,7 +170,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.19 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.20 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -331,7 +331,7 @@ Explorer commands are deliberately scoped rather than added to every folder:
 The bridge does not install a global blank-space/background command. Windows'
 static `Directory\Background` verbs cannot be reliably filtered by the current
 folder using `AppliesTo`; making that menu truly dynamic requires an in-process
-Shell extension. Avoiding that Explorer-loaded component keeps v0.0.19 simpler
+Shell extension. Avoiding that Explorer-loaded component keeps v0.0.20 simpler
 and reduces the risk of slowing or destabilizing File Explorer.
 
 Archive and restore now wait interactively when Sierra Chart is open. Close all
@@ -344,7 +344,7 @@ window after the process is gone.
 Normal runs do not use Windows file modification time as proof that an SCID
 source changed. SCID state now uses a stable structural/content fingerprint
 (length, first/last timestamps, and deterministic record samples). Existing
-v0.0.19 state which used modification time is migrated without rewriting files
+v0.0.20 state which used modification time is migrated without rewriting files
 when the structural source identity is unchanged.
 
 If saved provenance is stale or missing but the current Rithmic-named target
@@ -368,3 +368,10 @@ do not accumulate.
 Storage Report also offers optional removal of original Rithmic baseline
 archives after a final independent validation proves that the complete SC Data
 source and current converted target are sound. This cleanup is never automatic.
+
+
+## No orphaned bridge folders
+
+Bridge-owned file deletion now prunes empty parent directories immediately,
+stopping only at a configured base folder. Cleanup no longer depends solely on
+an end-of-operation directory sweep.

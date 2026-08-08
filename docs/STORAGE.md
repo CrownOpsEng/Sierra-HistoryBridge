@@ -187,3 +187,27 @@ removal:
 
 Anything uncertain is retained. After deletion, empty `Rithmic_Baselines`
 directory structures are pruned automatically.
+
+
+## Prune-on-delete rule
+
+Every bridge-owned file removal uses a standard cleanup routine. Immediately
+after deleting the file, the bridge walks upward from its parent directory and
+removes every empty directory until it reaches the nearest configured base
+folder.
+
+The protected base folders are Sierra Data, Archive, Recovery, and Logs. The
+most specific matching base wins. When Archive is a child of Data, deleting the
+last file from:
+
+```text
+Archive\SC_Data\NQ-CME\2000
+```
+
+removes `2000`, `NQ-CME`, and `SC_Data`, but never the configured Archive folder
+or Sierra Data folder.
+
+The same rule is used by restore, baseline removal, archive temporary cleanup,
+recovery cleanup, and target retirement. A final full housekeeping sweep remains
+as a fallback. Persistent cleanup failures are reported instead of silently
+leaving an unexplained orphan.

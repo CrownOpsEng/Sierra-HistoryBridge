@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.19"
+$Version = "0.0.20"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1453,12 +1453,258 @@ function Invoke-SourceArchiveManager(
     return 0
 }
 
+function Get-BridgeProtectedRootForPath(
+    [string]$Path,
+    [string]$DataFolder) {
+
+    $fullPath =
+        [IO.Path]::GetFullPath(
+            $Path).TrimEnd('\')
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    # Choose the most specific configured root. Archive/Recovery/Logs can
+    # themselves live under Data, and pruning must stop at the configured
+    # sub-root rather than climbing all the way to Data.
+    $roots =
+        @(
+            $bridgePaths.Archive,
+            $bridgePaths.Recovery,
+            $bridgePaths.Logs,
+            $bridgePaths.Data
+        ) |
+        ForEach-Object {
+            [IO.Path]::GetFullPath(
+                [string]$_).TrimEnd('\')
+        } |
+        Sort-Object {
+            $_.Length
+        } -Descending
+
+    foreach ($root in $roots) {
+        if ($fullPath.Equals(
+                $root,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            $fullPath.StartsWith(
+                $root + '\',
+                [StringComparison]::OrdinalIgnoreCase)) {
+
+            return $root
+        }
+    }
+
+    return $null
+}
+
+function Remove-EmptyParentChain(
+    [string]$StartDirectory,
+    [string]$ProtectedRoot) {
+
+    if ([string]::IsNullOrWhiteSpace($StartDirectory) -or
+        [string]::IsNullOrWhiteSpace($ProtectedRoot)) {
+        return 0
+    }
+
+    $current =
+        [IO.Path]::GetFullPath(
+            $StartDirectory).TrimEnd('\')
+
+    $root =
+        [IO.Path]::GetFullPath(
+            $ProtectedRoot).TrimEnd('\')
+
+    $removed = 0
+
+    while (
+        -not $current.Equals(
+            $root,
+            [StringComparison]::OrdinalIgnoreCase) -and
+        $current.StartsWith(
+            $root + '\',
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $current `
+                -PathType Container)) {
+
+            $parent =
+                Split-Path `
+                    -Parent `
+                    $current
+
+            if ([string]::IsNullOrWhiteSpace($parent)) {
+                break
+            }
+
+            $current =
+                [IO.Path]::GetFullPath(
+                    $parent).TrimEnd('\')
+
+            continue
+        }
+
+        $remaining =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $current `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            )
+
+        if ($remaining.Count -gt 0) {
+            break
+        }
+
+        $deleted = $false
+
+        for ($attempt = 1;
+            $attempt -le 3;
+            $attempt++) {
+
+            try {
+                Remove-Item `
+                    -LiteralPath $current `
+                    -Force `
+                    -ErrorAction Stop
+
+                $deleted = $true
+                $removed++
+                break
+            }
+            catch {
+                if ($attempt -lt 3) {
+                    Start-Sleep `
+                        -Milliseconds 50
+                }
+                else {
+                    Write-Host (
+                        "  CLEANUP WARNING: could not remove empty folder: " +
+                        $current +
+                        " | " +
+                        $_.Exception.Message) `
+                        -ForegroundColor Yellow
+                }
+            }
+        }
+
+        if (-not $deleted) {
+            break
+        }
+
+        $parent =
+            Split-Path `
+                -Parent `
+                $current
+
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            break
+        }
+
+        $current =
+            [IO.Path]::GetFullPath(
+                $parent).TrimEnd('\')
+    }
+
+    return $removed
+}
+
+function Remove-BridgeOwnedFileAndPrune(
+    [string]$Path,
+    [string]$DataFolder,
+    [switch]$IgnoreMissing) {
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "Bridge-owned file path is empty."
+    }
+
+    $fullPath =
+        [IO.Path]::GetFullPath(
+            $Path)
+
+    $protectedRoot =
+        Get-BridgeProtectedRootForPath `
+            $fullPath `
+            $DataFolder
+
+    if (-not $protectedRoot) {
+        throw (
+            "Refusing bridge cleanup outside configured storage roots: " +
+            $fullPath)
+    }
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $fullPath `
+            -PathType Leaf)) {
+
+        if ($IgnoreMissing) {
+            # The paired file may already have been removed. Still prune from
+            # its expected parent in case it was the last item there.
+            $parent =
+                Split-Path `
+                    -Parent `
+                    $fullPath
+
+            return Remove-EmptyParentChain `
+                $parent `
+                $protectedRoot
+        }
+
+        throw "Bridge-owned file does not exist: $fullPath"
+    }
+
+    $parent =
+        Split-Path `
+            -Parent `
+            $fullPath
+
+    $deleted = $false
+
+    for ($attempt = 1;
+        $attempt -le 3;
+        $attempt++) {
+
+        try {
+            Remove-Item `
+                -LiteralPath $fullPath `
+                -Force `
+                -ErrorAction Stop
+
+            $deleted = $true
+            break
+        }
+        catch {
+            if ($attempt -lt 3) {
+                Start-Sleep `
+                    -Milliseconds 50
+            }
+            else {
+                throw
+            }
+        }
+    }
+
+    if (-not $deleted) {
+        return 0
+    }
+
+    return Remove-EmptyParentChain `
+        $parent `
+        $protectedRoot
+}
+
 function Remove-EmptyBridgeDirectories(
     [string]$Root,
     [switch]$PreserveRoot) {
 
     if ([string]::IsNullOrWhiteSpace($Root) -or
-        -not (Test-Path -LiteralPath $Root -PathType Container)) {
+        -not (
+            Test-Path `
+                -LiteralPath $Root `
+                -PathType Container)) {
+
         return 0
     }
 
@@ -1482,29 +1728,10 @@ function Remove-EmptyBridgeDirectories(
         )
 
     foreach ($directory in $directories) {
-        try {
-            $remaining =
-                @(
-                    Get-ChildItem `
-                        -LiteralPath $directory.FullName `
-                        -Force `
-                        -ErrorAction Stop
-                )
-
-            if ($remaining.Count -eq 0) {
-                Remove-Item `
-                    -LiteralPath $directory.FullName `
-                    -Force `
-                    -ErrorAction Stop
-
-                $removed++
-            }
-        }
-        catch {
-            # Directory cleanup is housekeeping only. Never turn a completed
-            # archive/restore into a failure because Windows kept a handle on
-            # an otherwise empty directory.
-        }
+        $removed +=
+            Remove-EmptyParentChain `
+                $directory.FullName `
+                $resolvedRoot
     }
 
     if (-not $PreserveRoot) {
@@ -1526,7 +1753,14 @@ function Remove-EmptyBridgeDirectories(
                 $removed++
             }
         }
-        catch { }
+        catch {
+            Write-Host (
+                "  CLEANUP WARNING: could not remove empty folder: " +
+                $resolvedRoot +
+                " | " +
+                $_.Exception.Message) `
+                -ForegroundColor Yellow
+        }
     }
 
     return $removed
@@ -1553,6 +1787,7 @@ function Invoke-BridgeDirectoryHousekeeping(
 
     return $removed
 }
+
 
 function Get-ArchivedSourceFiles([string]$DataFolder) {
     $bridgePaths =
@@ -1840,8 +2075,15 @@ function Invoke-SourceRestoreManager(
 
     foreach ($item in $alreadyPresent) {
         try {
-            Remove-Item -LiteralPath $item.ArchivePath -Force
-            Remove-Item -LiteralPath $item.MetadataPath -Force -ErrorAction SilentlyContinue
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $item.ArchivePath `
+                $ResolvedDataFolder)
+
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $item.MetadataPath `
+                $ResolvedDataFolder `
+                -IgnoreMissing)
+
             $deduplicated++
         }
         catch {
@@ -1911,8 +2153,15 @@ function Invoke-SourceRestoreManager(
                     [bool]$isScid,
                     $false)
 
-            Remove-Item -LiteralPath $item.ArchivePath -Force
-            Remove-Item -LiteralPath $item.MetadataPath -Force -ErrorAction SilentlyContinue
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $item.ArchivePath `
+                $ResolvedDataFolder)
+
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $item.MetadataPath `
+                $ResolvedDataFolder `
+                -IgnoreMissing)
+
             $restored++
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -2201,14 +2450,14 @@ function Invoke-VerifiedBaselineCleanup(
                     Get-Item `
                         -LiteralPath $item.ArchivePath).Length
 
-            Remove-Item `
-                -LiteralPath $item.ArchivePath `
-                -Force
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $item.ArchivePath `
+                $ResolvedDataFolder)
 
-            Remove-Item `
-                -LiteralPath $item.MetadataPath `
-                -Force `
-                -ErrorAction SilentlyContinue
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $item.MetadataPath `
+                $ResolvedDataFolder `
+                -IgnoreMissing)
 
             $removed++
             $reclaimed += $bytes
@@ -2394,9 +2643,9 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
                 $reclaimed +=
                     [long]$temp.Length
 
-                Remove-Item `
-                    -LiteralPath $temp.FullName `
-                    -Force
+                [void](Remove-BridgeOwnedFileAndPrune `
+                    $temp.FullName `
+                    $DataFolder)
 
                 $staleTemps++
             }
@@ -2515,76 +2764,6 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
         }
     }
 
-    $cutoff =
-        (Get-Date).ToUniversalTime().AddHours(-1)
-
-    foreach ($pattern in
-        @("*.scbridge.tmp",
-          "*.dailybridge.tmp")) {
-
-        foreach ($temp in
-            @(
-                Get-ChildItem `
-                    -LiteralPath $DataFolder `
-                    -File `
-                    -Filter $pattern `
-                    -ErrorAction SilentlyContinue
-            )) {
-
-            if ($temp.LastWriteTimeUtc -ge $cutoff) {
-                continue
-            }
-
-            try {
-                $reclaimed +=
-                    [long]$temp.Length
-
-                Remove-Item `
-                    -LiteralPath $temp.FullName `
-                    -Force
-
-                $staleTemps++
-            }
-            catch {
-                $warnings++
-            }
-        }
-    }
-
-    if (Test-Path `
-        -LiteralPath $archiveRoot `
-        -PathType Container) {
-
-        foreach ($temp in
-            @(
-                Get-ChildItem `
-                    -LiteralPath $archiveRoot `
-                    -Recurse `
-                    -File `
-                    -Filter "*.tmp" `
-                    -ErrorAction SilentlyContinue
-            )) {
-
-            if ($temp.LastWriteTimeUtc -ge $cutoff) {
-                continue
-            }
-
-            try {
-                $reclaimed +=
-                    [long]$temp.Length
-
-                Remove-Item `
-                    -LiteralPath $temp.FullName `
-                    -Force
-
-                $staleTemps++
-            }
-            catch {
-                $warnings++
-            }
-        }
-    }
-
     $emptyDirectories =
         Invoke-BridgeDirectoryHousekeeping `
             $DataFolder
@@ -2692,9 +2871,9 @@ function Finalize-ScidBackupStorage(
                             Get-Item `
                                 -LiteralPath $rawBackup).Length
 
-                    Remove-Item `
-                        -LiteralPath $rawBackup `
-                        -Force
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $rawBackup `
+                        $DataFolder)
 
                     $pruned = $true
                 }
@@ -2716,6 +2895,7 @@ function Finalize-ScidBackupStorage(
 
 function Finalize-DailyBackupStorage(
     $Candidate,
+    [string]$DataFolder,
     [string]$BackupDirectory) {
 
     $backup =
@@ -2736,9 +2916,9 @@ function Finalize-DailyBackupStorage(
             Get-Item `
                 -LiteralPath $backup).Length
 
-    Remove-Item `
-        -LiteralPath $backup `
-        -Force
+    [void](Remove-BridgeOwnedFileAndPrune `
+        $backup `
+        $DataFolder)
 
     return $bytes
 }
@@ -5410,14 +5590,20 @@ function Invoke-SierraHistoryBridge {
         if ($item.RemoveTarget) {
             try {
                 if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
-                    Remove-Item -LiteralPath $item.Target -Force
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $item.Target `
+                        $resolvedDataFolder)
+
                     $retiredTargets++
                 }
 
                 if ($item.RemoveDailyTarget -and
                     (Test-Path -LiteralPath $item.DailyTarget -PathType Leaf)) {
 
-                    Remove-Item -LiteralPath $item.DailyTarget -Force
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $item.DailyTarget `
+                        $resolvedDataFolder)
+
                     $retiredTargets++
                 }
 
@@ -5627,6 +5813,7 @@ function Invoke-SierraHistoryBridge {
                     $dailySaved =
                         Finalize-DailyBackupStorage `
                             $candidate `
+                            $resolvedDataFolder `
                             $backupDirectory
 
                     if ($dailySaved -gt 0) {

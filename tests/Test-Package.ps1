@@ -320,6 +320,18 @@ foreach ($cleanupToken in @(
     }
 }
 
+
+foreach ($pruneToken in @(
+    'Get-BridgeProtectedRootForPath',
+    'Remove-EmptyParentChain',
+    'Remove-BridgeOwnedFileAndPrune',
+    'Refusing bridge cleanup outside configured storage roots'
+)) {
+    if ($appText -notlike "*$pruneToken*") {
+        throw "Prune-on-delete regression: missing $pruneToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

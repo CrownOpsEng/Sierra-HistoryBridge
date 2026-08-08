@@ -1,10 +1,20 @@
 # Changelog
 
-## v0.0.19 - 2026-08-07
+## v0.0.20 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- removed a duplicated stale temporary-file cleanup sweep left by an earlier storage patch
+
+- persistent empty-folder cleanup failures are reported instead of silently swallowed
+
+- baseline, archive-temp, recovery-backup, and retired-target deletion use the same protected-root cleanup rule
+
+- restore archive and metadata deletion now cleans SC_Data contract/year folders at the point of removal rather than relying only on a later sweep
+
+- bridge-owned file deletion now uses a standard prune-on-delete routine that removes empty parent directories immediately up to the nearest configured base folder
 
 - verified baseline removal also prunes empty Rithmic_Baselines directory structures
 

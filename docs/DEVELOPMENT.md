@@ -42,8 +42,8 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-
 Output:
 
 ```text
-dist\SierraHistoryBridge-v0.0.19
-dist\SierraHistoryBridge-v0.0.19.zip
+dist\SierraHistoryBridge-v0.0.20
+dist\SierraHistoryBridge-v0.0.20.zip
 ```
 
 The release includes `setup\payload.zip`, which is retained after installation and used by Repair.
