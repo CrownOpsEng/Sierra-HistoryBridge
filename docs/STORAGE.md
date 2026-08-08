@@ -133,3 +133,16 @@ atomic destination update.
 
 Archive filters are based on futures contract month rather than file
 modification time.
+
+
+## Allocated size
+
+The Windows storage report now reads `FILE_STANDARD_INFO.AllocationSize`,
+the file-system allocation value used for actual disk consumption, rather than
+estimating allocation from logical length. This is especially important for
+NTFS-compressed or sparse Sierra Chart data.
+
+Archive, recovery, and log folders may be configured on separate locations.
+The storage report displays those configured paths. Free-space reporting remains
+anchored to the Sierra Data drive; individual archive/restore operations perform
+their own destination-drive free-space checks before writing.

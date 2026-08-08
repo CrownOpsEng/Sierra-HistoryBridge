@@ -287,24 +287,84 @@ namespace SierraHistoryBridge
             }
         }
 
+        private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint FILE_SHARE_DELETE = 0x00000004;
+        private const uint OPEN_EXISTING = 3;
+        private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        private const int FileStandardInfo = 1;
+        private static readonly IntPtr INVALID_HANDLE_VALUE =
+            new IntPtr(-1);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILE_STANDARD_INFO
+        {
+            public long AllocationSize;
+            public long EndOfFile;
+            public uint NumberOfLinks;
+            public byte DeletePending;
+            public byte Directory;
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetCompressedFileSizeW(
+        private static extern IntPtr CreateFileW(
             string lpFileName,
-            out uint lpFileSizeHigh);
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandleEx(
+            IntPtr hFile,
+            int FileInformationClass,
+            out FILE_STANDARD_INFO lpFileInformation,
+            uint dwBufferSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(
+            IntPtr hObject);
 
         public static long GetFileAllocatedBytes(string path)
         {
-            uint high;
-            uint low = GetCompressedFileSizeW(path, out high);
+            IntPtr handle = CreateFileW(
+                path,
+                0,
+                FILE_SHARE_READ |
+                    FILE_SHARE_WRITE |
+                    FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
 
-            if (low == 0xFFFFFFFF)
+            if (handle == INVALID_HANDLE_VALUE)
+                return new FileInfo(path).Length;
+
+            try
             {
-                int error = Marshal.GetLastWin32Error();
-                if (error != 0)
-                    return new FileInfo(path).Length;
-            }
+                FILE_STANDARD_INFO info;
+                uint size = (uint)Marshal.SizeOf(
+                    typeof(FILE_STANDARD_INFO));
 
-            return ((long)high << 32) | low;
+                if (!GetFileInformationByHandleEx(
+                        handle,
+                        FileStandardInfo,
+                        out info,
+                        size))
+                    return new FileInfo(path).Length;
+
+                if (info.AllocationSize < 0)
+                    return new FileInfo(path).Length;
+
+                return info.AllocationSize;
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
         }
 
         public static string HashFileSha256(string path)

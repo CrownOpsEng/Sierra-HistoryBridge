@@ -45,6 +45,7 @@ if ($converterText -match '\bHashSet\s*<') {
 }
 
 $appText = Get-Content -LiteralPath (Join-Path $RepoRoot "src\SierraHistoryBridge.ps1") -Raw
+$setupText = Get-Content -LiteralPath (Join-Path $RepoRoot "scripts\Setup.ps1") -Raw
 
 
 if ($appText -match '(?m)-and\s*\r?\n\s*Test-SierraChartRunning\)') {
@@ -265,6 +266,27 @@ if ($converterText -notmatch 'Path\.GetFileName\(sourcePath\)\s*\+\s*"__"\s*\+\s
 
 if ($appText -match '(?ms)(?<!\$)\(\s*(if|foreach|for|switch|try|while|do)\b') {
     throw "PowerShell syntax regression: a statement block is being used directly inside parenthesized expression syntax."
+}
+
+
+foreach ($contextToken in @(
+    'Wait-ForSierraChartClosed',
+    'Get-BridgePaths',
+    'SelectedFile',
+    'SystemFileAssociations\.scid',
+    'SystemFileAssociations\.dly',
+    'SystemFileAssociations\.gz',
+    'Sierra History Bridge storage report',
+    'Configure-UserPaths'
+)) {
+    if ($appText -notlike "*$contextToken*" -and
+        $setupText -notlike "*$contextToken*") {
+        throw "Context/settings regression: missing $contextToken"
+    }
+}
+
+if ($setupText -match 'Directory\\Background\\shell\\\$ProductKey"\s*`?\r?\n\s*Command') {
+    throw "Explorer integration regression: global folder-background verb was reintroduced."
 }
 
 $required = @(

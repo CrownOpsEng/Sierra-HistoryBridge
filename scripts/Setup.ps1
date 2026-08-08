@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge contributors"
-$Version = "0.0.16"
+$Version = "0.0.17"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -136,7 +136,7 @@ function Get-ExistingInstallation {
         }
     }
 
-    # Development builds before v0.0.16 stored program files below the mutable
+    # Development builds before v0.0.17 stored program files below the mutable
     # application-data folder. Detect them so setup can migrate cleanly.
     $legacyApp = Join-Path $UserDataRoot "app"
     if (Test-Path -LiteralPath (Join-Path $legacyApp "SierraHistoryBridge.ps1")) {
@@ -212,6 +212,370 @@ function Ask-StartMenuPreference {
 
     $normalized = $answer.Trim().ToLowerInvariant()
     return $normalized -in @("y", "yes")
+}
+
+function Read-SetupConfig {
+    $path =
+        Join-Path $UserDataRoot "config.json"
+
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        return (
+            Get-Content `
+                -LiteralPath $path `
+                -Raw |
+            ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-DefaultSierraDataFolder {
+    $config = Read-SetupConfig
+
+    if ($config -and
+        $config.default_data_folder -and
+        (Test-Path `
+            -LiteralPath ([string]$config.default_data_folder) `
+            -PathType Container)) {
+
+        return [IO.Path]::GetFullPath(
+            [string]$config.default_data_folder).TrimEnd('\')
+    }
+
+    foreach ($candidate in @(
+        "C:\SierraChart\Data",
+        "C:\SierraChart64\Data",
+        "D:\SierraChart\Data",
+        "D:\SierraChart64\Data"
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            return [IO.Path]::GetFullPath(
+                $candidate).TrimEnd('\')
+        }
+    }
+
+    return $null
+}
+
+function Read-SetupFolder(
+    [string]$Label,
+    [string]$Default,
+    [bool]$MustExist) {
+
+    if ($Quiet) {
+        if (-not $Default) {
+            throw "$Label was not specified."
+        }
+
+        return [IO.Path]::GetFullPath(
+            $Default).TrimEnd('\')
+    }
+
+    Write-Host
+    if ($Default) {
+        Write-Host "$Label"
+        Write-Host "  $Default"
+        $answer =
+            Read-Host "Press Enter to keep it, or paste another folder"
+
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            $answer = $Default
+        }
+    }
+    else {
+        $answer =
+            Read-Host "$Label"
+    }
+
+    $resolved =
+        [IO.Path]::GetFullPath(
+            $answer.Trim().Trim('"')).TrimEnd('\')
+
+    if ($MustExist -and
+        -not (Test-Path -LiteralPath $resolved -PathType Container)) {
+
+        throw "$Label does not exist: $resolved"
+    }
+
+    return $resolved
+}
+
+function Configure-UserPaths([bool]$IsRepair) {
+    $existingConfig = Read-SetupConfig
+    $currentData = Get-DefaultSierraDataFolder
+
+    if (-not $currentData) {
+        if ($Quiet) {
+            throw "Sierra Chart Data folder could not be detected."
+        }
+
+        $currentData =
+            Read-SetupFolder `
+                "Sierra Chart Data folder" `
+                $null `
+                $true
+    }
+
+    $currentArchive =
+        if ($existingConfig -and
+            $existingConfig.archive_folder) {
+
+            [IO.Path]::GetFullPath(
+                [string]$existingConfig.archive_folder).TrimEnd('\')
+        }
+        else {
+            Join-Path $currentData "SCID_Bridge_Archive"
+        }
+
+    $currentRecovery =
+        if ($existingConfig -and
+            $existingConfig.recovery_folder) {
+
+            [IO.Path]::GetFullPath(
+                [string]$existingConfig.recovery_folder).TrimEnd('\')
+        }
+        else {
+            Join-Path $currentData "SCID_Bridge_Backups"
+        }
+
+    $currentLogs =
+        if ($existingConfig -and
+            $existingConfig.log_folder) {
+
+            [IO.Path]::GetFullPath(
+                [string]$existingConfig.log_folder).TrimEnd('\')
+        }
+        else {
+            Join-Path $currentData "SCID_Bridge_Logs"
+        }
+
+    $changePaths = -not $IsRepair
+
+    if ($IsRepair -and -not $Quiet) {
+        Write-Host
+        Write-Host "Configured Sierra folders:"
+        Write-Host "  Data:     $currentData"
+        Write-Host "  Archive:  $currentArchive"
+        Write-Host "  Recovery: $currentRecovery"
+        Write-Host "  Logs:     $currentLogs"
+
+        $answer =
+            Read-Host "Change these folders? [y/N]"
+
+        $changePaths =
+            $answer.Trim().ToLowerInvariant() -in @("y", "yes")
+    }
+
+    $data = $currentData
+    $archive = $currentArchive
+    $recovery = $currentRecovery
+    $logs = $currentLogs
+
+    if ($changePaths) {
+        $data =
+            Read-SetupFolder `
+                "Sierra Chart Data folder" `
+                $currentData `
+                $true
+
+        $archiveDefault =
+            if ($currentArchive -and
+                $currentArchive.StartsWith(
+                    $currentData,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                Join-Path $data "SCID_Bridge_Archive"
+            }
+            else {
+                $currentArchive
+            }
+
+        $recoveryDefault =
+            if ($currentRecovery -and
+                $currentRecovery.StartsWith(
+                    $currentData,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                Join-Path $data "SCID_Bridge_Backups"
+            }
+            else {
+                $currentRecovery
+            }
+
+        $logsDefault =
+            if ($currentLogs -and
+                $currentLogs.StartsWith(
+                    $currentData,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                Join-Path $data "SCID_Bridge_Logs"
+            }
+            else {
+                $currentLogs
+            }
+
+        $customize = $false
+
+        if (-not $Quiet) {
+            Write-Host
+            $answer =
+                Read-Host (
+                    "Customize archive, recovery, or log folders? [y/N]")
+
+            $customize =
+                $answer.Trim().ToLowerInvariant() -in @("y", "yes")
+        }
+
+        if ($customize) {
+            $archive =
+                Read-SetupFolder `
+                    "Archive folder" `
+                    $archiveDefault `
+                    $false
+
+            $recovery =
+                Read-SetupFolder `
+                    "Recovery folder" `
+                    $recoveryDefault `
+                    $false
+
+            $logs =
+                Read-SetupFolder `
+                    "Log folder" `
+                    $logsDefault `
+                    $false
+        }
+        else {
+            $archive = $archiveDefault
+            $recovery = $recoveryDefault
+            $logs = $logsDefault
+        }
+    }
+
+    $namedStorage =
+        @(
+            [pscustomobject]@{ Name = "Archive"; Path = $archive },
+            [pscustomobject]@{ Name = "Recovery"; Path = $recovery },
+            [pscustomobject]@{ Name = "Logs"; Path = $logs }
+        )
+
+    for ($i = 0; $i -lt $namedStorage.Count; $i++) {
+        for ($j = $i + 1; $j -lt $namedStorage.Count; $j++) {
+            $left =
+                [IO.Path]::GetFullPath(
+                    $namedStorage[$i].Path).TrimEnd('\')
+
+            $right =
+                [IO.Path]::GetFullPath(
+                    $namedStorage[$j].Path).TrimEnd('\')
+
+            if ($left.Equals(
+                    $right,
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                $left.StartsWith(
+                    $right + '\',
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                $right.StartsWith(
+                    $left + '\',
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                throw (
+                    "$($namedStorage[$i].Name) and " +
+                    "$($namedStorage[$j].Name) folders must be separate.")
+            }
+        }
+    }
+
+    foreach ($directory in @(
+        $archive,
+        $recovery,
+        $logs
+    )) {
+        New-Item `
+            -ItemType Directory `
+            -Path $directory `
+            -Force |
+            Out-Null
+    }
+
+    $provenScales = @{}
+    if ($existingConfig -and
+        $existingConfig.proven_scales) {
+
+        foreach ($property in
+            $existingConfig.proven_scales.PSObject.Properties) {
+
+            $provenScales[$property.Name] =
+                $property.Value
+        }
+    }
+
+    $settings =
+        [ordered]@{
+            proven_scales = $provenScales
+            default_data_folder = $data
+            archive_folder = $archive
+            recovery_folder = $recovery
+            log_folder = $logs
+        }
+
+    $configPath =
+        Join-Path $UserDataRoot "config.json"
+
+    $settings |
+        ConvertTo-Json -Depth 8 |
+        Set-Content `
+            -LiteralPath $configPath `
+            -Encoding UTF8
+
+    return [pscustomobject]@{
+        Data = $data
+        Archive = $archive
+        Recovery = $recovery
+        Logs = $logs
+    }
+}
+
+function New-ExplorerVerb(
+    [string]$Path,
+    [string]$Title,
+    [string]$Command,
+    [string]$Icon,
+    [string]$AppliesTo) {
+
+    New-Item -Path $Path -Force | Out-Null
+    Set-Item -LiteralPath $Path -Value $Title
+
+    if ($Icon) {
+        New-ItemProperty `
+            -LiteralPath $Path `
+            -Name "Icon" `
+            -Value $Icon `
+            -PropertyType String `
+            -Force |
+            Out-Null
+    }
+
+    if ($AppliesTo) {
+        New-ItemProperty `
+            -LiteralPath $Path `
+            -Name "AppliesTo" `
+            -Value $AppliesTo `
+            -PropertyType String `
+            -Force |
+            Out-Null
+    }
+
+    $commandKey =
+        Join-Path $Path "command"
+
+    New-Item -Path $commandKey -Force | Out-Null
+    Set-Item -LiteralPath $commandKey -Value $Command
 }
 
 function Ensure-Elevation {
@@ -471,57 +835,118 @@ function Test-InstalledPayload([string]$InstallDirectory) {
 }
 
 function Remove-ExplorerIntegration([string]$InstallScope) {
-    $classesRoot = Get-ClassesRegistryRoot $InstallScope
+    $classesRoot =
+        Get-ClassesRegistryRoot $InstallScope
 
     foreach ($path in @(
         "$classesRoot\Directory\shell\$ProductKey",
-        "$classesRoot\Directory\Background\shell\$ProductKey"
+        "$classesRoot\Directory\shell\$ProductKey.Update",
+        "$classesRoot\Directory\shell\$ProductKey.Storage",
+        "$classesRoot\Directory\Background\shell\$ProductKey",
+        "$classesRoot\SystemFileAssociations\.scid\shell\$ProductKey.Archive",
+        "$classesRoot\SystemFileAssociations\.dly\shell\$ProductKey.Archive",
+        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore"
     )) {
         if (Test-Path -LiteralPath $path) {
-            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item `
+                -LiteralPath $path `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
         }
     }
 }
 
-function Install-ExplorerIntegration([string]$InstallScope, [string]$InstallDirectory) {
+function Install-ExplorerIntegration(
+    [string]$InstallScope,
+    [string]$InstallDirectory,
+    $Settings) {
+
     Remove-ExplorerIntegration $InstallScope
 
-    $classesRoot = Get-ClassesRegistryRoot $InstallScope
-    $installedScript = Join-Path $InstallDirectory "app\SierraHistoryBridge.ps1"
-    $menuText = "Update Sierra history from SC Data"
-    $icon = "$env:SystemRoot\System32\shell32.dll,167"
+    $classesRoot =
+        Get-ClassesRegistryRoot $InstallScope
 
-    $directoryCommand =
+    $installedScript =
+        Join-Path `
+            $InstallDirectory `
+            "app\SierraHistoryBridge.ps1"
+
+    $icon =
+        "$env:SystemRoot\System32\shell32.dll,167"
+
+    $dataFolder =
+        [IO.Path]::GetFullPath(
+            [string]$Settings.Data).TrimEnd('\')
+
+    $archiveFolder =
+        [IO.Path]::GetFullPath(
+            [string]$Settings.Archive).TrimEnd('\')
+
+    $folderAppliesTo =
+        'System.ItemPathDisplay:="' +
+        $dataFolder +
+        '"'
+
+    $dataFileAppliesTo =
+        'System.ItemFolderPathDisplay:="' +
+        $dataFolder +
+        '"'
+
+    # AQS starts-with comparison. This applies to file items; unlike
+    # Directory\Background, static file verbs support AppliesTo filtering.
+    $sourceArchiveFolder =
+        Join-Path $archiveFolder "SC_Data"
+
+    $archiveFileAppliesTo =
+        'System.ItemPathDisplay:~<"' +
+        $sourceArchiveFolder +
+        '\' +
+        '"'
+
+    $baseCommand =
         '"' + $PowerShellExe + '"' +
         ' -NoLogo -NoProfile -ExecutionPolicy Bypass' +
         ' -File "' + $installedScript + '"' +
-        ' -DataFolder "%1" -Interactive'
+        ' -DataFolder "' + $dataFolder + '"'
 
-    $backgroundCommand =
-        '"' + $PowerShellExe + '"' +
-        ' -NoLogo -NoProfile -ExecutionPolicy Bypass' +
-        ' -File "' + $installedScript + '"' +
-        ' -DataFolder "%V" -Interactive'
+    New-ExplorerVerb `
+        "$classesRoot\Directory\shell\$ProductKey.Update" `
+        "Update Sierra history from SC Data" `
+        ($baseCommand + ' -Mode Update -Interactive') `
+        $icon `
+        $folderAppliesTo
 
-    foreach ($entry in @(
-        [pscustomobject]@{
-            Path = "$classesRoot\Directory\shell\$ProductKey"
-            Command = $directoryCommand
-        },
-        [pscustomobject]@{
-            Path = "$classesRoot\Directory\Background\shell\$ProductKey"
-            Command = $backgroundCommand
-        }
-    )) {
-        New-Item -Path $entry.Path -Force | Out-Null
-        Set-Item -LiteralPath $entry.Path -Value $menuText
-        New-ItemProperty -LiteralPath $entry.Path -Name "Icon" -Value $icon -PropertyType String -Force | Out-Null
+    New-ExplorerVerb `
+        "$classesRoot\Directory\shell\$ProductKey.Storage" `
+        "Sierra History Bridge storage report" `
+        ($baseCommand + ' -Mode Storage -Interactive') `
+        "$env:SystemRoot\System32\shell32.dll,4" `
+        $folderAppliesTo
 
-        $commandKey = Join-Path $entry.Path "command"
-        New-Item -Path $commandKey -Force | Out-Null
-        Set-Item -LiteralPath $commandKey -Value $entry.Command
+    foreach ($extension in @(".scid", ".dly")) {
+        $sourceFileAppliesTo =
+            $dataFileAppliesTo +
+            ' AND System.FileName:"*-*' +
+            $extension +
+            '"'
+
+        New-ExplorerVerb `
+            "$classesRoot\SystemFileAssociations\$extension\shell\$ProductKey.Archive" `
+            "Archive SC Data source" `
+            ($baseCommand + ' -Mode Archive -SelectedFile "%1" -Interactive') `
+            "$env:SystemRoot\System32\shell32.dll,46" `
+            $sourceFileAppliesTo
     }
+
+    New-ExplorerVerb `
+        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore" `
+        "Restore Sierra history archive" `
+        ($baseCommand + ' -Mode Restore -SelectedFile "%1" -Interactive') `
+        "$env:SystemRoot\System32\shell32.dll,167" `
+        $archiveFileAppliesTo
 }
+
 
 function New-Shortcut {
     param(
@@ -748,7 +1173,14 @@ function Invoke-InstallOrRepair(
         Test-InstalledPayload $installDirectory
         New-InstalledRepairPayload $installDirectory
 
-        Install-ExplorerIntegration $InstallScope $installDirectory
+        $settings =
+            Configure-UserPaths $IsRepair
+
+        Install-ExplorerIntegration `
+            $InstallScope `
+            $installDirectory `
+            $settings
+
         Install-StartMenuShortcuts $InstallScope $installDirectory $CreateStartMenu
         Register-Uninstaller $InstallScope $installDirectory $CreateStartMenu
 
@@ -760,8 +1192,10 @@ function Invoke-InstallOrRepair(
         Write-Host "Completed successfully." -ForegroundColor Green
         Write-Host
         Write-Host "File Explorer:"
-        Write-Host "  Right-click a Sierra Chart Data folder or blank space inside it,"
-        Write-Host "  then choose: Update Sierra history from SC Data"
+        Write-Host "  Right-click the configured Sierra Data folder for Update or Storage."
+        Write-Host "  Right-click .scid/.dly source files in that folder to archive them."
+        Write-Host "  Right-click bridge .gz archives to restore them."
+        Write-Host "  The bridge does not add a global blank-space menu to unrelated folders."
         Write-Host
         Write-Host "Windows Settings:"
         Write-Host "  $ProductName is registered under Installed apps for standard removal."
@@ -890,8 +1324,8 @@ del /f /q "%~f0" >nul 2>&1
     }
 
     Write-Host
-    Write-Host "SCID backups and bridge logs inside Sierra Chart's Data folder were"
-    Write-Host "left in place."
+    Write-Host "Bridge archives, recovery files, and logs were left in their"
+    Write-Host "configured storage locations."
 }
 
 function Invoke-MaintenanceMenu($Existing) {

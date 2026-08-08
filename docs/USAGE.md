@@ -228,3 +228,27 @@ Archive/restore requires Sierra Chart to be closed. A source archive is removed
 after a verified restore, so the same source is not retained twice by default.
 Conflicting destination files require an explicit decision and are preserved
 before replacement when that option is chosen.
+
+
+## Configured folders
+
+Setup stores these per-user settings:
+
+```text
+Sierra Chart Data folder
+Bridge archive folder
+Recovery folder
+Log folder
+```
+
+Archive/recovery/log locations default to subfolders of the Sierra Data folder
+but can be placed on another drive. Repair shows the current locations and
+offers to change them.
+
+When archive or restore is started while Sierra Chart is running, interactive
+mode no longer exits. It asks you to close Sierra Chart and rechecks after you
+press Enter.
+
+File-specific context actions use `-SelectedFile` internally and still validate
+that the selected item is a recognized SC Data source or bridge archive before
+changing anything.

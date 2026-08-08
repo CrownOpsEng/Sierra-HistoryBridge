@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.16 - 2026-08-07
+## v0.0.17 - 2026-08-07
 
 Initial pre-stable release.
 
@@ -115,6 +115,18 @@ Initial pre-stable release.
 - metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
+
+- on-disk storage reporting now uses FILE_STANDARD_INFO allocation size
+
+- the configured Sierra Data folder context menu includes a storage report action
+
+- .scid/.dly files can be archived directly from their File Explorer context menu and recognized bridge .gz archives can be restored directly
+
+- Explorer integration is scoped to the configured Sierra folders and relevant file types instead of adding a global background-menu command
+
+- setup now remembers the Sierra Data folder and allows custom archive, recovery, and log folders
+
+- archive and restore now wait for Sierra Chart to close in interactive mode instead of terminating the run
 
 - package checks now reject statement blocks placed directly inside parenthesized expression syntax
 

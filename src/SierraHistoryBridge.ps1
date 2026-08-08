@@ -8,6 +8,7 @@ param(
     [string]$ToDate,
     [int]$Days = 0,
     [switch]$All,
+    [string]$SelectedFile,
     [switch]$Interactive,
     [switch]$Force,
     [switch]$DryRun,
@@ -16,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.16"
+$Version = "0.0.17"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -274,6 +275,117 @@ function Get-SierraDataFolder([string]$ExplicitPath) {
         throw "No valid Sierra Chart Data folder was selected."
     }
     return $resolved
+}
+
+function Get-NormalizedConfiguredPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    try {
+        return [IO.Path]::GetFullPath(
+            $Path.Trim().Trim('"')).TrimEnd('\')
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-BridgePaths([string]$ResolvedDataFolder) {
+    $data =
+        [IO.Path]::GetFullPath(
+            $ResolvedDataFolder).TrimEnd('\')
+
+    $config = Read-JsonFile $ConfigPath
+
+    $configuredData =
+        Get-NormalizedConfiguredPath `
+            ([string]$config.default_data_folder)
+
+    $useConfigured =
+        $configuredData -and
+        $configuredData.Equals(
+            $data,
+            [StringComparison]::OrdinalIgnoreCase)
+
+    $archive =
+        Join-Path $data "SCID_Bridge_Archive"
+
+    $recovery =
+        Join-Path $data "SCID_Bridge_Backups"
+
+    $logs =
+        Join-Path $data "SCID_Bridge_Logs"
+
+    if ($useConfigured) {
+        $candidate =
+            Get-NormalizedConfiguredPath `
+                ([string]$config.archive_folder)
+        if ($candidate) {
+            $archive = $candidate
+        }
+
+        $candidate =
+            Get-NormalizedConfiguredPath `
+                ([string]$config.recovery_folder)
+        if ($candidate) {
+            $recovery = $candidate
+        }
+
+        $candidate =
+            Get-NormalizedConfiguredPath `
+                ([string]$config.log_folder)
+        if ($candidate) {
+            $logs = $candidate
+        }
+    }
+
+    return [pscustomobject]@{
+        Data = $data
+        Archive = $archive
+        Recovery = $recovery
+        Logs = $logs
+    }
+}
+
+function Wait-ForSierraChartClosed(
+    [string]$Operation,
+    [bool]$CanPrompt) {
+
+    if (-not (Test-SierraChartRunning)) {
+        return $true
+    }
+
+    if (-not $CanPrompt) {
+        throw (
+            "Sierra Chart is running. Close it before $Operation.")
+    }
+
+    Write-Host
+    Write-Host "Sierra Chart is running." -ForegroundColor Yellow
+    Write-Host (
+        "$Operation requires Sierra Chart to be closed so files can be moved safely.")
+    Write-Host
+
+    while (Test-SierraChartRunning) {
+        $answer =
+            Read-Host (
+                "Close Sierra Chart, then press Enter to continue; type C to cancel")
+
+        if ($answer.Trim().ToLowerInvariant() -in @("c", "cancel")) {
+            Write-Host "$Operation canceled."
+            return $false
+        }
+
+        if (Test-SierraChartRunning) {
+            Write-Host (
+                "Sierra Chart is still running. Close all Sierra Chart instances first.") `
+                -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host "Sierra Chart closed. Continuing."
+    return $true
 }
 
 function Test-SierraChartRunning {
@@ -552,10 +664,11 @@ function Get-ScidArchivePaths(
     $Candidate,
     [string]$DataFolder) {
 
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
     $archiveRoot =
-        Join-Path `
-            $DataFolder `
-            "SCID_Bridge_Archive"
+        $bridgePaths.Archive
 
     $sourceStem =
         [IO.Path]::GetFileNameWithoutExtension(
@@ -719,16 +832,24 @@ function Format-SignedStorageBytes([long]$Bytes) {
 }
 
 function Get-StorageSnapshot([string]$DataFolder) {
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $dataRoot =
+        [IO.Path]::GetFullPath(
+            $bridgePaths.Data).TrimEnd('\') + '\'
+
     $archiveRoot =
         [IO.Path]::GetFullPath(
-            (Join-Path $DataFolder "SCID_Bridge_Archive")).TrimEnd('\') + '\'
+            $bridgePaths.Archive).TrimEnd('\') + '\'
 
     $recoveryRoot =
         [IO.Path]::GetFullPath(
-            (Join-Path $DataFolder "SCID_Bridge_Backups")).TrimEnd('\') + '\'
+            $bridgePaths.Recovery).TrimEnd('\') + '\'
 
-    $dataRoot =
-        [IO.Path]::GetFullPath($DataFolder).TrimEnd('\') + '\'
+    $logRoot =
+        [IO.Path]::GetFullPath(
+            $bridgePaths.Logs).TrimEnd('\') + '\'
 
     $sourcePattern =
         [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
@@ -741,51 +862,83 @@ function Get-StorageSnapshot([string]$DataFolder) {
         Rithmic = [long[]]@(0L, 0L)
         Archive = [long[]]@(0L, 0L)
         Recovery = [long[]]@(0L, 0L)
+        Logs = [long[]]@(0L, 0L)
         Other = [long[]]@(0L, 0L)
     }
 
-    foreach ($file in @(
-        Get-ChildItem `
-            -LiteralPath $DataFolder `
-            -Recurse `
-            -File `
-            -ErrorAction SilentlyContinue)) {
+    function Add-StorageFile(
+        [System.IO.FileInfo]$File,
+        [string]$Category) {
 
-        $full = [IO.Path]::GetFullPath($file.FullName)
-        $category = "Other"
-
-        if ($full.StartsWith(
-            $archiveRoot,
-            [StringComparison]::OrdinalIgnoreCase)) {
-            $category = "Archive"
-        }
-        elseif ($full.StartsWith(
-            $recoveryRoot,
-            [StringComparison]::OrdinalIgnoreCase)) {
-            $category = "Recovery"
-        }
-        elseif ($file.DirectoryName -ieq $DataFolder -and
-            $sourcePattern.IsMatch($file.Name)) {
-            $category = "Sources"
-        }
-        elseif ($file.DirectoryName -ieq $DataFolder -and
-            $rithmicPattern.IsMatch($file.Name)) {
-            $category = "Rithmic"
-        }
-
-        $logical = [long]$file.Length
+        $logical = [long]$File.Length
         $allocated = $logical
 
         try {
             $allocated =
                 [long][SierraHistoryBridge.ScidBridge]::GetFileAllocatedBytes(
-                    $file.FullName)
+                    $File.FullName)
         }
         catch { }
 
-        $values = $categories[$category]
+        $values = $categories[$Category]
         $values[0] += $logical
         $values[1] += $allocated
+    }
+
+    foreach ($file in @(
+        Get-ChildItem `
+            -LiteralPath $bridgePaths.Data `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue)) {
+
+        $full =
+            [IO.Path]::GetFullPath(
+                $file.FullName)
+
+        if ($full.StartsWith(
+                $archiveRoot,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith(
+                $recoveryRoot,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith(
+                $logRoot,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        if ($file.DirectoryName -ieq $bridgePaths.Data -and
+            $sourcePattern.IsMatch($file.Name)) {
+            Add-StorageFile $file "Sources"
+        }
+        elseif ($file.DirectoryName -ieq $bridgePaths.Data -and
+            $rithmicPattern.IsMatch($file.Name)) {
+            Add-StorageFile $file "Rithmic"
+        }
+        else {
+            Add-StorageFile $file "Other"
+        }
+    }
+
+    foreach ($pair in @(
+        [pscustomobject]@{ Path = $bridgePaths.Archive; Category = "Archive" },
+        [pscustomobject]@{ Path = $bridgePaths.Recovery; Category = "Recovery" },
+        [pscustomobject]@{ Path = $bridgePaths.Logs; Category = "Logs" }
+    )) {
+        if (-not (Test-Path -LiteralPath $pair.Path -PathType Container)) {
+            continue
+        }
+
+        foreach ($file in @(
+            Get-ChildItem `
+                -LiteralPath $pair.Path `
+                -Recurse `
+                -File `
+                -ErrorAction SilentlyContinue)) {
+
+            Add-StorageFile $file $pair.Category
+        }
     }
 
     $logicalTotal = 0L
@@ -805,11 +958,16 @@ function Get-StorageSnapshot([string]$DataFolder) {
         ArchiveDisk = $categories.Archive[1]
         RecoveryLogical = $categories.Recovery[0]
         RecoveryDisk = $categories.Recovery[1]
+        LogsLogical = $categories.Logs[0]
+        LogsDisk = $categories.Logs[1]
         OtherLogical = $categories.Other[0]
         OtherDisk = $categories.Other[1]
         TotalLogical = $logicalTotal
         TotalDisk = $allocatedTotal
         Free = Get-AvailableFreeBytes $DataFolder
+        ArchivePath = $bridgePaths.Archive
+        RecoveryPath = $bridgePaths.Recovery
+        LogPath = $bridgePaths.Logs
     }
 }
 
@@ -834,6 +992,7 @@ function Show-StorageDelta($Before, $After) {
         [pscustomobject]@{ Name = "Rithmic targets"; Before = $Before.RithmicDisk; After = $After.RithmicDisk },
         [pscustomobject]@{ Name = "Bridge archive"; Before = $Before.ArchiveDisk; After = $After.ArchiveDisk },
         [pscustomobject]@{ Name = "Recovery"; Before = $Before.RecoveryDisk; After = $After.RecoveryDisk },
+        [pscustomobject]@{ Name = "Logs"; Before = $Before.LogsDisk; After = $After.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Before = $Before.OtherDisk; After = $After.OtherDisk },
         [pscustomobject]@{ Name = "Data folder"; Before = $Before.TotalDisk; After = $After.TotalDisk },
         [pscustomobject]@{ Name = "Free space"; Before = $Before.Free; After = $After.Free }
@@ -955,10 +1114,13 @@ function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
     $safeGroup =
         ($SourceFile.Root + "-" + $SourceFile.Exchange) -replace '[^A-Za-z0-9_.-]', '_'
 
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
     $directory =
         Join-Path `
             (Join-Path `
-                (Join-Path $DataFolder "SCID_Bridge_Archive") `
+                $bridgePaths.Archive `
                 "SC_Data") `
             $safeGroup
 
@@ -1052,28 +1214,51 @@ function Invoke-SourceArchiveManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
 
-    if (Test-SierraChartRunning) {
-        throw (
-            "Close Sierra Chart before archiving SC Data source files. " +
-            "Archived files are unavailable to Sierra until restored.")
-    }
-
     $window = Get-BridgeWindow
     $sourceFiles = Get-ScDataSourceFiles $ResolvedDataFolder
 
-    $selection =
-        Select-ArchiveSourceFiles `
-            $sourceFiles `
-            $window.Start `
-            $FromDate `
-            $ToDate `
-            $Days `
-            ([bool]$All) `
-            $AskForFilter
+    if ($SelectedFile) {
+        $selectedPath =
+            [IO.Path]::GetFullPath(
+                $SelectedFile.Trim().Trim('"'))
+
+        $selection =
+            @(
+                $sourceFiles |
+                Where-Object {
+                    $_.Path.Equals(
+                        $selectedPath,
+                        [StringComparison]::OrdinalIgnoreCase)
+                }
+            )
+
+        if ($selection.Count -eq 0) {
+            throw (
+                "The selected file is not an SC Data two-digit-year source " +
+                "file in the configured Sierra Data folder.")
+        }
+    }
+    else {
+        $selection =
+            Select-ArchiveSourceFiles `
+                $sourceFiles `
+                $window.Start `
+                $FromDate `
+                $ToDate `
+                $Days `
+                ([bool]$All) `
+                $AskForFilter
+    }
 
     if ($selection.Count -eq 0) {
         Write-Host
         Write-Host "No SC Data source files match the archive filter."
+        return 0
+    }
+
+    if (-not (Wait-ForSierraChartClosed `
+            "Archiving SC Data source files" `
+            $AskForFilter)) {
         return 0
     }
 
@@ -1264,9 +1449,12 @@ function Invoke-SourceArchiveManager(
 }
 
 function Get-ArchivedSourceFiles([string]$DataFolder) {
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
     $root =
         Join-Path `
-            (Join-Path $DataFolder "SCID_Bridge_Archive") `
+            $bridgePaths.Archive `
             "SC_Data"
 
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
@@ -1408,10 +1596,6 @@ function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
 
-    if (Test-SierraChartRunning) {
-        throw "Close Sierra Chart before restoring archived SC Data files."
-    }
-
     $archives = Get-ArchivedSourceFiles $ResolvedDataFolder
     if ($archives.Count -eq 0) {
         Write-Host
@@ -1419,18 +1603,47 @@ function Invoke-SourceRestoreManager(
         return 0
     }
 
-    $selection =
-        Select-RestoreArchives `
-            $archives `
-            $FromDate `
-            $ToDate `
-            $Days `
-            ([bool]$All) `
-            $AskForFilter
+    if ($SelectedFile) {
+        $selectedPath =
+            [IO.Path]::GetFullPath(
+                $SelectedFile.Trim().Trim('"'))
+
+        $selection =
+            @(
+                $archives |
+                Where-Object {
+                    $_.ArchivePath.Equals(
+                        $selectedPath,
+                        [StringComparison]::OrdinalIgnoreCase)
+                }
+            )
+
+        if ($selection.Count -eq 0) {
+            throw (
+                "The selected file is not a recognized Sierra History Bridge " +
+                "SC Data archive.")
+        }
+    }
+    else {
+        $selection =
+            Select-RestoreArchives `
+                $archives `
+                $FromDate `
+                $ToDate `
+                $Days `
+                ([bool]$All) `
+                $AskForFilter
+    }
 
     if ($selection.Count -eq 0) {
         Write-Host
         Write-Host "No archives match the restore filter."
+        return 0
+    }
+
+    if (-not (Wait-ForSierraChartClosed `
+            "Restoring archived SC Data files" `
+            $AskForFilter)) {
         return 0
     }
 
@@ -1535,10 +1748,13 @@ function Invoke-SourceRestoreManager(
         }
 
         try {
+            $bridgePaths =
+                Get-BridgePaths $ResolvedDataFolder
+
             $conflictDirectory =
                 Join-Path `
                     (Join-Path `
-                        (Join-Path $ResolvedDataFolder "SCID_Bridge_Archive") `
+                        $bridgePaths.Archive `
                         "Restore_Conflicts") `
                     $conflictStamp
 
@@ -1634,6 +1850,7 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
         [pscustomobject]@{ Name = "Rithmic targets"; Logical = $snapshot.RithmicLogical; Disk = $snapshot.RithmicDisk },
         [pscustomobject]@{ Name = "Bridge archive"; Logical = $snapshot.ArchiveLogical; Disk = $snapshot.ArchiveDisk },
         [pscustomobject]@{ Name = "Recovery"; Logical = $snapshot.RecoveryLogical; Disk = $snapshot.RecoveryDisk },
+        [pscustomobject]@{ Name = "Logs"; Logical = $snapshot.LogsLogical; Disk = $snapshot.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Logical = $snapshot.OtherLogical; Disk = $snapshot.OtherDisk },
         [pscustomobject]@{ Name = "Data folder"; Logical = $snapshot.TotalLogical; Disk = $snapshot.TotalDisk }
     )) {
@@ -1649,19 +1866,24 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
         "Free space",
         (Format-StorageBytes $snapshot.Free))
 
+    Write-Host
+    Write-Host "Configured storage:"
+    Write-Host "  Archive:  $($snapshot.ArchivePath)"
+    Write-Host "  Recovery: $($snapshot.RecoveryPath)"
+    Write-Host "  Logs:     $($snapshot.LogPath)"
+
     return 0
 }
 
 function Invoke-BridgeStorageCleanup([string]$DataFolder) {
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
     $backupDirectory =
-        Join-Path `
-            $DataFolder `
-            "SCID_Bridge_Backups"
+        $bridgePaths.Recovery
 
     $archiveRoot =
-        Join-Path `
-            $DataFolder `
-            "SCID_Bridge_Archive"
+        $bridgePaths.Archive
 
     $reclaimed = 0L
     $pruned = 0
@@ -2087,8 +2309,11 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
         }
     }
 
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
     $backupDirectory =
-        Join-Path $DataFolder "SCID_Bridge_Backups"
+        $bridgePaths.Recovery
 
     $paths =
         Get-ScidArchivePaths `
@@ -3826,8 +4051,11 @@ function Invoke-SierraHistoryBridge {
     $preflightLogPath = $null
 
     if ($preflightLines.Count -gt 0) {
+        $bridgePaths =
+            Get-BridgePaths $resolvedDataFolder
+
         $preflightLogDirectory =
-            Join-Path $resolvedDataFolder "SCID_Bridge_Logs"
+            $bridgePaths.Logs
 
         New-Item `
             -ItemType Directory `
@@ -4587,8 +4815,11 @@ function Invoke-SierraHistoryBridge {
         }
     }
 
-    $backupDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Backups"
-    $logDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Logs"
+    $bridgePaths =
+        Get-BridgePaths $resolvedDataFolder
+
+    $backupDirectory = $bridgePaths.Recovery
+    $logDirectory = $bridgePaths.Logs
 
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 
@@ -5224,10 +5455,11 @@ function Invoke-SierraHistoryBridge {
         ($warningFiles + $retireWarnings),
         $updateStopwatch.Elapsed.TotalSeconds)
 
+    $bridgePaths =
+        Get-BridgePaths $resolvedDataFolder
+
     $archiveDirectory =
-        Join-Path `
-            $resolvedDataFolder `
-            "SCID_Bridge_Archive"
+        $bridgePaths.Archive
 
     $storageAtEnd =
         Get-StorageSnapshot `

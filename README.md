@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.16 — pre-stable**
+**Version 0.0.17 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -170,7 +170,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.16 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.17 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -312,3 +312,28 @@ missing contract dates. These conditions are reported as source-data quality
 notes rather than silently "repaired." They can limit volume-based or
 back-adjusted continuous-contract calculations at the beginning of the
 available history.
+
+
+## File Explorer integration
+
+The installer remembers the Sierra Chart Data folder and can optionally place
+the bridge archive, recovery, and log folders elsewhere.
+
+Explorer commands are deliberately scoped rather than added to every folder:
+
+- right-click the configured Sierra Data **folder itself** for Update and
+  Storage Report;
+- right-click `.scid` or `.dly` files directly inside the configured Data
+  folder for **Archive SC Data source**;
+- right-click recognized `.gz` files below the configured bridge archive for
+  **Restore Sierra history archive**.
+
+The bridge does not install a global blank-space/background command. Windows'
+static `Directory\Background` verbs cannot be reliably filtered by the current
+folder using `AppliesTo`; making that menu truly dynamic requires an in-process
+Shell extension. Avoiding that Explorer-loaded component keeps v0.0.17 simpler
+and reduces the risk of slowing or destabilizing File Explorer.
+
+Archive and restore now wait interactively when Sierra Chart is open. Close all
+Sierra Chart instances and press Enter; the operation continues in the same
+window after the process is gone.
