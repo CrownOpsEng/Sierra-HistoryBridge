@@ -38,23 +38,14 @@ if ($converterText -match '(?m)\bunsafe\b|\bfixed\s*\(') {
 }
 
 
-
 $appText = Get-Content -LiteralPath (Join-Path $RepoRoot "src\SierraHistoryBridge.ps1") -Raw
 
-foreach ($requiredPolicyToken in @(
-    '$usableHistoryYears = 5',
-    '$historyBufferMonths = 3',
-    '$forwardBufferMonths = 6',
-    'archive-only',
-    'outside rolling Rithmic cache window'
-)) {
-    if ($appText -notlike "*$requiredPolicyToken*") {
-        throw "Rithmic rolling-window regression: missing $requiredPolicyToken"
-    }
+if ($appText -notmatch 'RITHMIC YEAR COLLISION') {
+    throw "Safety regression: Rithmic decade-collision detection is missing."
 }
 
-if ($appText -match 'RITHMIC YEAR COLLISION') {
-    throw "Rithmic rolling-window regression: collision-stop behavior was reintroduced."
+if ($appText -notmatch 'Group-Object TargetName') {
+    throw "Safety regression: target-filename collision grouping is missing."
 }
 
 $required = @(

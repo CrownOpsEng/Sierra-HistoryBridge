@@ -150,31 +150,14 @@ Compact notation is used only for live progress where exact counts are not
 needed.
 
 
-## Rolling history window
+## History older than the Rithmic symbol window
 
-The bridge automatically selects only contracts relevant to the current
-Rithmic compatibility window.
+The bridge can only create unambiguous native Rithmic filenames.
 
-By default it manages:
+If SC Data contains two contracts ten years apart with the same root, month,
+and exchange, both would require the same Rithmic filename. The bridge stops
+and reports the collision rather than choosing one.
 
-```text
-current month - 5 years - 3 months
-through
-current month + 6 months
-```
-
-Older SC Data contracts remain in the Data directory under their unambiguous
-two-digit-year SC Data filenames but are treated as archive-only.
-
-As calendar time advances:
-
-1. newly downloaded contracts that enter the window are picked up
-   automatically
-2. changed source files are refreshed while preserving any genuinely newer
-   Rithmic live tail
-3. bridge-managed Rithmic targets that age out are retired
-4. canonical SC Data source files are never removed
-
-This makes the Rithmic files a bounded rolling cache while the SC Data files
-remain the complete archive.
-
+For a continuous chart beyond the Rithmic one-digit-year window, use the
+original SC Data files with Sierra Chart connected to SC Data, typically in a
+separate Sierra Chart installation if Rithmic must remain active elsewhere.

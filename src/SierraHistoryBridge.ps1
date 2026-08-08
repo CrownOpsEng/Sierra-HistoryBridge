@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.7"
+$Version = "0.0.8"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -61,41 +61,6 @@ function Get-CompactName([string]$FileName) {
         return $FileName.Substring(0, $FileName.Length - 5)
     }
     return $FileName
-}
-
-function Get-FuturesMonthNumber([string]$MonthCode) {
-    switch ($MonthCode.ToUpperInvariant()) {
-        "F" { return 1 }
-        "G" { return 2 }
-        "H" { return 3 }
-        "J" { return 4 }
-        "K" { return 5 }
-        "M" { return 6 }
-        "N" { return 7 }
-        "Q" { return 8 }
-        "U" { return 9 }
-        "V" { return 10 }
-        "X" { return 11 }
-        "Z" { return 12 }
-        default { throw "Unknown futures month code: $MonthCode" }
-    }
-}
-
-function Get-ContractMonth([int]$FullYear, [string]$MonthCode) {
-    return [datetime]::new(
-        $FullYear,
-        (Get-FuturesMonthNumber $MonthCode),
-        1)
-}
-
-function Test-ContractInRithmicWindow(
-    [datetime]$ContractMonth,
-    [datetime]$WindowStart,
-    [datetime]$WindowEnd) {
-
-    return (
-        $ContractMonth -ge $WindowStart -and
-        $ContractMonth -le $WindowEnd)
 }
 
 
@@ -414,9 +379,6 @@ function Invoke-SierraHistoryBridge {
                             TargetName = $targetName
                             Group = "$($root.ToUpperInvariant())|$exchange"
                             FullYear = 2000 + [int]$year
-                            MonthCode = $month
-                            ContractMonth =
-                                Get-ContractMonth (2000 + [int]$year) $month
                             Records = $meta.Records
                             First = $meta.FirstDateTime
                             Last = $meta.LastDateTime
@@ -435,95 +397,66 @@ function Invoke-SierraHistoryBridge {
         throw "No matching SC Data futures files were found. Expected names such as NQU26-CME.scid."
     }
 
-    # Rithmic's one-digit year repeats every ten years. Sierra Chart also
-    # limits single-digit-year Continuous Futures Contract charts to five
-    # years. Treat Rithmic-named files as a rolling compatibility cache, not
-    # as the canonical long-term archive.
-    $currentMonth =
-        [datetime]::new(
-            (Get-Date).Year,
-            (Get-Date).Month,
-            1)
+    # Rithmic uses only the final year digit in futures symbols. Contracts ten
+    # years apart therefore map to the same filename (for example NQH16-CME
+    # and NQH26-CME both map to NQH6.CME). Never choose one silently.
+    $targetCollisions =
+        $candidates |
+        Group-Object TargetName |
+        Where-Object { $_.Count -gt 1 }
 
-    $usableHistoryYears = 5
-    $historyBufferMonths = 3
-    $forwardBufferMonths = 6
+    if ($targetCollisions) {
+        Write-Host
+        Write-Host "RITHMIC YEAR COLLISION" -ForegroundColor Red
+        Write-Host "Rithmic futures symbols contain only one year digit."
+        Write-Host "The following SC Data contracts would map to the same target:"
+        Write-Host
 
-    $windowStart =
-        $currentMonth.
-            AddYears(-$usableHistoryYears).
-            AddMonths(-$historyBufferMonths)
-
-    $windowEnd =
-        $currentMonth.AddMonths($forwardBufferMonths)
-
-    $archiveCandidates = $candidates
-
-    $candidates =
-        $archiveCandidates |
-        Where-Object {
-            Test-ContractInRithmicWindow `
-                $_.ContractMonth `
-                $windowStart `
-                $windowEnd
+        foreach ($collision in $targetCollisions) {
+            Write-Host "  $($collision.Name)" -ForegroundColor Yellow
+            foreach ($item in ($collision.Group | Sort-Object FullYear)) {
+                Write-Host "    <- $($item.SourceName)"
+            }
         }
 
-    $archiveOnly =
-        $archiveCandidates |
-        Where-Object {
-            -not (
-                Test-ContractInRithmicWindow `
-                    $_.ContractMonth `
-                    $windowStart `
-                    $windowEnd)
-        }
+        Write-Host
+        Write-Host "No files were changed."
+        Write-Host "Keep older multi-year history in SC Data naming or a separate"
+        Write-Host "SC Data Sierra Chart instance. Do not overwrite decade-colliding"
+        Write-Host "Rithmic filenames."
 
-    # The selected window is deliberately much shorter than the ten-year
-    # Rithmic filename alias cycle. If an unusual source set still maps more
-    # than one eligible contract to the same target, newest eligible wins and
-    # the older candidate remains canonical only under its SC Data filename.
-    $superseded = @()
-    $selected = @()
+        throw "Rithmic one-digit-year filename collision detected."
+    }
 
-    foreach ($targetGroup in ($candidates | Group-Object TargetName)) {
-        $winner =
-            $targetGroup.Group |
-            Sort-Object ContractMonth -Descending |
-            Select-Object -First 1
+    # Sierra Chart itself limits continuous-futures history when the active
+    # service uses one-digit year symbols. Warn when a group spans more than
+    # five calendar years even if no filename collision exists yet.
+    foreach ($groupName in ($candidates.Group | Sort-Object -Unique)) {
+        $groupCandidates =
+            $candidates |
+            Where-Object { $_.Group -eq $groupName }
 
-        $selected += $winner
+        $years =
+            $groupCandidates |
+            Select-Object -ExpandProperty FullYear |
+            Sort-Object -Unique
 
-        if ($targetGroup.Count -gt 1) {
-            $superseded +=
-                $targetGroup.Group |
-                Where-Object { $_.Source -ne $winner.Source }
+        if ($years.Count -gt 1) {
+            $span = $years[-1] - $years[0]
+
+            if ($span -ge 5) {
+                Write-Host
+                Write-Host (
+                    "NOTE: {0} spans {1}-{2}. Rithmic's one-digit-year symbols " +
+                    "limit Sierra Chart continuous-futures history to about five years." -f
+                    $groupName,
+                    $years[0],
+                    $years[-1]) -ForegroundColor Yellow
+            }
         }
     }
 
-    $candidates = $selected | Sort-Object ContractMonth, SourceName
-
-    if ($candidates.Count -eq 0) {
-        throw (
-            "No SC Data contracts fall inside the current Rithmic compatibility window " +
-            "($($windowStart.ToString('yyyy-MM')) through $($windowEnd.ToString('yyyy-MM'))).")
-    }
-
-    Write-Host (
-        "{0} eligible | {1} archive-only | window {2}..{3}" -f
-        $candidates.Count,
-        $archiveOnly.Count,
-        $windowStart.ToString("yyyy-MM"),
-        $windowEnd.ToString("yyyy-MM"))
-
-    Write-Host (
-        "      Policy: 5y Sierra history + 3mo rollover buffer + 6mo forward buffer")
-
-    if ($superseded.Count -gt 0) {
-        Write-Host (
-            "      {0} eligible source(s) superseded by newer contracts sharing a Rithmic filename." -f
-            $superseded.Count) -ForegroundColor Yellow
-    }
-
+    Write-Host "$($candidates.Count) SC Data futures file(s)"
     Write-Host "      Scale verification:"
 
     $scales = Get-ScaleTable $config
@@ -587,100 +520,6 @@ function Invoke-SierraHistoryBridge {
     $state = Read-JsonFile $StatePath
     $stateTable = Get-StateTable $state
 
-    # Build a retirement plan for bridge-managed Rithmic cache files whose
-    # canonical SC Data contract has rolled out of the compatibility window.
-    # Only modern state entries with verifiable target metadata are eligible.
-    # Never retire a target path currently required by an eligible contract.
-    $eligibleTargetPaths = @{}
-    foreach ($candidate in $candidates) {
-        $eligibleTargetPaths[$candidate.Target.ToLowerInvariant()] = $true
-    }
-
-    $retire = @()
-
-    foreach ($sourcePath in @($stateTable.Keys)) {
-        $entry = $stateTable[$sourcePath]
-
-        if ($entry -is [string] -or
-            $null -eq $entry -or
-            -not $entry.target_path) {
-            continue
-        }
-
-        $sourceName = [IO.Path]::GetFileName([string]$sourcePath)
-        $match = $sourcePattern.Match($sourceName)
-
-        if (-not $match.Success) {
-            continue
-        }
-
-        $fullYear = 2000 + [int]$match.Groups["year"].Value
-        $monthCode = $match.Groups["month"].Value.ToUpperInvariant()
-        $contractMonth = Get-ContractMonth $fullYear $monthCode
-
-        if (Test-ContractInRithmicWindow $contractMonth $windowStart $windowEnd) {
-            continue
-        }
-
-        $targetPath = [string]$entry.target_path
-        $targetKey = $targetPath.ToLowerInvariant()
-
-        if ($eligibleTargetPaths.ContainsKey($targetKey)) {
-            # The one-digit target name has been legitimately reused by a
-            # newer eligible decade. Drop only the stale state entry.
-            $retire += [pscustomobject]@{
-                Source = $sourcePath
-                SourceName = $sourceName
-                Target = $targetPath
-                TargetName = [IO.Path]::GetFileName($targetPath)
-                RemoveTarget = $false
-                Reason = "target alias reused by newer eligible contract"
-            }
-            continue
-        }
-
-        $targetStatus = Get-TargetStatus $targetPath
-
-        if (-not $targetStatus.Exists) {
-            $retire += [pscustomobject]@{
-                Source = $sourcePath
-                SourceName = $sourceName
-                Target = $targetPath
-                TargetName = [IO.Path]::GetFileName($targetPath)
-                RemoveTarget = $false
-                Reason = "managed target already missing"
-            }
-            continue
-        }
-
-        # Retire only a target that still looks like the file recorded by the
-        # bridge. If it has become unrecognizable, leave it alone and keep a
-        # warning in the plan instead of deleting an unknown file.
-        $safeToRemove =
-            $targetStatus.Kind -eq "data" -and
-            $entry.minimum_target_records -and
-            $targetStatus.Records -ge [long]$entry.minimum_target_records -and
-            (
-                -not $entry.target_first_datetime -or
-                $targetStatus.FirstDateTime -eq [long]$entry.target_first_datetime
-            )
-
-        $retire += [pscustomobject]@{
-            Source = $sourcePath
-            SourceName = $sourceName
-            Target = $targetPath
-            TargetName = [IO.Path]::GetFileName($targetPath)
-            RemoveTarget = [bool]$safeToRemove
-            Reason =
-                if ($safeToRemove) {
-                    "outside rolling Rithmic cache window"
-                }
-                else {
-                    "outside window but target no longer matches managed metadata"
-                }
-        }
-    }
-
     $ready = @()
     $unchanged = 0
     $unverified = 0
@@ -721,11 +560,9 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host (
-        "Plan: {0} ready | {1} unchanged | {2} archive-only | {3} retire | {4} unverified" -f
+        "Plan: {0} ready | {1} unchanged | {2} unverified" -f
         $ready.Count,
         $unchanged,
-        $archiveOnly.Count,
-        $retire.Count,
         $unverified)
 
     foreach ($candidate in $ready) {
@@ -759,19 +596,7 @@ function Invoke-SierraHistoryBridge {
             $detail)
     }
 
-    foreach ($item in $retire) {
-        $action =
-            if ($item.RemoveTarget) { "RETIRE" } else { "STATE" }
-
-        Write-Host (
-            "  {0,-7} {1} -> {2} | {3}" -f
-            $action,
-            (Get-CompactName $item.SourceName),
-            (Get-CompactName $item.TargetName),
-            $item.Reason)
-    }
-
-    if ($ready.Count -eq 0 -and $retire.Count -eq 0) {
+    if ($ready.Count -eq 0) {
         Write-Host
         Write-Host "Nothing needs updating."
         return 0
@@ -785,7 +610,7 @@ function Invoke-SierraHistoryBridge {
 
     if (-not $Yes) {
         Write-Host
-        $response = Read-Host "Apply this Rithmic cache maintenance plan? [Y/n]"
+        $response = Read-Host "Update these Rithmic history files? [Y/n]"
         if (-not [string]::IsNullOrWhiteSpace($response)) {
             $normalized = $response.Trim().ToLowerInvariant()
             if ($normalized -ne "y" -and $normalized -ne "yes") {
@@ -808,52 +633,6 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host "[4/4] Update"
-
-    $retiredTargets = 0
-    $retiredState = 0
-    $retireWarnings = 0
-
-    foreach ($item in $retire) {
-        if ($item.RemoveTarget) {
-            try {
-                if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
-                    Remove-Item -LiteralPath $item.Target -Force
-                    $retiredTargets++
-                }
-
-                if ($stateTable.ContainsKey($item.Source)) {
-                    $stateTable.Remove($item.Source)
-                    $retiredState++
-                }
-
-                Write-Host (
-                    "  RETIRED {0} | source {1}" -f
-                    (Get-CompactName $item.TargetName),
-                    (Get-CompactName $item.SourceName))
-            }
-            catch {
-                $retireWarnings++
-                Write-Host (
-                    "  RETIRE WARNING {0} | {1}" -f
-                    (Get-CompactName $item.TargetName),
-                    $_.Exception.Message) -ForegroundColor Yellow
-            }
-        }
-        elseif ($item.Reason -eq "managed target already missing" -or
-                $item.Reason -eq "target alias reused by newer eligible contract") {
-            if ($stateTable.ContainsKey($item.Source)) {
-                $stateTable.Remove($item.Source)
-                $retiredState++
-            }
-        }
-        else {
-            $retireWarnings++
-            Write-Host (
-                "  RETIRE SKIPPED {0} | {1}" -f
-                (Get-CompactName $item.TargetName),
-                $item.Reason) -ForegroundColor Yellow
-        }
-    }
 
     $backupDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Backups"
     $logDirectory = Join-Path $resolvedDataFolder "SCID_Bridge_Logs"
@@ -1022,12 +801,11 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host (
-        "Done: {0} updated | {1} retired | {2} failed | {3} unchanged | {4} warning file(s) | {5:0.0}s" -f
+        "Done: {0} updated | {1} failed | {2} unchanged | {3} warning file(s) | {4:0.0}s" -f
         $updated,
-        $retiredTargets,
         $failed,
         $unchanged,
-        ($warningFiles + $retireWarnings),
+        $warningFiles,
         $updateStopwatch.Elapsed.TotalSeconds)
 
     Write-Host "Log:     $logPath"

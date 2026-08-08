@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.7 — experimental / pre-stable**
+**Version 0.0.8 — experimental / pre-stable**
 
 Sierra History Bridge updates Sierra Chart **Rithmic-named intraday files** with **SC Data historical records**, while preserving Rithmic records that are genuinely newer than the SC Data source.
 
@@ -168,38 +168,26 @@ It converts price-bearing fields to the verified Rithmic raw-price convention.
 When an existing Rithmic file contains records newer than the SC Data source, those records are preserved after the converted historical section. A short handoff guard is used to avoid retaining typical live/backfill overlap.
 
 
-## Rithmic rolling compatibility cache
+## Rithmic year-symbol limitation
 
-Rithmic futures symbols use a **single year digit**, while SC Data filenames
-use a two-digit year. Sierra Chart documents a five-year maximum for
-Continuous Futures Contract charts when the service uses single-digit-year
-symbols.
+Rithmic futures symbols use a **single year digit**. That creates two separate
+historical limits:
 
-Sierra History Bridge therefore treats the Rithmic-named files as a **rolling
-compatibility cache**, not as the canonical archive.
-
-Default managed window:
+1. Sierra Chart limits continuous-futures history to roughly five years when
+   the active service uses one-digit-year symbols.
+2. Contracts ten years apart collide at the filename level. For example:
 
 ```text
-5 years usable Sierra history
-+ 3 months historical rollover buffer
-+ 6 months forward-contract buffer
+NQH16-CME.scid -> NQH6.CME.scid
+NQH26-CME.scid -> NQH6.CME.scid
 ```
 
-The three-month historical buffer is deliberately longer than Sierra Chart's
-documented maximum two-month transition window when moving between contracts.
-The six-month forward buffer is a bridge policy so near-future contracts can
-be staged before rollover.
+Sierra History Bridge detects these collisions and refuses to overwrite either
+contract.
 
-SC Data two-digit-year files remain the canonical long-term archive. Contracts
-outside the rolling Rithmic window are not converted. Bridge-managed derived
-targets that age out of the window are retired after their metadata is
-verified.
-
-The managed window is much shorter than Rithmic's ten-year filename alias
-cycle, so decade-separated contracts never need to coexist under the same
-Rithmic filename.
-
+For history beyond the Rithmic symbol window, retain the original SC Data
+two-digit-year files and use an SC Data-connected Sierra Chart instance for
+long-range continuous charts.
 
 ## Project status
 

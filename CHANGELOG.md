@@ -4,19 +4,11 @@ All notable changes to Sierra History Bridge are documented here.
 
 The project uses pre-stable semantic versioning while conversion behavior and supported service/symbol mappings are validated.
 
-## v0.0.7 - 2026-08-07
+## v0.0.8 - 2026-08-07
 
 Initial Git-tracked version.
 
 ### Application
-
-- newest eligible contract owns a reused one-digit Rithmic filename; stale decade state is discarded
-
-- managed cache retirement for verified bridge-created targets that age out of the rolling window
-
-- archive-only filtering instead of stopping on decade-separated Rithmic filename collisions
-
-- rolling Rithmic compatibility window: 5 years usable history + 3-month rollover buffer + 6-month forward buffer
 
 - warning when a symbol group spans beyond Sierra Chart's practical five-year continuous-futures window under Rithmic symbology
 
