@@ -37,6 +37,26 @@ if ($converterText -match '(?m)\bunsafe\b|\bfixed\s*\(') {
     throw "Windows PowerShell 5.1 compatibility regression: unsafe C# found in ScidBridge.cs."
 }
 
+
+
+$appText = Get-Content -LiteralPath (Join-Path $RepoRoot "src\SierraHistoryBridge.ps1") -Raw
+
+foreach ($requiredPolicyToken in @(
+    '$usableHistoryYears = 5',
+    '$historyBufferMonths = 3',
+    '$forwardBufferMonths = 6',
+    'archive-only',
+    'outside rolling Rithmic cache window'
+)) {
+    if ($appText -notlike "*$requiredPolicyToken*") {
+        throw "Rithmic rolling-window regression: missing $requiredPolicyToken"
+    }
+}
+
+if ($appText -match 'RITHMIC YEAR COLLISION') {
+    throw "Rithmic rolling-window regression: collision-stop behavior was reintroduced."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

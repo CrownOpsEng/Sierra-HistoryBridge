@@ -145,3 +145,39 @@ Rithmic appends live records.
 
 Older pre-release state entries that contain only a source signature are treated
 as unverifiable and are reprocessed once.
+
+
+## Rithmic rolling-window management
+
+Rithmic futures filenames encode only the final year digit. The namespace
+therefore repeats every ten years.
+
+Sierra Chart separately documents a five-year maximum for Continuous Futures
+Contract charts when single-digit-year symbols are used. The bridge uses that
+five-year platform limit as the usable historical horizon and maintains a
+small compatibility buffer around it.
+
+Default window:
+
+- five years of usable historical contracts
+- three additional months behind the historical boundary
+- six months of near-future contracts
+
+Sierra Chart documents that transitions from one contract month to the next
+occur only within the final two months of the contract being processed. The
+bridge uses three historical buffer months so the oldest chart boundary has
+more than that rollover overlap available.
+
+The six-month forward buffer is an engineering policy rather than a Sierra
+requirement. It allows nearby listed contracts to be converted before they
+become active.
+
+All SC Data files remain untouched as the canonical archive. Rithmic-named
+files are derived cache entries. When a bridge-managed target ages outside the
+window, the bridge can retire it only after checking stored target metadata.
+An unrecognized or externally modified target is left alone and reported
+instead of being deleted.
+
+If a target name is reused by a newer decade, the newer eligible contract owns
+the cache entry; stale state for the old source is discarded.
+

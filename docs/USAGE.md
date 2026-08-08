@@ -148,3 +148,33 @@ src=34,259,267 + tail=1,240 -> out=34,260,507
 
 Compact notation is used only for live progress where exact counts are not
 needed.
+
+
+## Rolling history window
+
+The bridge automatically selects only contracts relevant to the current
+Rithmic compatibility window.
+
+By default it manages:
+
+```text
+current month - 5 years - 3 months
+through
+current month + 6 months
+```
+
+Older SC Data contracts remain in the Data directory under their unambiguous
+two-digit-year SC Data filenames but are treated as archive-only.
+
+As calendar time advances:
+
+1. newly downloaded contracts that enter the window are picked up
+   automatically
+2. changed source files are refreshed while preserving any genuinely newer
+   Rithmic live tail
+3. bridge-managed Rithmic targets that age out are retired
+4. canonical SC Data source files are never removed
+
+This makes the Rithmic files a bounded rolling cache while the SC Data files
+remain the complete archive.
+
