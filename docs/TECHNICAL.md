@@ -110,3 +110,17 @@ Add-Type -Path $ConverterSource
 
 The converter deliberately avoids unsafe code, LINQ, and custom compiler
 parameters so PowerShell's normal default framework references are retained.
+
+
+## Out-of-order source timestamps
+
+SCID files can occasionally contain a timestamp that moves backward even
+though the record sequence itself is the intended trade-data sequence.
+
+The bridge does not sort records or rewrite timestamps. It preserves the
+source record sequence exactly, counts timestamp inversions, reports the first
+one and the largest backward jump, and records those diagnostics in the run
+log.
+
+This policy avoids silently changing trade ordering while still allowing an
+otherwise usable SC Data file to be converted.

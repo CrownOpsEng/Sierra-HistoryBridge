@@ -26,6 +26,12 @@ namespace SierraHistoryBridge
         public long TailRecords;
         public long OutputRecords;
         public double ElapsedSeconds;
+
+        public long OutOfOrderRecords;
+        public long FirstOutOfOrderIndex;
+        public long FirstPriorDateTime;
+        public long FirstOutOfOrderDateTime;
+        public long LargestBackwardMicroseconds;
     }
 
     public static class ScidBridge
@@ -111,6 +117,23 @@ namespace SierraHistoryBridge
             stream.Position = HeaderSize + recordIndex * RecordSize + 20;
             ReadExact(stream, buffer, 4);
             return BitConverter.ToSingle(buffer, 0);
+        }
+
+        public static string FormatScDateTime(long value)
+        {
+            try
+            {
+                DateTime epoch =
+                    new DateTime(1899, 12, 30, 0, 0, 0, DateTimeKind.Utc);
+
+                return epoch
+                    .AddTicks(checked(value * 10L))
+                    .ToString("yyyy-MM-dd HH:mm:ss.ffffff 'UTC'");
+            }
+            catch
+            {
+                return value.ToString();
+            }
         }
 
         public static ScidMeta GetMeta(string path)
@@ -356,6 +379,12 @@ namespace SierraHistoryBridge
             long completedBytes = 0;
             int nextPercent = 0;
 
+            long outOfOrderRecords = 0;
+            long firstOutOfOrderIndex = -1;
+            long firstPriorDateTime = 0;
+            long firstOutOfOrderDateTime = 0;
+            long largestBackwardMicroseconds = 0;
+
             try
             {
                 using (var input = new FileStream(
@@ -374,6 +403,7 @@ namespace SierraHistoryBridge
 
                     long recordsRemaining = sourceMeta.Records;
                     long previousDateTime = Int64.MinValue;
+                    long sourceRecordIndex = 0;
 
                     while (recordsRemaining > 0)
                     {
@@ -389,10 +419,25 @@ namespace SierraHistoryBridge
                             long dateTime = BitConverter.ToInt64(buffer, offset);
 
                             if (dateTime < previousDateTime)
-                                throw new IOException(
-                                    "SC Data source timestamps are not monotonic.");
+                            {
+                                outOfOrderRecords++;
+
+                                long backward =
+                                    previousDateTime - dateTime;
+
+                                if (firstOutOfOrderIndex < 0)
+                                {
+                                    firstOutOfOrderIndex = sourceRecordIndex;
+                                    firstPriorDateTime = previousDateTime;
+                                    firstOutOfOrderDateTime = dateTime;
+                                }
+
+                                if (backward > largestBackwardMicroseconds)
+                                    largestBackwardMicroseconds = backward;
+                            }
 
                             previousDateTime = dateTime;
+                            sourceRecordIndex++;
 
                             float open = BitConverter.ToSingle(buffer, offset + 8);
                             float high = BitConverter.ToSingle(buffer, offset + 12);
@@ -511,7 +556,12 @@ namespace SierraHistoryBridge
                     SourceRecords = sourceMeta.Records,
                     TailRecords = tailRecords,
                     OutputRecords = expectedRecords,
-                    ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
+                    ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds,
+                    OutOfOrderRecords = outOfOrderRecords,
+                    FirstOutOfOrderIndex = firstOutOfOrderIndex,
+                    FirstPriorDateTime = firstPriorDateTime,
+                    FirstOutOfOrderDateTime = firstOutOfOrderDateTime,
+                    LargestBackwardMicroseconds = largestBackwardMicroseconds
                 };
             }
             catch

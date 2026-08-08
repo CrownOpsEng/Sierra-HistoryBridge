@@ -4,11 +4,17 @@ All notable changes to Sierra History Bridge are documented here.
 
 The project uses pre-stable semantic versioning while conversion behavior and supported service/symbol mappings are validated.
 
-## v0.0.2 - 2026-08-07
+## v0.0.3 - 2026-08-07
 
 Initial Git-tracked version.
 
 ### Application
+
+- verifies the replaced target record count after every successful conversion
+
+- writes the run log before conversion begins and appends success/failure diagnostics immediately
+
+- preserves SC Data record order when isolated source timestamps move backward and reports the anomaly
 
 - scans SC Data futures `.scid` files
 - maps SC Data futures filenames to Rithmic-style filenames

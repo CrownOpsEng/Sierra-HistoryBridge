@@ -88,3 +88,12 @@ Each bridge run writes a log under:
 ```text
 SCID_Bridge_Logs
 ```
+
+
+## Timestamp warnings
+
+If an SC Data source contains one or more timestamps that move backward, the
+bridge prints a warning and records the details in the run log. Conversion
+continues and the original record sequence is preserved.
+
+The bridge does not sort or rewrite those source timestamps.

@@ -64,9 +64,17 @@ try {
             $open = if ($i -eq 5) { [single]-1.2345e30 } else { [single]0.0 }
             $price = [single](30000.0 + ($i * 0.25))
 
+            $recordTime =
+                if ($i -eq 10) {
+                    $baseTime + (8 * 1000000)
+                }
+                else {
+                    $baseTime + ($i * 1000000)
+                }
+
             Write-Record `
                 $writer `
-                ($baseTime + ($i * 1000000)) `
+                $recordTime `
                 $open `
                 ($price + 0.25) `
                 $price `
@@ -137,6 +145,14 @@ try {
         throw "Expected 21 output records."
     }
 
+    if ($result.OutOfOrderRecords -ne 1) {
+        throw "Expected one preserved out-of-order source timestamp."
+    }
+
+    if ($result.FirstOutOfOrderIndex -ne 10) {
+        throw "Unexpected first out-of-order source record index."
+    }
+
     if (-not (Test-Path -LiteralPath (Join-Path $backup "NQU6.CME.scid.bak"))) {
         throw "Expected backup file was not created."
     }
@@ -162,6 +178,7 @@ try {
     Write-Host "PASS: newer Rithmic tail preservation"
     Write-Host "PASS: backup creation"
     Write-Host "PASS: Sierra Open-field marker preservation"
+    Write-Host "PASS: out-of-order source timestamp preserved and reported"
     exit 0
 }
 finally {

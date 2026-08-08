@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.2"
+$Version = "0.0.3"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -435,7 +435,12 @@ function Invoke-SierraHistoryBridge {
 
     $log.Add("Sierra History Bridge v$Version")
     $log.Add("Data folder: $resolvedDataFolder")
+    $log.Add("Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     $log.Add("")
+
+    # Write the log immediately so a run always leaves diagnostics even if a
+    # later conversion fails or the process is interrupted.
+    $log | Set-Content -LiteralPath $logPath -Encoding UTF8
 
     $updated = 0
     $failed = 0
@@ -466,6 +471,16 @@ function Invoke-SierraHistoryBridge {
                     $backupDirectory,
                     2.0)
 
+            $targetMeta =
+                [SierraHistoryBridge.ScidBridge]::GetMeta($candidate.Target)
+
+            if ($targetMeta.Records -ne $result.OutputRecords) {
+                throw (
+                    "Post-replacement verification failed. Expected {0:N0} records; target contains {1:N0}." -f
+                    $result.OutputRecords,
+                    $targetMeta.Records)
+            }
+
             $updated++
             $stateTable[$candidate.Source] = $candidate.Signature
 
@@ -475,19 +490,70 @@ function Invoke-SierraHistoryBridge {
                 $result.TailRecords,
                 $result.ElapsedSeconds) -ForegroundColor Green
 
-            $log.Add(
+            $entry =
                 "OK $($candidate.SourceName) -> $($candidate.TargetName) " +
                 "scale=x$($scales[$candidate.Group]) " +
                 "source_records=$($result.SourceRecords) " +
                 "tail_records=$($result.TailRecords) " +
-                "elapsed=$($result.ElapsedSeconds)")
+                "output_records=$($result.OutputRecords) " +
+                "target_bytes=$($targetMeta.Length) " +
+                "elapsed=$($result.ElapsedSeconds)"
+
+            $log.Add($entry)
+            Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
+
+            if ($result.OutOfOrderRecords -gt 0) {
+                $prior =
+                    [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
+                        $result.FirstPriorDateTime)
+
+                $offending =
+                    [SierraHistoryBridge.ScidBridge]::FormatScDateTime(
+                        $result.FirstOutOfOrderDateTime)
+
+                $backSeconds =
+                    $result.LargestBackwardMicroseconds / 1000000.0
+
+                Write-Host (
+                    "      WARNING: source contains {0:N0} out-of-order timestamp record(s)." -f
+                    $result.OutOfOrderRecords) -ForegroundColor Yellow
+
+                Write-Host (
+                    "               First at source record {0:N0}: {1} -> {2}" -f
+                    $result.FirstOutOfOrderIndex,
+                    $prior,
+                    $offending) -ForegroundColor Yellow
+
+                Write-Host (
+                    "               Largest backward timestamp jump: {0:N6} seconds." -f
+                    $backSeconds) -ForegroundColor Yellow
+
+                Write-Host (
+                    "               Record order was preserved exactly; timestamps were not sorted or rewritten."
+                ) -ForegroundColor Yellow
+
+                $warning =
+                    "WARNING $($candidate.SourceName): " +
+                    "out_of_order=$($result.OutOfOrderRecords) " +
+                    "first_index=$($result.FirstOutOfOrderIndex) " +
+                    "prior=$prior offending=$offending " +
+                    "largest_backward_seconds=$backSeconds " +
+                    "action=preserved_record_order"
+
+                $log.Add($warning)
+                Add-Content -LiteralPath $logPath -Value $warning -Encoding UTF8
+            }
         }
         catch {
             $failed++
             Write-Host "      ERROR: $($_.Exception.Message)" -ForegroundColor Red
-            $log.Add(
+
+            $entry =
                 "ERROR $($candidate.SourceName) -> $($candidate.TargetName): " +
-                $_.Exception.Message)
+                $_.Exception.Message
+
+            $log.Add($entry)
+            Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
         }
     }
 
