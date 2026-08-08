@@ -61,7 +61,7 @@ function New-PortableZipArchive {
     }
 }
 
-$Version = "0.0.9"
+$Version = "0.0.10"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 if (-not $OutputDirectory) {

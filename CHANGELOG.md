@@ -1,13 +1,17 @@
 # Changelog
 
-## v0.0.9 - 2026-08-07
+## v0.0.10 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
 
+- DLY-only contracts are included even when no matching SCID source exists
+- Historical Daily scale can be verified from overlapping DLY files
+- old target-only Daily rows are not carried across reused one-digit contract names
+
 - SC Data `.scid` to Rithmic `.scid` conversion
-- matching Historical Daily `.dly` processing
+- independent Historical Daily `.dly` discovery and processing
 - verified raw-price scale per root/exchange group
 - preservation of newer Rithmic intraday records
 - date-based Historical Daily merge with latest-date overlap handling

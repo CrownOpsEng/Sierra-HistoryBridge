@@ -192,6 +192,40 @@ try {
         "2026/01/04, 10300.00000000, 10400.00000000, 10200.00000000, 10350.00000000, 1400, 13"
     ) | Set-Content -LiteralPath $dailyTarget -Encoding ASCII
 
+
+    $dailyScaleSource =
+        Join-Path $temp "NQH26-CME.dly"
+
+    $dailyScaleTarget =
+        Join-Path $temp "NQH6.CME.dly"
+
+    @(
+        "Date, Open, High, Low, Close, Volume, OpenInterest",
+        "2026/02/01, 100.00, 101.00, 99.00, 100.50, 1000, 10",
+        "2026/02/02, 101.00, 102.00, 100.00, 101.50, 1100, 11",
+        "2026/02/03, 102.00, 103.00, 101.00, 102.50, 1200, 12",
+        "2026/02/04, 103.00, 104.00, 102.00, 103.50, 1300, 13",
+        "2026/02/05, 104.00, 105.00, 103.00, 104.50, 1400, 14"
+    ) | Set-Content -LiteralPath $dailyScaleSource -Encoding ASCII
+
+    @(
+        "Date, Open, High, Low, Close, Volume, OpenInterest",
+        "2026/02/01, 10000.00000000, 10100.00000000, 9900.00000000, 10050.00000000, 1000, 10",
+        "2026/02/02, 10100.00000000, 10200.00000000, 10000.00000000, 10150.00000000, 1100, 11",
+        "2026/02/03, 10200.00000000, 10300.00000000, 10100.00000000, 10250.00000000, 1200, 12",
+        "2026/02/04, 10300.00000000, 10400.00000000, 10200.00000000, 10350.00000000, 1300, 13",
+        "2026/02/05, 10400.00000000, 10500.00000000, 10300.00000000, 10450.00000000, 1400, 14"
+    ) | Set-Content -LiteralPath $dailyScaleTarget -Encoding ASCII
+
+    $dailyScale =
+        [SierraHistoryBridge.DailyBridge]::InferScale(
+            $dailyScaleSource,
+            $dailyScaleTarget)
+
+    if ($dailyScale.Factor -ne 100.0) {
+        throw "Expected Historical Daily scale inference of x100."
+    }
+
     $dailyResult =
         [SierraHistoryBridge.DailyBridge]::Sync(
             $dailySource,
@@ -207,12 +241,16 @@ try {
         throw "Expected 2 Historical Daily source records to be applied."
     }
 
-    if ($dailyResult.PreservedTargetRecords -ne 3) {
-        throw "Expected 3 Historical Daily target records to be retained."
+    if ($dailyResult.PreservedTargetRecords -ne 2) {
+        throw "Expected 2 Historical Daily target records to be retained."
     }
 
-    if ($dailyResult.OutputRecords -ne 5) {
-        throw "Expected 5 Historical Daily output records."
+    if ($dailyResult.ReplacedOrDroppedTargetRecords -ne 1) {
+        throw "Expected 1 older target-only Historical Daily record to be dropped."
+    }
+
+    if ($dailyResult.OutputRecords -ne 4) {
+        throw "Expected 4 Historical Daily output records."
     }
 
     if (-not $dailyResult.PreservedLatestSourceDate) {
@@ -241,7 +279,9 @@ try {
     Write-Host "PASS: backup creation"
     Write-Host "PASS: Sierra Open-field marker preservation"
     Write-Host "PASS: out-of-order source timestamp preserved and reported"
+    Write-Host "PASS: Historical Daily independent scale inference"
     Write-Host "PASS: Historical Daily merge and scale conversion"
+    Write-Host "PASS: Historical Daily older target-only rows are not carried forward"
     Write-Host "PASS: Historical Daily latest-date overlap handling"
     exit 0
 }

@@ -1,15 +1,17 @@
 # Sierra History Bridge
 
-**Version 0.0.9 — pre-stable**
+**Version 0.0.10 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
 
-For each eligible futures contract it can update both:
+SCID and Historical Daily files are discovered independently. A contract does
+not need to have both file types.
 
 ```text
 NQU26-CME.scid  ->  NQU6.CME.scid
 NQU26-CME.dly   ->  NQU6.CME.dly
+NQZ23-CME.dly   ->  NQZ3.CME.dly
 ```
 
 The `.scid` path supplies intraday/tick history. The `.dly` path supplies
@@ -64,10 +66,11 @@ contract mapping and price scale.
 
 Daily files are merged by date:
 
-- SC Data replaces matching historical dates.
-- If the Rithmic target already contains the latest date in the SC Data file,
-  that target record is retained for that date.
-- Dates present only in the Rithmic target are retained.
+- SC Data supplies the historical rows through its latest date.
+- If the Rithmic target already contains that latest date, the Rithmic row is
+  retained for that date.
+- Rithmic rows newer than the SC Data file are retained.
+- Older Rithmic-only rows are not carried forward.
 - When SC Data advances to a newer date, the previous latest date is replaced
   from SC Data on the next run.
 
@@ -110,7 +113,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.9 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.10 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -131,3 +134,18 @@ CME Group, or their affiliates.
 ## License
 
 Mozilla Public License 2.0. See [LICENSE](LICENSE).
+
+
+## Existing Rithmic files outside the managed range
+
+The bridge does not remove arbitrary Rithmic history files merely because they
+are outside the managed range.
+
+Files previously recorded by the bridge can be retired after their saved
+metadata is verified. Unmanaged files are left alone.
+
+When a one-digit Rithmic filename is reused by a newer decade, processing the
+new eligible SC Data contract replaces the old target history. The SCID path
+preserves only genuinely newer target records. The Historical Daily path keeps
+only the overlapping latest date and dates newer than the source, so old-decade
+daily rows are not carried into the new contract.

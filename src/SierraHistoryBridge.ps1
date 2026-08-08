@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.9"
+$Version = "0.0.10"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -471,107 +471,196 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host -NoNewline "[3/4] Scan       "
 
-    $sourcePattern = [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.scid$'
-    $candidates = @()
+    $sourcePattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
 
-    Get-ChildItem -LiteralPath $resolvedDataFolder -Filter "*.scid" -File |
+    $contracts = @{}
+
+    function Get-OrCreateContractCandidate(
+        [string]$Root,
+        [string]$Month,
+        [string]$Year,
+        [string]$Exchange) {
+
+        $contractKey =
+            "{0}|{1}|{2}|{3}" -f
+            $Root.ToUpperInvariant(),
+            $Month.ToUpperInvariant(),
+            $Year,
+            $Exchange.ToUpperInvariant()
+
+        if ($contracts.ContainsKey($contractKey)) {
+            return $contracts[$contractKey]
+        }
+
+        $rithmicYear =
+            $Year.Substring($Year.Length - 1, 1)
+
+        $targetBase =
+            "$Root$($Month.ToUpperInvariant())$rithmicYear.$($Exchange.ToUpperInvariant())"
+
+        $candidate = [pscustomobject]@{
+            ContractKey = $contractKey
+            Root = $Root
+            MonthCode = $Month.ToUpperInvariant()
+            FullYear = 2000 + [int]$Year
+            ContractMonth =
+                Get-ContractMonth `
+                    (2000 + [int]$Year) `
+                    $Month.ToUpperInvariant()
+            Group =
+                "$($Root.ToUpperInvariant())|$($Exchange.ToUpperInvariant())"
+
+            HasScid = $false
+            Source = $null
+            SourceName = $null
+            Target =
+                Join-Path $resolvedDataFolder "$targetBase.scid"
+            TargetName = "$targetBase.scid"
+            Records = 0
+            First = 0
+            Last = 0
+            Size = 0
+            ModifiedTicks = 0
+
+            DailyAvailable = $false
+            DailyError = $null
+            DailySource = $null
+            DailySourceName = $null
+            DailyTarget =
+                Join-Path $resolvedDataFolder "$targetBase.dly"
+            DailyTargetName = "$targetBase.dly"
+            DailyRecords = 0
+            DailyFirstDateTicks = 0
+            DailyLastDateTicks = 0
+            DailySize = 0
+            DailyModifiedTicks = 0
+
+            StateKey = $null
+        }
+
+        $contracts[$contractKey] = $candidate
+        return $candidate
+    }
+
+    Get-ChildItem -LiteralPath $resolvedDataFolder -File |
+        Where-Object {
+            $_.Extension -ieq ".scid" -or
+            $_.Extension -ieq ".dly"
+        } |
         Sort-Object Name |
         ForEach-Object {
             $file = $_
             $match = $sourcePattern.Match($file.Name)
 
-            if ($match.Success) {
-                $root = $match.Groups["root"].Value
-                $month = $match.Groups["month"].Value.ToUpperInvariant()
-                $year = $match.Groups["year"].Value
-                $exchange = $match.Groups["exchange"].Value.ToUpperInvariant()
+            if (-not $match.Success) {
+                return
+            }
 
-                $targetName =
-                    "$root$month$($year.Substring($year.Length - 1, 1)).$exchange.scid"
+            $root = $match.Groups["root"].Value
+            $month =
+                $match.Groups["month"].Value.ToUpperInvariant()
+            $year = $match.Groups["year"].Value
+            $exchange =
+                $match.Groups["exchange"].Value.ToUpperInvariant()
+            $extension =
+                $match.Groups["extension"].Value.ToLowerInvariant()
 
-                $targetPath = Join-Path $resolvedDataFolder $targetName
+            $candidate =
+                Get-OrCreateContractCandidate `
+                    $root `
+                    $month `
+                    $year `
+                    $exchange
 
+            if ($extension -eq "scid") {
                 try {
-                    $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($file.FullName)
+                    $meta =
+                        [SierraHistoryBridge.ScidBridge]::GetMeta(
+                            $file.FullName)
 
                     if ($meta.Records -gt 0) {
-                        $dailySource =
-                            [IO.Path]::ChangeExtension($file.FullName, ".dly")
-                        $dailyTarget =
-                            [IO.Path]::ChangeExtension($targetPath, ".dly")
-
-                        $dailyAvailable = $false
-                        $dailyError = $null
-                        $dailyRecords = 0
-                        $dailyFirstDateTicks = 0
-                        $dailyLastDateTicks = 0
-                        $dailySize = 0
-                        $dailyModifiedTicks = 0
-
-                        if (Test-Path -LiteralPath $dailySource -PathType Leaf) {
-                            try {
-                                $dailyMeta =
-                                    [SierraHistoryBridge.DailyBridge]::GetMeta(
-                                        $dailySource)
-
-                                if ($dailyMeta.Records -gt 0) {
-                                    $dailyAvailable = $true
-                                    $dailyRecords = [long]$dailyMeta.Records
-                                    $dailyFirstDateTicks =
-                                        [long]$dailyMeta.FirstDateTicks
-                                    $dailyLastDateTicks =
-                                        [long]$dailyMeta.LastDateTicks
-                                    $dailyItem =
-                                        Get-Item -LiteralPath $dailySource
-                                    $dailySize = [long]$dailyItem.Length
-                                    $dailyModifiedTicks =
-                                        [long]$dailyItem.LastWriteTimeUtc.Ticks
-                                }
-                            }
-                            catch {
-                                $dailyError = $_.Exception.Message
-                            }
-                        }
-
-                        $candidates += [pscustomobject]@{
-                            Source = $file.FullName
-                            SourceName = $file.Name
-                            Target = $targetPath
-                            TargetName = $targetName
-                            Group = "$($root.ToUpperInvariant())|$exchange"
-                            FullYear = 2000 + [int]$year
-                            MonthCode = $month
-                            ContractMonth =
-                                Get-ContractMonth (2000 + [int]$year) $month
-                            Records = $meta.Records
-                            First = $meta.FirstDateTime
-                            Last = $meta.LastDateTime
-                            Size = $file.Length
-                            ModifiedTicks = $file.LastWriteTimeUtc.Ticks
-                            DailyAvailable = $dailyAvailable
-                            DailyError = $dailyError
-                            DailySource = $dailySource
-                            DailySourceName =
-                                [IO.Path]::GetFileName($dailySource)
-                            DailyTarget = $dailyTarget
-                            DailyTargetName =
-                                [IO.Path]::GetFileName($dailyTarget)
-                            DailyRecords = $dailyRecords
-                            DailyFirstDateTicks = $dailyFirstDateTicks
-                            DailyLastDateTicks = $dailyLastDateTicks
-                            DailySize = $dailySize
-                            DailyModifiedTicks = $dailyModifiedTicks
-                        }
+                        $candidate.HasScid = $true
+                        $candidate.Source = $file.FullName
+                        $candidate.SourceName = $file.Name
+                        $candidate.Records = [long]$meta.Records
+                        $candidate.First = [long]$meta.FirstDateTime
+                        $candidate.Last = [long]$meta.LastDateTime
+                        $candidate.Size = [long]$file.Length
+                        $candidate.ModifiedTicks =
+                            [long]$file.LastWriteTimeUtc.Ticks
                     }
                 }
                 catch {
-                    Write-Host "      WARNING: skipping $($file.Name): $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host (
+                        "      SCID WARNING: {0}: {1}" -f
+                        $file.Name,
+                        $_.Exception.Message) -ForegroundColor Yellow
+                }
+            }
+            elseif ($extension -eq "dly") {
+                try {
+                    $dailyMeta =
+                        [SierraHistoryBridge.DailyBridge]::GetMeta(
+                            $file.FullName)
+
+                    if ($dailyMeta.Records -gt 0) {
+                        $candidate.DailyAvailable = $true
+                        $candidate.DailyError = $null
+                        $candidate.DailySource =
+                            $file.FullName
+                        $candidate.DailySourceName =
+                            $file.Name
+                        $candidate.DailyRecords =
+                            [long]$dailyMeta.Records
+                        $candidate.DailyFirstDateTicks =
+                            [long]$dailyMeta.FirstDateTicks
+                        $candidate.DailyLastDateTicks =
+                            [long]$dailyMeta.LastDateTicks
+                        $candidate.DailySize =
+                            [long]$file.Length
+                        $candidate.DailyModifiedTicks =
+                            [long]$file.LastWriteTimeUtc.Ticks
+                    }
+                }
+                catch {
+                    $candidate.DailyError =
+                        $_.Exception.Message
+                    $candidate.DailySource =
+                        $file.FullName
+                    $candidate.DailySourceName =
+                        $file.Name
                 }
             }
         }
 
+    $candidates =
+        @(
+            $contracts.Values |
+            Where-Object {
+                $_.HasScid -or
+                $_.DailyAvailable -or
+                $_.DailyError
+            }
+        )
+
+    foreach ($candidate in $candidates) {
+        $candidate.StateKey =
+            if ($candidate.HasScid) {
+                $candidate.Source
+            }
+            elseif ($candidate.DailySource) {
+                $candidate.DailySource
+            }
+            else {
+                $candidate.ContractKey
+            }
+    }
+
     if ($candidates.Count -eq 0) {
-        throw "No matching SC Data futures files were found. Expected names such as NQU26-CME.scid."
+        throw (
+            "No matching SC Data futures files were found. Expected names " +
+            "such as NQU26-CME.scid or NQU26-CME.dly.")
     }
 
     # Rithmic's one-digit year repeats every ten years. Sierra Chart also
@@ -624,7 +713,7 @@ function Invoke-SierraHistoryBridge {
     $superseded = @()
     $selected = @()
 
-    foreach ($targetGroup in ($candidates | Group-Object TargetName)) {
+    foreach ($targetGroup in ($candidates | Group-Object ContractKey)) {
         $winner =
             $targetGroup.Group |
             Sort-Object ContractMonth -Descending |
@@ -635,7 +724,7 @@ function Invoke-SierraHistoryBridge {
         if ($targetGroup.Count -gt 1) {
             $superseded +=
                 $targetGroup.Group |
-                Where-Object { $_.Source -ne $winner.Source }
+                Where-Object { $_.ContractKey -ne $winner.ContractKey }
         }
     }
 
@@ -647,9 +736,16 @@ function Invoke-SierraHistoryBridge {
             "($($windowStart.ToString('yyyy-MM')) through $($windowEnd.ToString('yyyy-MM'))).")
     }
 
+    $eligibleScid =
+        @($candidates | Where-Object { $_.HasScid }).Count
+    $eligibleDaily =
+        @($candidates | Where-Object { $_.DailyAvailable }).Count
+
     Write-Host (
-        "{0} eligible | {1} archive-only | window {2}..{3}" -f
+        "{0} eligible contracts | {1} SCID | {2} DLY | {3} archive-only | window {4}..{5}" -f
         $candidates.Count,
+        $eligibleScid,
+        $eligibleDaily,
         $archiveOnly.Count,
         $windowStart.ToString("yyyy-MM"),
         $windowEnd.ToString("yyyy-MM"))
@@ -659,7 +755,7 @@ function Invoke-SierraHistoryBridge {
 
     if ($superseded.Count -gt 0) {
         Write-Host (
-            "      {0} eligible source(s) superseded by newer contracts sharing a Rithmic filename." -f
+            "      {0} eligible source(s) were superseded by newer contract mappings." -f
             $superseded.Count) -ForegroundColor Yellow
     }
 
@@ -679,55 +775,92 @@ function Invoke-SierraHistoryBridge {
     $scales = Get-ScaleTable $config
 
     foreach ($group in ($candidates.Group | Sort-Object -Unique)) {
-        $overlapPair = $candidates |
+        $verified = $false
+
+        $scidPair =
+            $candidates |
             Where-Object {
-                $_.Group -eq $group -and (Test-Path -LiteralPath $_.Target)
+                $_.Group -eq $group -and
+                $_.HasScid -and
+                (Test-Path -LiteralPath $_.Target -PathType Leaf)
             } |
             Sort-Object Last -Descending |
             Select-Object -First 1
 
-        if ($overlapPair) {
+        if ($scidPair) {
             try {
                 $inference =
                     [SierraHistoryBridge.ScidBridge]::InferScale(
-                        $overlapPair.Source,
-                        $overlapPair.Target)
+                        $scidPair.Source,
+                        $scidPair.Target)
 
-                $scales[$group] = [double]$inference.Factor
+                $scales[$group] =
+                    [double]$inference.Factor
+                $verified = $true
 
                 Write-Host (
-                    "        {0,-12} x{1:g} verified | {2} <-> {3} | {5} samples" -f
+                    "        {0,-12} x{1:g} verified SCID | {2} <-> {3} | {4} samples" -f
                     $group,
                     $inference.Factor,
-                    $overlapPair.SourceName,
-                    $overlapPair.TargetName,
-                    $inference.MedianRatio,
+                    $scidPair.SourceName,
+                    $scidPair.TargetName,
                     $inference.Samples)
             }
             catch {
-                if ($scales.ContainsKey($group)) {
+                # Try Historical Daily below.
+            }
+        }
+
+        if (-not $verified) {
+            $dailyPair =
+                $candidates |
+                Where-Object {
+                    $_.Group -eq $group -and
+                    $_.DailyAvailable -and
+                    (Test-Path `
+                        -LiteralPath $_.DailyTarget `
+                        -PathType Leaf)
+                } |
+                Sort-Object DailyLastDateTicks -Descending |
+                Select-Object -First 1
+
+            if ($dailyPair) {
+                try {
+                    $inference =
+                        [SierraHistoryBridge.DailyBridge]::InferScale(
+                            $dailyPair.DailySource,
+                            $dailyPair.DailyTarget)
+
+                    $scales[$group] =
+                        [double]$inference.Factor
+                    $verified = $true
+
                     Write-Host (
-                        "        {0,-12} x{1:g} saved" -f
+                        "        {0,-12} x{1:g} verified DLY  | {2} <-> {3} | {4} samples" -f
                         $group,
-                        $scales[$group]) -ForegroundColor Yellow
+                        $inference.Factor,
+                        $dailyPair.DailySourceName,
+                        $dailyPair.DailyTargetName,
+                        $inference.Samples)
                 }
-                else {
-                    Write-Host (
-                        "        {0,-12} UNVERIFIED - no overlapping target" -f
-                        $group) -ForegroundColor Yellow
+                catch {
+                    # Use a previously proven scale if one exists.
                 }
             }
         }
-        elseif ($scales.ContainsKey($group)) {
-            Write-Host (
-                "        {0,-12} x{1:g} saved" -f
-                $group,
-                $scales[$group])
-        }
-        else {
-            Write-Host (
-                "        {0,-12} UNVERIFIED - no overlapping target" -f
-                $group) -ForegroundColor Yellow
+
+        if (-not $verified) {
+            if ($scales.ContainsKey($group)) {
+                Write-Host (
+                    "        {0,-12} x{1:g} saved" -f
+                    $group,
+                    $scales[$group]) -ForegroundColor Yellow
+            }
+            else {
+                Write-Host (
+                    "        {0,-12} UNVERIFIED - no overlapping SCID/DLY target" -f
+                    $group) -ForegroundColor Yellow
+            }
         }
     }
 
@@ -906,10 +1039,18 @@ function Invoke-SierraHistoryBridge {
             continue
         }
 
-        $signature =
-            "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+        $signature = $null
+        $targetStatus = $null
 
-        $targetStatus = Get-TargetStatus $candidate.Target
+        if ($candidate.HasScid) {
+            $signature =
+                "$($candidate.Size)|" +
+                "$($candidate.ModifiedTicks)|" +
+                "$($candidate.Last)"
+
+            $targetStatus =
+                Get-TargetStatus $candidate.Target
+        }
 
         $candidate |
             Add-Member -NotePropertyName Signature -NotePropertyValue $signature
@@ -918,19 +1059,24 @@ function Invoke-SierraHistoryBridge {
             Add-Member -NotePropertyName TargetStatus -NotePropertyValue $targetStatus
 
         $stateEntry =
-            if ($stateTable.ContainsKey($candidate.Source)) {
-                $stateTable[$candidate.Source]
+            if ($stateTable.ContainsKey($candidate.StateKey)) {
+                $stateTable[$candidate.StateKey]
             }
             else {
                 $null
             }
 
         $scidCurrent =
-            -not $Force -and
-            (Test-ProcessedTargetStillValid `
-                $stateEntry `
-                $signature `
-                $targetStatus)
+            if (-not $candidate.HasScid) {
+                $true
+            }
+            else {
+                -not $Force -and
+                (Test-ProcessedTargetStillValid `
+                    $stateEntry `
+                    $signature `
+                    $targetStatus)
+            }
 
         $dailySignature = $null
         $dailyTargetStatus = $null
@@ -961,7 +1107,11 @@ function Invoke-SierraHistoryBridge {
             Add-Member -NotePropertyName DailyTargetStatus -NotePropertyValue $dailyTargetStatus
 
         $candidate |
-            Add-Member -NotePropertyName ScidNeeded -NotePropertyValue (-not $scidCurrent)
+            Add-Member `
+                -NotePropertyName ScidNeeded `
+                -NotePropertyValue (
+                    $candidate.HasScid -and
+                    -not $scidCurrent)
 
         $candidate |
             Add-Member `
@@ -990,7 +1140,10 @@ function Invoke-SierraHistoryBridge {
 
     foreach ($candidate in $ready) {
         $scidPlan =
-            if ($candidate.ScidNeeded) {
+            if (-not $candidate.HasScid) {
+                "SCID not present"
+            }
+            elseif ($candidate.ScidNeeded) {
                 if (-not $candidate.TargetStatus.Exists) {
                     "SCID create"
                 }
@@ -1212,10 +1365,13 @@ function Invoke-SierraHistoryBridge {
                         $targetMeta.Records)
                 }
             }
-            else {
+            elseif ($candidate.HasScid) {
                 $targetMeta =
                     [SierraHistoryBridge.ScidBridge]::GetMeta(
                         $candidate.Target)
+            }
+            else {
+                $targetMeta = $null
             }
 
             if ($candidate.DailyNeeded) {
@@ -1250,12 +1406,36 @@ function Invoke-SierraHistoryBridge {
                 $dailyTargetMeta = $null
             }
 
-            $stateTable[$candidate.Source] = [pscustomobject]@{
-                source_signature = $candidate.Signature
+            $stateTable[$candidate.StateKey] = [pscustomobject]@{
+                source_signature =
+                    if ($candidate.HasScid) {
+                        $candidate.Signature
+                    }
+                    else {
+                        $null
+                    }
                 target_path = $candidate.Target
-                minimum_target_records = [long]$targetMeta.Records
-                target_first_datetime = [long]$targetMeta.FirstDateTime
-                minimum_target_last_datetime = [long]$targetMeta.LastDateTime
+                minimum_target_records =
+                    if ($targetMeta) {
+                        [long]$targetMeta.Records
+                    }
+                    else {
+                        0
+                    }
+                target_first_datetime =
+                    if ($targetMeta) {
+                        [long]$targetMeta.FirstDateTime
+                    }
+                    else {
+                        0
+                    }
+                minimum_target_last_datetime =
+                    if ($targetMeta) {
+                        [long]$targetMeta.LastDateTime
+                    }
+                    else {
+                        0
+                    }
                 daily_source_signature =
                     if ($candidate.DailyAvailable) {
                         $candidate.DailySignature
@@ -1311,18 +1491,22 @@ function Invoke-SierraHistoryBridge {
                         $scidResult.OutputRecords)
                 }
             }
-            else {
+            elseif ($targetMeta) {
                 $statusParts.Add(
                     "SCID current={0:N0}" -f
                     $targetMeta.Records)
             }
+            else {
+                $statusParts.Add("SCID none")
+            }
 
             if ($dailyResult) {
                 $statusParts.Add(
-                    "DLY src={0:N0} applied={1:N0} kept={2:N0} -> out={3:N0}" -f
+                    "DLY src={0:N0} applied={1:N0} kept={2:N0} replaced={3:N0} -> out={4:N0}" -f
                     $dailyResult.SourceRecords,
                     $dailyResult.SourceAppliedRecords,
                     $dailyResult.PreservedTargetRecords,
+                    $dailyResult.ReplacedOrDroppedTargetRecords,
                     $dailyResult.OutputRecords)
             }
             elseif ($dailyTargetMeta) {
@@ -1418,6 +1602,7 @@ function Invoke-SierraHistoryBridge {
                     "source_records=$($dailyResult.SourceRecords) " +
                     "source_applied=$($dailyResult.SourceAppliedRecords) " +
                     "target_records_preserved=$($dailyResult.PreservedTargetRecords) " +
+                    "target_records_replaced_or_dropped=$($dailyResult.ReplacedOrDroppedTargetRecords) " +
                     "latest_source_date_preserved_from_target=$($dailyResult.PreservedLatestSourceDate) " +
                     "output_records=$($dailyResult.OutputRecords) " +
                     "elapsed=$($dailyResult.ElapsedSeconds)"

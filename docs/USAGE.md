@@ -19,13 +19,15 @@ A normal run:
 2. scans SC Data futures contracts
 3. applies the rolling Rithmic history window
 4. verifies the raw-price scale
-5. checks both `.scid` and matching `.dly` targets
+5. checks eligible `.scid` and `.dly` sources independently
 6. shows the update plan
 7. waits for Sierra Chart to close
 8. updates and validates the required files
 9. saves state and writes the run log
 
 A contract can require an SCID update, a DLY update, both, or neither.
+Historical Daily files are included even when the matching SCID source is not
+present.
 
 ```text
 UPDATE  NQU26-CME -> NQU6.CME | SCID current | DLY update
@@ -56,7 +58,7 @@ record, the Rithmic row is retained for that date.
 On a later run, when SC Data contains a newer date, the previous date becomes
 normal historical data and is replaced from SC Data.
 
-Dates present only in the Rithmic target are retained.
+Rithmic dates newer than the latest SC Data date are retained. Older target-only dates are not carried forward.
 
 ## Dry run
 
@@ -88,3 +90,16 @@ SCID_Bridge_Logs
 ```
 
 The backup directory can contain `.scid.bak` and `.dly.bak` files.
+
+
+## Files outside the managed range
+
+The application does not remove Rithmic files it did not create or previously
+record. Unused chart-data files can remain in the Data folder.
+
+Bridge-managed files can be retired after their saved metadata is verified.
+This is housekeeping rather than a requirement for chart loading.
+
+A newer eligible decade can reuse the same one-digit Rithmic filename. In that
+case the new conversion replaces the old contract data rather than merging old
+decade history into the new file.

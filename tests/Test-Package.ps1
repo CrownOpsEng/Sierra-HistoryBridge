@@ -69,6 +69,19 @@ if ($appText -notmatch 'DailyNeeded') {
 }
 
 
+
+if ($appText -notmatch 'Get-OrCreateContractCandidate') {
+    throw "Discovery regression: independent SCID/DLY contract scan is missing."
+}
+
+if ($appText -notmatch 'SCID not present') {
+    throw "Discovery regression: DLY-only contract handling is missing."
+}
+
+if ($converterText -notmatch 'public static ScaleInference InferScale') {
+    throw "Historical Daily regression: Daily scale inference is missing."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

@@ -753,6 +753,7 @@ namespace SierraHistoryBridge
         public long TargetRecordsBefore;
         public long SourceAppliedRecords;
         public long PreservedTargetRecords;
+        public long ReplacedOrDroppedTargetRecords;
         public long OutputRecords;
         public bool PreservedLatestSourceDate;
         public long FirstDateTicks;
@@ -762,6 +763,9 @@ namespace SierraHistoryBridge
 
     public static class DailyBridge
     {
+        private static readonly double[] CandidateScales =
+            new double[] { 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0 };
+
         private sealed class DailyRecord
         {
             public DateTime Date;
@@ -896,6 +900,71 @@ namespace SierraHistoryBridge
             };
         }
 
+        public static ScaleInference InferScale(
+            string sourcePath,
+            string targetPath)
+        {
+            List<DailyRecord> source = ReadRecords(sourcePath);
+            List<DailyRecord> target = ReadRecords(targetPath);
+
+            if (source.Count == 0 || target.Count == 0)
+                throw new IOException(
+                    "Daily scale inference requires non-empty source and target files.");
+
+            var targetByDate = new Dictionary<DateTime, DailyRecord>();
+            for (int i = 0; i < target.Count; i++)
+                targetByDate[target[i].Date] = target[i];
+
+            var ratios = new List<double>();
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                DailyRecord targetRecord;
+
+                if (!targetByDate.TryGetValue(source[i].Date, out targetRecord))
+                    continue;
+
+                double sourcePrice = Convert.ToDouble(source[i].Close);
+                double targetPrice = Convert.ToDouble(targetRecord.Close);
+
+                if (sourcePrice > 0 && targetPrice > 0)
+                    ratios.Add(targetPrice / sourcePrice);
+            }
+
+            if (ratios.Count < 5)
+                throw new IOException(
+                    "Not enough overlapping Daily records to infer a price scale.");
+
+            ratios.Sort();
+            double median = ratios[ratios.Count / 2];
+
+            double bestFactor = CandidateScales[0];
+            double bestDistance = Double.MaxValue;
+
+            for (int i = 0; i < CandidateScales.Length; i++)
+            {
+                double candidate = CandidateScales[i];
+                double distance = Math.Abs(Math.Log(candidate / median));
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestFactor = candidate;
+                }
+            }
+
+            if (Math.Abs(median - bestFactor) / bestFactor > 0.02)
+                throw new IOException(
+                    "The observed Daily raw-price ratio is not close enough to a supported power-of-ten scale.");
+
+            return new ScaleInference
+            {
+                Factor = bestFactor,
+                MedianRatio = median,
+                Samples = ratios.Count
+            };
+        }
+
         public static DailySyncResult Sync(
             string sourcePath,
             string targetPath,
@@ -933,26 +1002,42 @@ namespace SierraHistoryBridge
             var output = new Dictionary<DateTime, string>();
             var sourceAppliedDates = new Dictionary<DateTime, bool>();
 
-            for (int i = 0; i < target.Count; i++)
-                output[target[i].Date] = FormatRecord(target[i], 1m);
-
             DateTime latestSourceDate = source[source.Count - 1].Date;
-            bool preserveLatestSourceDate = targetByDate.ContainsKey(latestSourceDate);
+            bool preserveLatestSourceDate =
+                targetByDate.ContainsKey(latestSourceDate);
+
             decimal scale = Convert.ToDecimal(priceScale);
 
             for (int i = 0; i < source.Count; i++)
             {
                 DailyRecord record = source[i];
 
-                if (record.Date == latestSourceDate && preserveLatestSourceDate)
+                if (record.Date == latestSourceDate &&
+                    preserveLatestSourceDate)
+                {
+                    output[record.Date] =
+                        FormatRecord(targetByDate[record.Date], 1m);
                     continue;
+                }
 
                 output[record.Date] = FormatRecord(record, scale);
                 sourceAppliedDates[record.Date] = true;
             }
 
+            for (int i = 0; i < target.Count; i++)
+            {
+                DailyRecord record = target[i];
+
+                if (record.Date > latestSourceDate)
+                    output[record.Date] = FormatRecord(record, 1m);
+            }
+
             long sourceAppliedRecords = sourceAppliedDates.Count;
-            long preservedTargetRecords = output.Count - sourceAppliedRecords;
+            long preservedTargetRecords =
+                output.Count - sourceAppliedRecords;
+
+            long replacedOrDroppedTargetRecords =
+                target.Count - preservedTargetRecords;
 
             try
             {
@@ -1009,6 +1094,8 @@ namespace SierraHistoryBridge
                     TargetRecordsBefore = target.Count,
                     SourceAppliedRecords = sourceAppliedRecords,
                     PreservedTargetRecords = preservedTargetRecords,
+                    ReplacedOrDroppedTargetRecords =
+                        replacedOrDroppedTargetRecords,
                     OutputRecords = finalMeta.Records,
                     PreservedLatestSourceDate = preserveLatestSourceDate,
                     FirstDateTicks = finalMeta.FirstDateTicks,

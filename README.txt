@@ -1,5 +1,5 @@
 SIERRA HISTORY BRIDGE
-Version 0.0.9
+Version 0.0.10
 
 Updates Rithmic-named Sierra Chart history files from matching SC Data files.
 

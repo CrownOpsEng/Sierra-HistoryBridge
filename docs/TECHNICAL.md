@@ -9,8 +9,9 @@ Sierra Chart uses separate files for intraday and Historical Daily data:
 .dly    Historical Daily data
 ```
 
-The bridge processes matching files for the same futures contract and Rithmic
-symbol mapping.
+SCID and Historical Daily sources are discovered independently and joined by
+futures root, delivery month, two-digit year, and exchange. Either source type
+can exist without the other.
 
 ## SCID conversion
 
@@ -66,11 +67,11 @@ SCID contract.
 
 Daily files are merged by date:
 
-1. Existing Rithmic dates are loaded.
-2. SC Data replaces dates in the source history.
-3. If the Rithmic target already contains the latest date present in SC Data,
-   the Rithmic row is retained for that date.
-4. Dates present only in the Rithmic target are retained.
+1. SC Data supplies the output through its latest date.
+2. If the Rithmic target contains the same latest date, that target row is
+   retained for that date.
+3. Target rows strictly newer than the latest SC Data date are retained.
+4. Older target-only rows are not retained.
 5. The result is sorted by date.
 
 The latest-date rule avoids replacing an actively updating Rithmic daily row
@@ -113,3 +114,30 @@ mutable per-user state are stored separately.
 
 The C# engine is compiled with the standard Windows PowerShell 5.1 `Add-Type`
 path and does not require custom compiler options, LINQ, or unsafe code.
+
+
+## Independent source discovery
+
+The scanner builds the managed contract set from both SC Data naming forms:
+
+```text
+<root><month><YY>-<exchange>.scid
+<root><month><YY>-<exchange>.dly
+```
+
+The history window is applied to the combined contract set. Historical Daily
+contracts are therefore included even when intraday history has not been
+downloaded for the same delivery month.
+
+Price scale can be proven from either an overlapping SCID pair or an overlapping
+Historical Daily pair. A previously proven scale for the same root/exchange can
+also be reused.
+
+## Old Rithmic files
+
+Unmanaged Rithmic files are not removed.
+
+When a one-digit Rithmic symbol is reused by a newer decade, the eligible source
+replaces the old target content. SCID conversion keeps only target records newer
+than the source boundary. Historical Daily processing keeps only the latest
+overlapping date and target dates newer than the source boundary.
