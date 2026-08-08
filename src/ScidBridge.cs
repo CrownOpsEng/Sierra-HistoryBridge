@@ -25,8 +25,11 @@ namespace SierraHistoryBridge
     public sealed class ConvertResult
     {
         public long SourceRecords;
+        public long SourceRecordsWritten;
         public long TailRecords;
         public long OutputRecords;
+        public long HandoffDateTime;
+        public int HandoffVerifiedTradeSeconds;
         public double ElapsedSeconds;
         public double ConversionSeconds;
         public double FlushSeconds;
@@ -185,6 +188,245 @@ namespace SierraHistoryBridge
             }
 
             return low;
+        }
+
+        private struct SecondAggregate
+        {
+            public long Volume;
+            public long BidVolume;
+            public long AskVolume;
+            public float LastClose;
+        }
+
+        private static Dictionary<long, SecondAggregate> LoadSecondAggregates(
+            FileStream stream,
+            long recordCount,
+            long firstSecond,
+            long lastSecond)
+        {
+            var result = new Dictionary<long, SecondAggregate>();
+
+            if (recordCount <= 0 || lastSecond < firstSecond)
+                return result;
+
+            long firstIndex = LowerBound(
+                stream,
+                recordCount,
+                checked(firstSecond * 1000000L),
+                false);
+
+            long afterLastIndex = LowerBound(
+                stream,
+                recordCount,
+                checked((lastSecond + 1L) * 1000000L),
+                false);
+
+            long recordsRemaining = afterLastIndex - firstIndex;
+            stream.Position = HeaderSize + firstIndex * RecordSize;
+
+            const int RecordsPerChunk = 100000;
+            byte[] buffer = new byte[RecordsPerChunk * RecordSize];
+
+            while (recordsRemaining > 0)
+            {
+                int recordsThisChunk = (int)Math.Min(
+                    (long)RecordsPerChunk,
+                    recordsRemaining);
+
+                int bytesThisChunk = recordsThisChunk * RecordSize;
+                ReadExact(stream, buffer, bytesThisChunk);
+
+                for (int record = 0, offset = 0;
+                    record < recordsThisChunk;
+                    record++, offset += RecordSize)
+                {
+                    long second = BitConverter.ToInt64(buffer, offset) / 1000000L;
+                    SecondAggregate aggregate;
+
+                    if (!result.TryGetValue(second, out aggregate))
+                        aggregate = new SecondAggregate();
+
+                    aggregate.Volume += BitConverter.ToUInt32(buffer, offset + 28);
+                    aggregate.BidVolume += BitConverter.ToUInt32(buffer, offset + 32);
+                    aggregate.AskVolume += BitConverter.ToUInt32(buffer, offset + 36);
+                    aggregate.LastClose = BitConverter.ToSingle(buffer, offset + 20);
+                    result[second] = aggregate;
+                }
+
+                recordsRemaining -= recordsThisChunk;
+            }
+
+            return result;
+        }
+
+        private static bool HandoffSecondMatches(
+            SecondAggregate source,
+            SecondAggregate target,
+            double scale)
+        {
+            if (source.Volume != target.Volume ||
+                source.BidVolume != target.BidVolume ||
+                source.AskVolume != target.AskVolume)
+                return false;
+
+            return Math.Abs(
+                (double)source.LastClose * scale -
+                (double)target.LastClose) <= 0.001;
+        }
+
+        private static bool ShouldPreserveTargetTail(
+            string sourcePath,
+            string targetPath,
+            ScidMeta sourceMeta,
+            ScidMeta targetMeta,
+            double scale)
+        {
+            if (sourceMeta.Records <= 0 || targetMeta.Records <= 0)
+                return false;
+
+            long sourceLastSecond = sourceMeta.LastDateTime / 1000000L;
+            long targetLastSecond = targetMeta.LastDateTime / 1000000L;
+
+            if (targetLastSecond > sourceLastSecond)
+                return true;
+            if (targetLastSecond < sourceLastSecond)
+                return false;
+
+            using (var source = new FileStream(
+                sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                1024 * 1024, FileOptions.RandomAccess))
+            using (var target = new FileStream(
+                targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                1024 * 1024, FileOptions.RandomAccess))
+            {
+                ValidateHeader(source, sourcePath);
+                ValidateHeader(target, targetPath);
+
+                Dictionary<long, SecondAggregate> sourceSeconds =
+                    LoadSecondAggregates(
+                        source,
+                        sourceMeta.Records,
+                        sourceLastSecond,
+                        sourceLastSecond);
+
+                Dictionary<long, SecondAggregate> targetSeconds =
+                    LoadSecondAggregates(
+                        target,
+                        targetMeta.Records,
+                        targetLastSecond,
+                        targetLastSecond);
+
+                SecondAggregate sourceSecond;
+                SecondAggregate targetSecond;
+
+                if (!sourceSeconds.TryGetValue(sourceLastSecond, out sourceSecond) ||
+                    !targetSeconds.TryGetValue(targetLastSecond, out targetSecond))
+                {
+                    throw new IOException(
+                        "LIVE_MERGE_ENDPOINT_INVALID: the final SCID second could not be aggregated.");
+                }
+
+                if (HandoffSecondMatches(sourceSecond, targetSecond, scale))
+                    return false;
+
+                return targetSecond.Volume > sourceSecond.Volume;
+            }
+        }
+
+        private static long FindVerifiedHandoffDateTime(
+            string sourcePath,
+            string targetPath,
+            ScidMeta sourceMeta,
+            ScidMeta targetMeta,
+            double scale,
+            out int verifiedTradeSeconds)
+        {
+            verifiedTradeSeconds = 0;
+
+            long sourceFirstSecond = sourceMeta.FirstDateTime / 1000000L;
+            long sourceLastSecond = sourceMeta.LastDateTime / 1000000L;
+            long targetFirstSecond = targetMeta.FirstDateTime / 1000000L;
+            long targetLastSecond = targetMeta.LastDateTime / 1000000L;
+            long newestSecond = Math.Min(sourceLastSecond, targetLastSecond);
+            long oldestPossible = Math.Max(sourceFirstSecond, targetFirstSecond);
+
+            if (newestSecond < oldestPossible)
+                return 0;
+
+            int[] windows = new int[] { 300, 3600, 21600 };
+
+            using (var source = new FileStream(
+                sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                1024 * 1024, FileOptions.RandomAccess))
+            using (var target = new FileStream(
+                targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                1024 * 1024, FileOptions.RandomAccess))
+            {
+                ValidateHeader(source, sourcePath);
+                ValidateHeader(target, targetPath);
+
+                foreach (int windowSeconds in windows)
+                {
+                    long firstSecond = Math.Max(
+                        oldestPossible,
+                        newestSecond - (long)windowSeconds + 1L);
+
+                    Dictionary<long, SecondAggregate> sourceSeconds =
+                        LoadSecondAggregates(
+                            source,
+                            sourceMeta.Records,
+                            firstSecond,
+                            newestSecond);
+
+                    Dictionary<long, SecondAggregate> targetSeconds =
+                        LoadSecondAggregates(
+                            target,
+                            targetMeta.Records,
+                            firstSecond,
+                            newestSecond);
+
+                    int run = 0;
+                    long newestInRun = 0;
+
+                    for (long second = newestSecond;
+                        second >= firstSecond;
+                        second--)
+                    {
+                        SecondAggregate sourceSecond;
+                        SecondAggregate targetSecond;
+                        bool haveSource = sourceSeconds.TryGetValue(second, out sourceSecond);
+                        bool haveTarget = targetSeconds.TryGetValue(second, out targetSecond);
+
+                        if (!haveSource && !haveTarget)
+                            continue;
+
+                        if (haveSource && haveTarget &&
+                            HandoffSecondMatches(sourceSecond, targetSecond, scale))
+                        {
+                            if (run == 0)
+                                newestInRun = second;
+
+                            run++;
+
+                            if (run >= 3)
+                            {
+                                verifiedTradeSeconds = run;
+                                return checked(newestInRun * 1000000L);
+                            }
+                        }
+                        else
+                        {
+                            run = 0;
+                            newestInRun = 0;
+                        }
+                    }
+
+                    if (firstSecond == oldestPossible)
+                        break;
+                }
+            }
+
+            return 0;
         }
 
         private static long NearestIndex(FileStream stream, long count, long value)
@@ -383,29 +625,58 @@ namespace SierraHistoryBridge
             lastPercent = percent;
         }
 
-        private static void CopyRange(
+        private static void CopyScidRangeVerified(
             string statusPrefix,
             FileStream input,
             FileStream output,
-            long bytes,
+            long records,
+            long minimumDateTime,
             long totalBytes,
             ref long completedBytes,
             ref int lastPercent,
+            ref long previousDateTime,
             DateTime started)
         {
-            byte[] buffer = new byte[16 * 1024 * 1024];
+            const int RecordsPerChunk = 250000;
+            byte[] buffer = new byte[RecordsPerChunk * RecordSize];
+            long recordsRemaining = records;
 
-            while (bytes > 0)
+            while (recordsRemaining > 0)
             {
-                int wanted = (int)Math.Min((long)buffer.Length, bytes);
-                int read = input.Read(buffer, 0, wanted);
+                int recordsThisChunk = (int)Math.Min(
+                    (long)RecordsPerChunk,
+                    recordsRemaining);
 
-                if (read <= 0)
-                    throw new EndOfStreamException();
+                int bytesThisChunk = recordsThisChunk * RecordSize;
+                ReadExact(input, buffer, bytesThisChunk);
 
-                output.Write(buffer, 0, read);
-                bytes -= read;
-                completedBytes += read;
+                for (int record = 0, offset = 0;
+                    record < recordsThisChunk;
+                    record++, offset += RecordSize)
+                {
+                    long dateTime = BitConverter.ToInt64(buffer, offset);
+
+                    if (dateTime < minimumDateTime)
+                    {
+                        throw new IOException(
+                            "LIVE_MERGE_TAIL_BEFORE_HANDOFF: Rithmic tail " +
+                            "contains a record before the verified cutover. " +
+                            "No target was changed.");
+                    }
+
+                    if (dateTime < previousDateTime)
+                    {
+                        throw new IOException(
+                            "LIVE_MERGE_TAIL_OUT_OF_ORDER: Rithmic tail " +
+                            "timestamps are not monotonic. No target was changed.");
+                    }
+
+                    previousDateTime = dateTime;
+                }
+
+                output.Write(buffer, 0, bytesThisChunk);
+                recordsRemaining -= recordsThisChunk;
+                completedBytes += bytesThisChunk;
 
                 ShowProgress(
                     statusPrefix,
@@ -421,7 +692,7 @@ namespace SierraHistoryBridge
             string targetPath,
             double scale,
             string backupDirectory,
-            double tailGuardSeconds,
+            bool preserveTargetTail,
             string statusPrefix)
         {
             DateTime started = DateTime.UtcNow;
@@ -431,34 +702,132 @@ namespace SierraHistoryBridge
                 File.Delete(temporaryPath);
 
             ScidMeta sourceMeta = GetMeta(sourcePath);
+            DateTime sourceWriteTime =
+                File.GetLastWriteTimeUtc(sourcePath);
 
             if (sourceMeta.Records <= 0)
                 throw new IOException("The SC Data source contains no records.");
 
+            long sourceRecordsWritten = sourceMeta.Records;
             long tailIndex = 0;
             long tailRecords = 0;
             long tailBytes = 0;
+            long handoffDateTime = 0;
+            int handoffVerifiedTradeSeconds = 0;
 
-            if (File.Exists(targetPath))
+            ScidMeta targetMetaAtStart = null;
+            DateTime targetWriteTime = DateTime.MinValue;
+
+            if (preserveTargetTail &&
+                File.Exists(targetPath))
             {
-                using (var target = new FileStream(
-                    targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
-                    1024 * 1024, FileOptions.RandomAccess))
+                targetMetaAtStart = GetMeta(targetPath);
+                targetWriteTime =
+                    File.GetLastWriteTimeUtc(targetPath);
+
+                if (targetMetaAtStart.Records > 0 &&
+                    ShouldPreserveTargetTail(
+                        sourcePath,
+                        targetPath,
+                        sourceMeta,
+                        targetMetaAtStart,
+                        scale))
                 {
-                    ValidateHeader(target, targetPath);
+                    handoffDateTime =
+                        FindVerifiedHandoffDateTime(
+                            sourcePath,
+                            targetPath,
+                            sourceMeta,
+                            targetMetaAtStart,
+                            scale,
+                            out handoffVerifiedTradeSeconds);
 
-                    long targetCount = (target.Length - HeaderSize) / RecordSize;
-                    long cutoff = sourceMeta.LastDateTime +
-                        (long)Math.Round(tailGuardSeconds * 1000000.0);
+                    if (handoffDateTime <= 0 ||
+                        handoffVerifiedTradeSeconds < 3)
+                    {
+                        throw new IOException(
+                            "LIVE_MERGE_HANDOFF_UNVERIFIED: no verified whole-second " +
+                            "cutover could be established between SC Data and the " +
+                            "Rithmic target. No target was changed.");
+                    }
 
-                    tailIndex = LowerBound(target, targetCount, cutoff, true);
-                    tailRecords = targetCount - tailIndex;
-                    tailBytes = tailRecords * RecordSize;
+                    using (var source = new FileStream(
+                        sourcePath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        1024 * 1024,
+                        FileOptions.RandomAccess))
+                    using (var target = new FileStream(
+                        targetPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        1024 * 1024,
+                        FileOptions.RandomAccess))
+                    {
+                        ValidateHeader(source, sourcePath);
+                        ValidateHeader(target, targetPath);
+
+                        sourceRecordsWritten =
+                            LowerBound(
+                                source,
+                                sourceMeta.Records,
+                                handoffDateTime,
+                                false);
+
+                        tailIndex =
+                            LowerBound(
+                                target,
+                                targetMetaAtStart.Records,
+                                handoffDateTime,
+                                false);
+
+                        tailRecords =
+                            targetMetaAtStart.Records -
+                            tailIndex;
+
+                        tailBytes =
+                            tailRecords *
+                            RecordSize;
+
+                        if (sourceRecordsWritten <= 0 ||
+                            tailRecords <= 0)
+                        {
+                            throw new IOException(
+                                "LIVE_MERGE_HANDOFF_INVALID: the verified cutover " +
+                                "did not leave both an SC Data prefix and a Rithmic " +
+                                "tail. No target was changed.");
+                        }
+
+                        long sourceLastWritten = ReadDateTimeAt(
+                            source,
+                            sourceRecordsWritten - 1);
+
+                        long targetFirstTail = ReadDateTimeAt(
+                            target,
+                            tailIndex);
+
+                        if (sourceLastWritten >= handoffDateTime ||
+                            targetFirstTail < handoffDateTime ||
+                            sourceLastWritten >= targetFirstTail)
+                        {
+                            throw new IOException(
+                                "LIVE_MERGE_BOUNDARY_INVALID: source and target " +
+                                "records do not form a strict half-open cutover. " +
+                                "No target was changed.");
+                        }
+                    }
                 }
             }
 
-            long sourcePayloadBytes = sourceMeta.Records * RecordSize;
-            long totalWorkBytes = sourcePayloadBytes + tailBytes;
+            long sourcePayloadBytes =
+                sourceRecordsWritten *
+                RecordSize;
+
+            long totalWorkBytes =
+                sourcePayloadBytes +
+                tailBytes;
             long completedBytes = 0;
             int lastPercent = -1;
 
@@ -489,7 +858,7 @@ namespace SierraHistoryBridge
                     const int RecordsPerChunk = 250000;
                     byte[] buffer = new byte[RecordsPerChunk * RecordSize];
 
-                    long recordsRemaining = sourceMeta.Records;
+                    long recordsRemaining = sourceRecordsWritten;
                     long previousDateTime = Int64.MinValue;
                     long sourceRecordIndex = 0;
 
@@ -571,6 +940,13 @@ namespace SierraHistoryBridge
                             started);
                     }
 
+                    if (outOfOrderRecords > 0)
+                    {
+                        throw new IOException(
+                            "SOURCE_OUT_OF_ORDER: SC Data source timestamps are " +
+                            "not monotonic. No target was changed.");
+                    }
+
                     if (tailRecords > 0)
                     {
                         using (var target = new FileStream(
@@ -579,14 +955,16 @@ namespace SierraHistoryBridge
                         {
                             target.Position = HeaderSize + tailIndex * RecordSize;
 
-                            CopyRange(
+                            CopyScidRangeVerified(
                                 statusPrefix,
                                 target,
                                 output,
-                                tailBytes,
+                                tailRecords,
+                                handoffDateTime,
                                 totalWorkBytes,
                                 ref completedBytes,
                                 ref lastPercent,
+                                ref previousDateTime,
                                 started);
                         }
                     }
@@ -605,6 +983,51 @@ namespace SierraHistoryBridge
                         (DateTime.UtcNow - flushStarted).TotalSeconds;
                 }
 
+                ScidMeta sourceMetaAfter =
+                    GetMeta(sourcePath);
+
+                DateTime sourceWriteTimeAfter =
+                    File.GetLastWriteTimeUtc(sourcePath);
+
+                if (sourceMetaAfter.Length != sourceMeta.Length ||
+                    sourceMetaAfter.Records != sourceMeta.Records ||
+                    sourceMetaAfter.FirstDateTime != sourceMeta.FirstDateTime ||
+                    sourceMetaAfter.LastDateTime != sourceMeta.LastDateTime ||
+                    sourceWriteTimeAfter != sourceWriteTime)
+                {
+                    throw new IOException(
+                        "SOURCE_CHANGED_DURING_CONVERSION: " +
+                        "the SC Data source changed while it was being converted. " +
+                        "The temporary output was discarded.");
+                }
+
+                if (tailRecords > 0 &&
+                    targetMetaAtStart != null)
+                {
+                    ScidMeta targetMetaAfter =
+                        GetMeta(targetPath);
+
+                    DateTime targetWriteTimeAfter =
+                        File.GetLastWriteTimeUtc(targetPath);
+
+                    if (targetMetaAfter.Length !=
+                            targetMetaAtStart.Length ||
+                        targetMetaAfter.Records !=
+                            targetMetaAtStart.Records ||
+                        targetMetaAfter.FirstDateTime !=
+                            targetMetaAtStart.FirstDateTime ||
+                        targetMetaAfter.LastDateTime !=
+                            targetMetaAtStart.LastDateTime ||
+                        targetWriteTimeAfter !=
+                            targetWriteTime)
+                    {
+                        throw new IOException(
+                            "TARGET_CHANGED_DURING_CONVERSION: " +
+                            "the Rithmic target changed while its newer records " +
+                            "were being preserved. The temporary output was discarded.");
+                    }
+                }
+
                 UpdateStatusLine(
                     statusPrefix +
                     " | VALIDATE | checking converted SCID");
@@ -612,7 +1035,9 @@ namespace SierraHistoryBridge
                 DateTime validationStarted = DateTime.UtcNow;
 
                 ScidMeta outputMeta = GetMeta(temporaryPath);
-                long expectedRecords = sourceMeta.Records + tailRecords;
+                long expectedRecords =
+                    sourceRecordsWritten +
+                    tailRecords;
 
                 if (outputMeta.Records != expectedRecords)
                     throw new IOException("Output record-count validation failed.");
@@ -620,8 +1045,35 @@ namespace SierraHistoryBridge
                 if (outputMeta.FirstDateTime != sourceMeta.FirstDateTime)
                     throw new IOException("Output first-timestamp validation failed.");
 
+                if (tailRecords == 0)
+                {
+                    if (sourceRecordsWritten != sourceMeta.Records)
+                        throw new IOException("Historical replacement source-count validation failed.");
+
+                    if (outputMeta.Length != sourceMeta.Length)
+                        throw new IOException("Historical replacement size validation failed.");
+
+                    if (outputMeta.LastDateTime != sourceMeta.LastDateTime)
+                        throw new IOException("Historical replacement last-timestamp validation failed.");
+                }
+                else
+                {
+                    if (handoffDateTime <= 0)
+                        throw new IOException("Live merge handoff validation failed.");
+
+                    if (outputMeta.LastDateTime !=
+                        targetMetaAtStart.LastDateTime)
+                        throw new IOException("Live merge last-timestamp validation failed.");
+                }
+
                 long[] sampleIndexes =
-                    new long[] { 0, sourceMeta.Records / 2, sourceMeta.Records - 1 };
+                    sourceRecordsWritten > 0
+                    ? new long[] {
+                        0,
+                        sourceRecordsWritten / 2,
+                        sourceRecordsWritten - 1
+                    }
+                    : new long[0];
 
                 using (var source = new FileStream(
                     sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
@@ -673,8 +1125,14 @@ namespace SierraHistoryBridge
                 return new ConvertResult
                 {
                     SourceRecords = sourceMeta.Records,
+                    SourceRecordsWritten =
+                        sourceRecordsWritten,
                     TailRecords = tailRecords,
                     OutputRecords = expectedRecords,
+                    HandoffDateTime =
+                        handoffDateTime,
+                    HandoffVerifiedTradeSeconds =
+                        handoffVerifiedTradeSeconds,
                     ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds,
                     ConversionSeconds = conversionSeconds,
                     FlushSeconds = flushSeconds,
@@ -965,6 +1423,87 @@ namespace SierraHistoryBridge
             };
         }
 
+        private static bool RecordMatchesScaledSource(
+            DailyRecord source,
+            DailyRecord target,
+            decimal scale)
+        {
+            return
+                target.Date == source.Date &&
+                target.Open == source.Open * scale &&
+                target.High == source.High * scale &&
+                target.Low == source.Low * scale &&
+                target.Close == source.Close * scale &&
+                target.Volume == source.Volume &&
+                target.OpenInterest == source.OpenInterest;
+        }
+
+        public static bool IsSynchronized(
+            string sourcePath,
+            string targetPath,
+            double priceScale)
+        {
+            if (!File.Exists(sourcePath) || !File.Exists(targetPath))
+                return false;
+
+            List<DailyRecord> source = ReadRecords(sourcePath);
+            List<DailyRecord> target = ReadRecords(targetPath);
+
+            if (source.Count == 0 || target.Count == 0)
+                return false;
+
+            var targetByDate = new Dictionary<DateTime, DailyRecord>();
+            for (int i = 0; i < target.Count; i++)
+                targetByDate[target[i].Date] = target[i];
+
+            DateTime latestSourceDate =
+                source[source.Count - 1].Date;
+
+            bool preserveLatestSourceDate =
+                targetByDate.ContainsKey(latestSourceDate);
+
+            decimal scale =
+                Convert.ToDecimal(priceScale);
+
+            int newerTargetRecords = 0;
+            for (int i = 0; i < target.Count; i++)
+            {
+                if (target[i].Date > latestSourceDate)
+                    newerTargetRecords++;
+            }
+
+            int expectedRecords =
+                source.Count + newerTargetRecords;
+
+            if (target.Count != expectedRecords)
+                return false;
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                DailyRecord sourceRecord = source[i];
+                DailyRecord targetRecord;
+
+                if (!targetByDate.TryGetValue(
+                        sourceRecord.Date,
+                        out targetRecord))
+                    return false;
+
+                // Sync intentionally retains the existing target row for the
+                // latest source date when one already exists.
+                if (sourceRecord.Date == latestSourceDate &&
+                    preserveLatestSourceDate)
+                    continue;
+
+                if (!RecordMatchesScaledSource(
+                        sourceRecord,
+                        targetRecord,
+                        scale))
+                    return false;
+            }
+
+            return true;
+        }
+
         public static DailySyncResult Sync(
             string sourcePath,
             string targetPath,
@@ -1117,4 +1656,3 @@ namespace SierraHistoryBridge
     }
 
 }
-

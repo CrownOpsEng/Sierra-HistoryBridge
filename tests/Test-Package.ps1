@@ -114,6 +114,73 @@ if ($appText -notmatch 'REPORTING WARNING') {
     throw "Reporting-safety regression: committed updates are not protected from reporting failures."
 }
 
+
+$dailySignatureStart =
+    $appText.IndexOf(
+        "function Get-DailySourceSignature",
+        [StringComparison]::Ordinal)
+
+$dailySignatureEnd =
+    $appText.IndexOf(
+        "function Update-DailyStateMetadata",
+        $dailySignatureStart,
+        [StringComparison]::Ordinal)
+
+if ($dailySignatureStart -lt 0 -or
+    $dailySignatureEnd -le $dailySignatureStart) {
+    throw "Historical Daily source-signature function is missing."
+}
+
+$dailySignatureText =
+    $appText.Substring(
+        $dailySignatureStart,
+        $dailySignatureEnd - $dailySignatureStart)
+
+if ($dailySignatureText -match 'DailyModifiedTicks|LastWriteTimeUtc' -or
+    $dailySignatureText -notmatch 'Get-FileHash') {
+    throw "Historical Daily source signature must use content hashing only."
+}
+
+foreach ($dailyDirtyToken in @(
+    'Get-DailySourceSignature',
+    'IsSynchronized',
+    'dailyStateRefreshed'
+)) {
+    if ($appText -notlike "*$dailyDirtyToken*") {
+        throw "Historical Daily dirty-check regression: missing $dailyDirtyToken"
+    }
+}
+
+if ($converterText -notmatch 'public static bool IsSynchronized') {
+    throw "Historical Daily dirty-check regression: semantic comparison is missing."
+}
+
+
+foreach ($integrityToken in @(
+    'SOURCE_CHANGED_DURING_CONVERSION',
+    'TARGET_CHANGED_DURING_CONVERSION',
+    'sourceRecordsWritten',
+    'preserveTargetTail',
+    'HandoffVerifiedTradeSeconds',
+    'LIVE_MERGE_HANDOFF_UNVERIFIED',
+    'LIVE_MERGE_BOUNDARY_INVALID',
+    'LIVE_MERGE_TAIL_OUT_OF_ORDER',
+    'SOURCE_OUT_OF_ORDER',
+    'Historical replacement size validation failed',
+    'Get-HistoricalScidDeferReason',
+    'SCID live-merge',
+    'SCID replace'
+)) {
+    if ($converterText -notlike "*$integrityToken*" -and
+        $appText -notlike "*$integrityToken*") {
+        throw "SCID integrity requirement is missing: $integrityToken"
+    }
+}
+
+if ($appText -match 'tailGuardSeconds') {
+    throw "SCID integrity does not permit a fixed time-gap tail guard."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",
@@ -264,4 +331,3 @@ finally {
         Remove-Item -LiteralPath $dist -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
-

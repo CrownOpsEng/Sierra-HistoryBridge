@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.12"
+$Version = "0.0.13"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -292,20 +292,51 @@ function Test-LiveScidCandidate($Candidate) {
         }
     }
 
-    try {
-        if (Test-Path -LiteralPath $Candidate.Target -PathType Leaf) {
-            $targetItem =
-                Get-Item -LiteralPath $Candidate.Target
+    return $false
+}
 
-            if ($targetItem.LastWriteTimeUtc -ge
-                (Get-Date).ToUniversalTime().AddMinutes(-10)) {
-                return $true
-            }
+function Get-HistoricalScidDeferReason($Candidate) {
+    if (-not $Candidate.ScidNeeded -or
+        $Candidate.LiveScidUpdate) {
+        return $null
+    }
+
+    try {
+        $sourceItem =
+            Get-Item -LiteralPath $Candidate.Source
+
+        if ($sourceItem.LastWriteTimeUtc -ge
+            (Get-Date).ToUniversalTime().AddSeconds(-5)) {
+
+            return "source file was modified within the last 5 seconds"
         }
     }
     catch { }
 
-    return $false
+    if ($Candidate.DailyAvailable -and
+        $Candidate.DailyLastDateTicks -gt 0 -and
+        $Candidate.Last -gt 0) {
+
+        $scidLast =
+            Convert-ScDateTimeToUtc `
+                ([long]$Candidate.Last)
+
+        $dailyLast =
+            [datetime]::MinValue.AddTicks(
+                [long]$Candidate.DailyLastDateTicks)
+
+        if ($scidLast -and
+            $scidLast.Date -lt
+                $dailyLast.Date.AddDays(-1)) {
+
+            return (
+                "SCID ends {0:yyyy-MM-dd}; Daily history ends {1:yyyy-MM-dd}" -f
+                $scidLast,
+                $dailyLast)
+        }
+    }
+
+    return $null
 }
 
 function Get-CandidateSourceDisplay($Candidate) {
@@ -484,6 +515,64 @@ function Get-DailyTargetStatus([string]$TargetPath) {
             LastDateTicks = 0
         }
     }
+}
+
+function Get-DailySourceSignature([string]$SourcePath) {
+    $hash =
+        Get-FileHash `
+            -LiteralPath $SourcePath `
+            -Algorithm SHA256
+
+    return "sha256:$($hash.Hash.ToLowerInvariant())"
+}
+
+function Update-DailyStateMetadata(
+    $StateEntry,
+    $Candidate,
+    [string]$SourceSignature,
+    $TargetStatus) {
+
+    if ($null -eq $StateEntry) {
+        $StateEntry = [pscustomobject]@{
+            source_signature = $null
+            target_path = $Candidate.Target
+            minimum_target_records = 0
+            target_first_datetime = 0
+            minimum_target_last_datetime = 0
+        }
+    }
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName daily_source_signature `
+            -NotePropertyValue $SourceSignature `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName daily_target_path `
+            -NotePropertyValue $Candidate.DailyTarget `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName daily_minimum_target_records `
+            -NotePropertyValue ([long]$TargetStatus.Records) `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName daily_target_first_date_ticks `
+            -NotePropertyValue ([long]$TargetStatus.FirstDateTicks) `
+            -Force
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName daily_minimum_target_last_date_ticks `
+            -NotePropertyValue ([long]$TargetStatus.LastDateTicks) `
+            -Force
+
+    return $StateEntry
 }
 
 function Test-ProcessedDailyTargetStillValid(
@@ -958,6 +1047,7 @@ function Invoke-SierraHistoryBridge {
 
     $state = Read-JsonFile $StatePath
     $stateTable = Get-StateTable $state
+    $stateDirty = $false
 
     # Build a retirement plan for bridge-managed Rithmic files whose
     # SC Data contract has moved outside the managed history window.
@@ -1119,6 +1209,7 @@ function Invoke-SierraHistoryBridge {
     }
 
     $ready = @()
+    $deferredScid = @()
     $unchanged = 0
     $unverified = 0
 
@@ -1175,16 +1266,16 @@ function Invoke-SierraHistoryBridge {
         $dailySignature = $null
         $dailyTargetStatus = $null
         $dailyCurrent = $true
+        $dailyStateRefreshed = $false
 
         if ($candidate.DailyAvailable) {
             $dailySignature =
-                "$($candidate.DailySize)|" +
-                "$($candidate.DailyModifiedTicks)|" +
-                "$($candidate.DailyRecords)|" +
-                "$($candidate.DailyLastDateTicks)"
+                Get-DailySourceSignature `
+                    $candidate.DailySource
 
             $dailyTargetStatus =
-                Get-DailyTargetStatus $candidate.DailyTarget
+                Get-DailyTargetStatus `
+                    $candidate.DailyTarget
 
             $dailyCurrent =
                 -not $Force -and
@@ -1192,6 +1283,52 @@ function Invoke-SierraHistoryBridge {
                     $stateEntry `
                     $dailySignature `
                     $dailyTargetStatus)
+
+            # Older builds used modification time in the DLY signature. A
+            # completed SCID download, Sierra maintenance, or a file copy can
+            # therefore make the source look changed even when its Daily rows
+            # are identical. If the saved signature does not match, compare
+            # the actual Daily data before deciding to rewrite the target.
+            if (-not $dailyCurrent -and
+                -not $Force -and
+                $dailyTargetStatus.Exists -and
+                $dailyTargetStatus.Kind -eq "data" -and
+                $scales.ContainsKey($candidate.Group)) {
+
+                try {
+                    $dailyCurrent =
+                        [SierraHistoryBridge.DailyBridge]::IsSynchronized(
+                            $candidate.DailySource,
+                            $candidate.DailyTarget,
+                            [double]$scales[$candidate.Group])
+
+                    if ($dailyCurrent) {
+                        $stateEntry =
+                            Update-DailyStateMetadata `
+                                $stateEntry `
+                                $candidate `
+                                $dailySignature `
+                                $dailyTargetStatus
+
+                        $stateTable[$candidate.StateKey] =
+                            $stateEntry
+
+                        $stateDirty = $true
+                        $dailyStateRefreshed = $true
+                    }
+                }
+                catch {
+                    $dailyCurrent = $false
+                }
+            }
+        }
+
+        if ($dailyStateRefreshed) {
+            $candidate |
+                Add-Member `
+                    -NotePropertyName PreviousState `
+                    -NotePropertyValue $stateEntry `
+                    -Force
         }
 
         $candidate |
@@ -1231,13 +1368,43 @@ function Invoke-SierraHistoryBridge {
                 -NotePropertyName ScidSkipped `
                 -NotePropertyValue $false
 
-        $ready += $candidate
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidDeferred `
+                -NotePropertyValue $false
+
+        $candidate |
+            Add-Member `
+                -NotePropertyName ScidDeferReason `
+                -NotePropertyValue $null
+
+        if ($candidate.ScidNeeded) {
+            $deferReason =
+                Get-HistoricalScidDeferReason `
+                    $candidate
+
+            if ($deferReason) {
+                $candidate.ScidDeferred = $true
+                $candidate.ScidSkipped = $true
+                $candidate.ScidDeferReason =
+                    $deferReason
+
+                $candidate.ScidNeeded = $false
+                $deferredScid += $candidate
+            }
+        }
+
+        if ($candidate.ScidNeeded -or
+            $candidate.DailyNeeded) {
+            $ready += $candidate
+        }
     }
 
     Write-Host
     Write-Host (
-        "Plan: {0} ready | {1} unchanged | {2} archive-only | {3} retire | {4} unverified" -f
+        "Plan: {0} ready | {1} deferred SCID | {2} unchanged | {3} archive-only | {4} retire | {5} unverified" -f
         $ready.Count,
+        $deferredScid.Count,
         $unchanged,
         $archiveOnly.Count,
         $retire.Count,
@@ -1245,7 +1412,10 @@ function Invoke-SierraHistoryBridge {
 
     foreach ($candidate in $ready) {
         $scidPlan =
-            if (-not $candidate.HasScid) {
+            if ($candidate.ScidDeferred) {
+                "SCID deferred - $($candidate.ScidDeferReason)"
+            }
+            elseif (-not $candidate.HasScid) {
                 "SCID not present"
             }
             elseif ($candidate.ScidNeeded) {
@@ -1296,6 +1466,25 @@ function Invoke-SierraHistoryBridge {
             $dailyPlan)
     }
 
+    $readyStateKeys =
+        @(
+            $ready |
+            ForEach-Object { $_.StateKey }
+        )
+
+    foreach ($candidate in $deferredScid) {
+        if ($readyStateKeys -notcontains
+            $candidate.StateKey) {
+
+            Write-Host (
+                "  DEFER   {0} -> {1} | SCID | {2}" -f
+                (Get-CandidateSourceDisplay $candidate),
+                (Get-CandidateTargetDisplay $candidate),
+                $candidate.ScidDeferReason) `
+                -ForegroundColor Yellow
+        }
+    }
+
     foreach ($item in $retire) {
         $action =
             if ($item.RemoveTarget) { "RETIRE" } else { "STATE" }
@@ -1313,8 +1502,27 @@ function Invoke-SierraHistoryBridge {
     }
 
     if ($ready.Count -eq 0 -and $retire.Count -eq 0) {
+        if ($stateDirty) {
+            Save-JsonFile `
+                $StatePath `
+                (Convert-HashtableToObject $stateTable)
+        }
+
         Write-Host
-        Write-Host "Nothing needs updating."
+
+        if ($deferredScid.Count -gt 0) {
+            Write-Host (
+                "{0} SCID update(s) deferred because the source is not ready." -f
+                $deferredScid.Count) `
+                -ForegroundColor Yellow
+
+            Write-Host (
+                "Wait for the SC Data download to finish, then run the bridge again.")
+        }
+        else {
+            Write-Host "Nothing needs updating."
+        }
+
         return 0
     }
 
@@ -1571,6 +1779,7 @@ function Invoke-SierraHistoryBridge {
 
     $updated = 0
     $failed = 0
+    $runtimeDeferred = 0
     $warningFiles = 0
     $updateStopwatch = [Diagnostics.Stopwatch]::StartNew()
 
@@ -1600,7 +1809,7 @@ function Invoke-SierraHistoryBridge {
                         $candidate.Target,
                         [double]$scales[$candidate.Group],
                         $backupDirectory,
-                        2.0,
+                        [bool]$candidate.LiveScidUpdate,
                         $statusPrefix)
 
                 [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
@@ -1763,20 +1972,25 @@ function Invoke-SierraHistoryBridge {
                     }
             }
 
+            $stateDirty = $true
             $operationCommitted = $true
             $updated++
 
             $statusParts =
                 New-Object System.Collections.Generic.List[string]
 
-            if ($candidate.ScidSkipped) {
+            if ($candidate.ScidDeferred) {
+                $statusParts.Add("SCID deferred")
+            }
+            elseif ($candidate.ScidSkipped) {
                 $statusParts.Add("SCID skipped")
             }
             elseif ($scidResult) {
                 if ($scidResult.TailRecords -gt 0) {
                     $scidStatus =
-                        "SCID src={0:N0} + newer={1:N0} -> out={2:N0}" -f
+                        "SCID live-merge source={0:N0} used={1:N0} + Rithmic={2:N0} -> out={3:N0}" -f
                         $scidResult.SourceRecords,
+                        $scidResult.SourceRecordsWritten,
                         $scidResult.TailRecords,
                         $scidResult.OutputRecords
 
@@ -1784,7 +1998,7 @@ function Invoke-SierraHistoryBridge {
                 }
                 else {
                     $scidStatus =
-                        "SCID src={0:N0} -> out={1:N0}" -f
+                        "SCID replace src={0:N0} -> out={1:N0}" -f
                         $scidResult.SourceRecords,
                         $scidResult.OutputRecords
 
@@ -1856,11 +2070,23 @@ function Invoke-SierraHistoryBridge {
                 $finalStatus)
 
             if ($scidResult) {
+                $scidMode =
+                    if ($scidResult.TailRecords -gt 0) {
+                        "live-merge"
+                    }
+                    else {
+                        "replace"
+                    }
+
                 $entry =
                     "SCID OK $($candidate.SourceName) -> $($candidate.TargetName) " +
+                    "mode=$scidMode " +
                     "scale=x$($scales[$candidate.Group]) " +
                     "source_records=$($scidResult.SourceRecords) " +
+                    "source_records_written=$($scidResult.SourceRecordsWritten) " +
                     "newer_rithmic_records=$($scidResult.TailRecords) " +
+                    "handoff_datetime=$($scidResult.HandoffDateTime) " +
+                    "handoff_verified_trade_seconds=$($scidResult.HandoffVerifiedTradeSeconds) " +
                     "output_records=$($scidResult.OutputRecords) " +
                     "target_bytes=$($targetMeta.Length) " +
                     "conversion_seconds=$($scidResult.ConversionSeconds) " +
@@ -1922,7 +2148,28 @@ function Invoke-SierraHistoryBridge {
                     $compactError.Substring(0, 97) + "..."
             }
 
-            if ($operationCommitted) {
+            if ($_.Exception.Message.StartsWith(
+                    "SOURCE_CHANGED_DURING_CONVERSION:") -or
+                $_.Exception.Message.StartsWith(
+                    "TARGET_CHANGED_DURING_CONVERSION:")) {
+
+                $runtimeDeferred++
+
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$statusPrefix | DEFERRED | source/target changed during conversion")
+
+                $entry =
+                    "DEFERRED $(Get-CandidateSourceDisplay $candidate) -> " +
+                    "$(Get-CandidateTargetDisplay $candidate): " +
+                    $_.Exception.Message
+
+                $log.Add($entry)
+                Add-Content `
+                    -LiteralPath $logPath `
+                    -Value $entry `
+                    -Encoding UTF8
+            }
+            elseif ($operationCommitted) {
                 $warningFiles++
 
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -2006,6 +2253,14 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host "Log:     $logPath"
     Write-Host "Backups: $backupDirectory"
+
+    if (($deferredScid.Count + $runtimeDeferred) -gt 0) {
+        Write-Host
+        Write-Host (
+            "Deferred SCID files were not replaced. Run the bridge again after " +
+            "their SC Data downloads are complete.") `
+            -ForegroundColor Yellow
+    }
 
     if ($skippedLiveNames.Count -gt 0) {
         Write-Host

@@ -1,10 +1,32 @@
 # Changelog
 
-## v0.0.12 - 2026-08-07
+## v0.0.13 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- historical SCID sources that have not reached the matching Daily contract endpoint are deferred
+
+- live target changes during conversion defer the update and discard temporary output
+
+- source changes during conversion defer the update and discard temporary output
+
+- historical replacement validates exact source/output record count and byte length
+
+- live SCID handoff uses a verified whole-second boundary backed by matching trade aggregates
+
+- live Rithmic records are preserved only when the target is genuinely newer than the SC Data source
+
+- historical SCID contracts now replace Rithmic history completely instead of preserving a historical Rithmic suffix
+
+- metadata can be refreshed without rewriting an already synchronized DLY target
+
+- existing DLY targets are semantically compared during state migration to avoid one-time unnecessary rewrites
+
+- SCID source changes no longer cause an unchanged DLY file to be rewritten
+
+- Historical Daily update detection now uses a SHA-256 content signature instead of file modification time
 
 - reload/recalculate guidance is shown only when at least one update or retirement completed
 

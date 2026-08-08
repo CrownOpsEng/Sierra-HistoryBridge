@@ -175,3 +175,56 @@ and the user can close the affected chart/chartbook and retry.
 After a successful historical replacement, **Chart > Reload and Recalculate**
 causes an already-open chart to reread its chart-data file.
 
+
+
+## Historical Daily change detection
+
+Historical Daily and SCID change detection are independent.
+
+Because `.dly` files are small, the source Daily file uses a SHA-256 content
+signature. File modification time is not used to decide whether a Daily target
+needs to be rewritten.
+
+If saved state is missing or comes from an older bridge version, the bridge
+performs a semantic comparison between the SC Data source and the Rithmic
+target using the verified price scale and the normal Daily merge rules. If the
+target already represents the expected result, the state is refreshed without
+rewriting the `.dly` file.
+
+This prevents an SCID download, file copy, or timestamp-only change from causing
+an unrelated Historical Daily update.
+
+
+## SCID source authority and live handoff
+
+Historical contracts use source-only replacement:
+
+```text
+SC Data source -> scale conversion -> Rithmic-named target
+```
+
+No target records are retained. Record count and file length must match the
+source exactly.
+
+A live-sensitive contract can preserve a genuinely newer target segment. Raw
+microsecond timestamps are not compared across feeds. The target must extend
+into a later whole second, or contain greater total volume when both feeds end
+in the same second. The trailing overlap must then contain at least three
+consecutive active seconds with matching total, bid, and ask volume plus scaled
+last price.
+
+```text
+SC Data: timestamps < handoff second
+Rithmic: timestamps >= handoff second
+```
+
+The selected second is a strict half-open boundary. If the boundary cannot be
+verified, or either side is non-monotonic, the target is not changed.
+
+Before replacement, the bridge re-reads source metadata and modification time.
+For a live merge it does the same for the target. Any change causes the
+temporary output to be discarded.
+
+Historical sources are also deferred when a matching Historical Daily source
+shows that the SCID file has not yet reached the end of the contract, or when
+the SCID source was modified within the last five seconds.

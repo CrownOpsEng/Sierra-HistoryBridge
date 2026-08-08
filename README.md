@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.12 — pre-stable**
+**Version 0.0.13 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -140,7 +140,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.12 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.13 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -176,3 +176,27 @@ new eligible SC Data contract replaces the old target history. The SCID path
 preserves only genuinely newer target records. The Historical Daily path keeps
 only the overlapping latest date and dates newer than the source, so old-decade
 daily rows are not carried into the new contract.
+
+
+## SCID replacement policy
+
+Expired/historical SCID contracts are pure SC Data replacements. No Rithmic
+records are appended to a historical target. Because SCID uses a fixed 56-byte
+header and fixed 40-byte records, a successful historical replacement has the
+same byte length and record count as its SC Data source.
+
+Newer Rithmic records are preserved only for a live-sensitive contract whose
+target is demonstrably newer or more complete at the endpoint. The bridge
+requires at least three consecutive active seconds with matching volume,
+bid/ask volume, and scaled last price. The selected second is a half-open
+boundary: SC Data owns records before it and Rithmic owns records at or after
+it. If the boundary cannot be proven, the target is not changed.
+
+The source and, when applicable, live target are checked again before the
+temporary output is published. If either file changed during conversion, the
+temporary output is discarded and the SCID update is deferred.
+
+For historical contracts with matching Daily data, the bridge also checks that
+the intraday source reaches the end of the Daily contract history. A source
+that is still being downloaded is deferred rather than converted as a partial
+historical file.

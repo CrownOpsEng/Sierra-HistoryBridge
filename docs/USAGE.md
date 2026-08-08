@@ -134,3 +134,39 @@ This is housekeeping rather than a requirement for chart loading.
 A newer eligible decade can reuse the same one-digit Rithmic filename. In that
 case the new conversion replaces the old contract data rather than merging old
 decade history into the new file.
+
+
+## Independent SCID and DLY updates
+
+SCID and Historical Daily files are checked independently. A changed SCID source
+does not cause the matching `.dly` file to be rewritten.
+
+The Daily source is identified by its file content rather than its Windows
+modification time. If an existing target already matches the expected Daily
+result, the plan reports `DLY current` even when the source file timestamp has
+changed.
+
+
+## Historical SCID replacement
+
+Historical SCID updates should normally show:
+
+```text
+SCID replace src=33,741,xxx -> out=33,741,xxx
+```
+
+The source and output record counts are identical. Their file sizes are also
+identical.
+
+If an old contract is still downloading, the plan can show:
+
+```text
+SCID deferred - SCID ends 2021-09-30; Daily history ends 2021-12-17
+```
+
+or the run can defer it if the source changes during conversion. The existing
+Rithmic target is left untouched.
+
+Only a live-sensitive contract can show `SCID live-merge`, and the log records
+the source total, source records used, preserved Rithmic records, and the
+handoff timestamp and number of matching trade seconds used to verify it.

@@ -65,12 +65,7 @@ try {
             $price = [single](30000.0 + ($i * 0.25))
 
             $recordTime =
-                if ($i -eq 10) {
-                    $baseTime + (8 * 1000000)
-                }
-                else {
-                    $baseTime + ($i * 1000000)
-                }
+                $baseTime + ($i * 1000000)
 
             Write-Record `
                 $writer `
@@ -105,7 +100,7 @@ try {
                 1 1 1 0
         }
 
-        # A genuinely newer Rithmic record beyond the two-second guard.
+        # A genuinely newer Rithmic record beyond the source endpoint.
         Write-Record `
             $writer `
             ($baseTime + (23 * 1000000)) `
@@ -131,27 +126,23 @@ try {
         $target,
         $inference.Factor,
         $backup,
-        2.0,
+        $false,
         "[test] synthetic")
 
     if ($result.SourceRecords -ne 20) {
         throw "Expected 20 source records."
     }
 
-    if ($result.TailRecords -ne 1) {
-        throw "Expected one preserved Rithmic tail record."
+    if ($result.TailRecords -ne 0) {
+        throw "Historical replacement must not preserve a Rithmic tail."
     }
 
-    if ($result.OutputRecords -ne 21) {
-        throw "Expected 21 output records."
+    if ($result.OutputRecords -ne 20) {
+        throw "Expected 20 historical replacement records."
     }
 
-    if ($result.OutOfOrderRecords -ne 1) {
-        throw "Expected one preserved out-of-order source timestamp."
-    }
-
-    if ($result.FirstOutOfOrderIndex -ne 10) {
-        throw "Unexpected first out-of-order source record index."
+    if ($result.OutOfOrderRecords -ne 0) {
+        throw "Expected monotonic source timestamps."
     }
 
     if (-not (Test-Path -LiteralPath (Join-Path $backup "NQU6.CME.scid.bak"))) {
@@ -159,8 +150,8 @@ try {
     }
 
     $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($target)
-    if ($meta.Records -ne 21) {
-        throw "Converted target metadata is incorrect."
+    if ($meta.Records -ne 20) {
+        throw "Converted historical target metadata is incorrect."
     }
 
     # Verify the special Open marker is bit-for-bit unchanged.
@@ -172,6 +163,170 @@ try {
         if ($sourceBytes[$recordOffset + $i] -ne $targetBytes[$recordOffset + $i]) {
             throw "Special Open marker was changed."
         }
+    }
+
+    # Live merge coverage uses different intra-second timestamps on each feed.
+    # The Rithmic target contains a more complete final second, while three
+    # earlier seconds provide independent evidence for a safe cutover.
+    $mergeSource = Join-Path $temp "merge-source.scid"
+    $mergeTarget = Join-Path $temp "merge-target.scid"
+    $mergeBackup = Join-Path $temp "merge-backups"
+    $mergeBase = [long]4010000000000000
+
+    $stream = [IO.File]::Open($mergeSource, [IO.FileMode]::CreateNew)
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+        Write-ScidHeader $writer
+
+        for ($second = 0; $second -le 4; $second++) {
+            $price = [single](31000.0 + ($second * 0.25))
+
+            Write-Record `
+                $writer `
+                ($mergeBase + ($second * 1000000) + 123000) `
+                ([single]0.0) `
+                ($price + 0.25) `
+                $price `
+                $price `
+                1 1 1 0
+        }
+
+        Write-Record `
+            $writer `
+            ($mergeBase + (5 * 1000000) + 123000) `
+            ([single]0.0) `
+            ([single]31002.0) `
+            ([single]31001.25) `
+            ([single]31001.25) `
+            1 1 1 0
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $stream = [IO.File]::Open($mergeTarget, [IO.FileMode]::CreateNew)
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+        Write-ScidHeader $writer
+
+        for ($second = 0; $second -le 4; $second++) {
+            $price = [single](31000.0 + ($second * 0.25))
+
+            Write-Record `
+                $writer `
+                ($mergeBase + ($second * 1000000)) `
+                ([single]($price * 100.0)) `
+                ([single](($price + 0.25) * 100.0)) `
+                ([single]($price * 100.0)) `
+                ([single]($price * 100.0)) `
+                1 1 1 0
+        }
+
+        for ($trade = 0; $trade -lt 3; $trade++) {
+            $price = [single](31001.25 + ($trade * 0.25))
+
+            Write-Record `
+                $writer `
+                ($mergeBase + (5 * 1000000) + $trade) `
+                ([single]($price * 100.0)) `
+                ([single](($price + 0.25) * 100.0)) `
+                ([single]($price * 100.0)) `
+                ([single]($price * 100.0)) `
+                1 1 `
+                ([uint32]$(if ($trade -eq 2) { 0 } else { 1 })) `
+                ([uint32]$(if ($trade -eq 2) { 1 } else { 0 }))
+        }
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $mergeResult =
+        [SierraHistoryBridge.ScidBridge]::Convert(
+            $mergeSource,
+            $mergeTarget,
+            100.0,
+            $mergeBackup,
+            $true,
+            "[test] live merge")
+
+    $expectedHandoff =
+        $mergeBase + (4 * 1000000)
+
+    if ($mergeResult.HandoffDateTime -ne $expectedHandoff -or
+        $mergeResult.HandoffVerifiedTradeSeconds -lt 3) {
+        throw "Live merge did not establish the verified whole-second handoff."
+    }
+
+    if ($mergeResult.SourceRecordsWritten -ne 4) {
+        throw "Live merge source prefix was not strictly before the handoff second."
+    }
+
+    if ($mergeResult.TailRecords -ne 4 -or
+        $mergeResult.OutputRecords -ne 8) {
+        throw "Live merge produced an unexpected prefix/tail record count."
+    }
+
+    $mergeMeta =
+        [SierraHistoryBridge.ScidBridge]::GetMeta($mergeTarget)
+
+    if ($mergeMeta.Records -ne 8 -or
+        $mergeMeta.LastDateTime -ne
+            ($mergeBase + (5 * 1000000) + 2)) {
+        throw "Published live merge metadata is incorrect."
+    }
+
+    $unorderedSource = Join-Path $temp "unordered-source.scid"
+    $unorderedTarget = Join-Path $temp "unordered-target.scid"
+    Copy-Item -LiteralPath $source -Destination $unorderedSource
+    Copy-Item -LiteralPath $target -Destination $unorderedTarget
+
+    $stream = [IO.File]::Open(
+        $unorderedSource,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None)
+    $writer = New-Object IO.BinaryWriter($stream)
+    try {
+        $stream.Position = 56 + (10 * 40)
+        $writer.Write($baseTime + (8 * 1000000))
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $unorderedTargetBefore =
+        [Convert]::ToBase64String(
+            [IO.File]::ReadAllBytes($unorderedTarget))
+
+    $unorderedRejected = $false
+    try {
+        [SierraHistoryBridge.ScidBridge]::Convert(
+            $unorderedSource,
+            $unorderedTarget,
+            100.0,
+            $mergeBackup,
+            $false,
+            "[test] unordered source") | Out-Null
+    }
+    catch {
+        $unorderedRejected =
+            $_.Exception.Message -like "*SOURCE_OUT_OF_ORDER:*"
+    }
+
+    if (-not $unorderedRejected) {
+        throw "Non-monotonic SC Data source was not rejected."
+    }
+
+    $unorderedTargetAfter =
+        [Convert]::ToBase64String(
+            [IO.File]::ReadAllBytes($unorderedTarget))
+
+    if ($unorderedTargetAfter -ne $unorderedTargetBefore) {
+        throw "Rejected non-monotonic source changed its target."
     }
 
 
@@ -226,12 +381,26 @@ try {
         throw "Expected Historical Daily scale inference of x100."
     }
 
+    if ([SierraHistoryBridge.DailyBridge]::IsSynchronized(
+            $dailySource,
+            $dailyTarget,
+            100.0)) {
+        throw "Historical Daily target should require synchronization before the merge."
+    }
+
     $dailyResult =
         [SierraHistoryBridge.DailyBridge]::Sync(
             $dailySource,
             $dailyTarget,
             100.0,
             $backup)
+
+    if (-not [SierraHistoryBridge.DailyBridge]::IsSynchronized(
+            $dailySource,
+            $dailyTarget,
+            100.0)) {
+        throw "Historical Daily target should be synchronized after the merge."
+    }
 
     if ($dailyResult.SourceRecords -ne 3) {
         throw "Expected 3 Historical Daily source records."
@@ -273,16 +442,27 @@ try {
         throw "Expected Historical Daily backup file was not created."
     }
 
+
+    $historicalMeta =
+        [SierraHistoryBridge.ScidBridge]::GetMeta(
+            $target)
+
+    if ($historicalMeta.Length -ne
+        ([SierraHistoryBridge.ScidBridge]::GetMeta($source)).Length) {
+        throw "Historical replacement must have the same byte length as the source."
+    }
+
     Write-Host "PASS: scale inference"
-    Write-Host "PASS: SCID conversion"
-    Write-Host "PASS: newer Rithmic tail preservation"
+    Write-Host "PASS: historical SCID replacement"
+    Write-Host "PASS: verified whole-second Rithmic tail handoff"
+    Write-Host "PASS: non-monotonic source rejection without publication"
     Write-Host "PASS: backup creation"
     Write-Host "PASS: Sierra Open-field marker preservation"
-    Write-Host "PASS: out-of-order source timestamp preserved and reported"
     Write-Host "PASS: Historical Daily independent scale inference"
     Write-Host "PASS: Historical Daily merge and scale conversion"
     Write-Host "PASS: Historical Daily older target-only rows are not carried forward"
     Write-Host "PASS: Historical Daily latest-date overlap handling"
+    Write-Host "PASS: Historical Daily semantic dirty-check"
     exit 0
 }
 finally {
@@ -290,4 +470,3 @@ finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
-
