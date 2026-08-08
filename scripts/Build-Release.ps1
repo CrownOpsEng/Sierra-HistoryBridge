@@ -61,7 +61,7 @@ function New-PortableZipArchive {
     }
 }
 
-$Version = "0.0.15"
+$Version = "0.0.16"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 if (-not $OutputDirectory) {
@@ -113,6 +113,9 @@ foreach ($name in @(
     "VERSION",
     "setup.cmd",
     "run.cmd",
+    "archive.cmd",
+    "restore.cmd",
+    "storage.cmd",
     "repair.cmd",
     "uninstall.cmd"
 )) {
@@ -146,6 +149,9 @@ foreach ($name in @(
     "VERSION",
     "setup.cmd",
     "run.cmd",
+    "archive.cmd",
+    "restore.cmd",
+    "storage.cmd",
     "repair.cmd",
     "uninstall.cmd"
 )) {

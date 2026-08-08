@@ -2,6 +2,12 @@
 [CmdletBinding()]
 param(
     [string]$DataFolder,
+    [ValidateSet("Update", "Archive", "Restore", "Storage")]
+    [string]$Mode = "Update",
+    [string]$FromDate,
+    [string]$ToDate,
+    [int]$Days = 0,
+    [switch]$All,
     [switch]$Interactive,
     [switch]$Force,
     [switch]$DryRun,
@@ -10,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.15"
+$Version = "0.0.16"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -94,6 +100,41 @@ function Get-ContractMonth([int]$FullYear, [string]$MonthCode) {
         $FullYear,
         (Get-FuturesMonthNumber $MonthCode),
         1)
+}
+
+function Resolve-FullContractYear([string]$TwoDigitYear) {
+    $year = [int]$TwoDigitYear
+    $currentYear = (Get-Date).Year
+    $century = [int]([Math]::Floor($currentYear / 100.0) * 100)
+    $candidate = $century + $year
+
+    if ($candidate -gt ($currentYear + 50)) {
+        $candidate -= 100
+    }
+    elseif ($candidate -lt ($currentYear - 49)) {
+        $candidate += 100
+    }
+
+    return $candidate
+}
+
+function Get-BridgeWindow {
+    $currentMonth =
+        [datetime]::new(
+            (Get-Date).Year,
+            (Get-Date).Month,
+            1)
+
+    $windowStart =
+        $currentMonth.AddYears(-5).AddMonths(-3)
+
+    $windowEnd =
+        $currentMonth.AddMonths(6)
+
+    return [pscustomobject]@{
+        Start = $windowStart
+        End = $windowEnd
+    }
 }
 
 function Test-ContractInRithmicWindow(
@@ -448,7 +489,7 @@ function Get-ScidValidationSummary($Candidate) {
             return "INCOMPLETE SOURCE | no Rithmic target available for comparison"
         }
 
-        return "CREATE | no Rithmic target available for comparison"
+        return "SOURCE VALID | CREATE | no independent Rithmic comparison"
     }
 
     if ($Candidate.TargetStatus.Kind -ne "data") {
@@ -484,8 +525,26 @@ function Get-ScidValidationSummary($Candidate) {
             "ref=unknown"
         }
 
+    $displayGrade = $Candidate.ScidPairGrade
+
+    if ($Candidate.ScidValidationReference -and
+        $Candidate.ScidValidationReference.Independent) {
+
+        $displayGrade =
+            "CROSS-FEED $($Candidate.ScidPairGrade)"
+    }
+    else {
+        if ($Candidate.ScidPairGrade -eq "STRONG") {
+            $displayGrade = "MANAGED CONSISTENT"
+        }
+        else {
+            $displayGrade =
+                "MANAGED $($Candidate.ScidPairGrade)"
+        }
+    }
+
     return (
-        "$($Candidate.ScidPairGrade) | $reference | $coverage | $volume | $price | $aggregate")
+        "$displayGrade | $reference | $coverage | $volume | $price | $aggregate")
 }
 
 
@@ -642,6 +701,955 @@ function Format-StorageBytes([long]$Bytes) {
 
     return "{0:0} MB" -f
         ($Bytes / 1MB)
+}
+
+
+function Format-SignedStorageBytes([long]$Bytes) {
+    if ($Bytes -eq 0) {
+        return "0 MB"
+    }
+
+    $prefix = "+"
+    if ($Bytes -lt 0) {
+        $prefix = "-"
+        $Bytes = [Math]::Abs($Bytes)
+    }
+
+    return $prefix + (Format-StorageBytes $Bytes)
+}
+
+function Get-StorageSnapshot([string]$DataFolder) {
+    $archiveRoot =
+        [IO.Path]::GetFullPath(
+            (Join-Path $DataFolder "SCID_Bridge_Archive")).TrimEnd('\') + '\'
+
+    $recoveryRoot =
+        [IO.Path]::GetFullPath(
+            (Join-Path $DataFolder "SCID_Bridge_Backups")).TrimEnd('\') + '\'
+
+    $dataRoot =
+        [IO.Path]::GetFullPath($DataFolder).TrimEnd('\') + '\'
+
+    $sourcePattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $rithmicPattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $categories = @{
+        Sources = [long[]]@(0L, 0L)
+        Rithmic = [long[]]@(0L, 0L)
+        Archive = [long[]]@(0L, 0L)
+        Recovery = [long[]]@(0L, 0L)
+        Other = [long[]]@(0L, 0L)
+    }
+
+    foreach ($file in @(
+        Get-ChildItem `
+            -LiteralPath $DataFolder `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue)) {
+
+        $full = [IO.Path]::GetFullPath($file.FullName)
+        $category = "Other"
+
+        if ($full.StartsWith(
+            $archiveRoot,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            $category = "Archive"
+        }
+        elseif ($full.StartsWith(
+            $recoveryRoot,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            $category = "Recovery"
+        }
+        elseif ($file.DirectoryName -ieq $DataFolder -and
+            $sourcePattern.IsMatch($file.Name)) {
+            $category = "Sources"
+        }
+        elseif ($file.DirectoryName -ieq $DataFolder -and
+            $rithmicPattern.IsMatch($file.Name)) {
+            $category = "Rithmic"
+        }
+
+        $logical = [long]$file.Length
+        $allocated = $logical
+
+        try {
+            $allocated =
+                [long][SierraHistoryBridge.ScidBridge]::GetFileAllocatedBytes(
+                    $file.FullName)
+        }
+        catch { }
+
+        $values = $categories[$category]
+        $values[0] += $logical
+        $values[1] += $allocated
+    }
+
+    $logicalTotal = 0L
+    $allocatedTotal = 0L
+
+    foreach ($name in $categories.Keys) {
+        $logicalTotal += $categories[$name][0]
+        $allocatedTotal += $categories[$name][1]
+    }
+
+    return [pscustomobject]@{
+        SourcesLogical = $categories.Sources[0]
+        SourcesDisk = $categories.Sources[1]
+        RithmicLogical = $categories.Rithmic[0]
+        RithmicDisk = $categories.Rithmic[1]
+        ArchiveLogical = $categories.Archive[0]
+        ArchiveDisk = $categories.Archive[1]
+        RecoveryLogical = $categories.Recovery[0]
+        RecoveryDisk = $categories.Recovery[1]
+        OtherLogical = $categories.Other[0]
+        OtherDisk = $categories.Other[1]
+        TotalLogical = $logicalTotal
+        TotalDisk = $allocatedTotal
+        Free = Get-AvailableFreeBytes $DataFolder
+    }
+}
+
+function Show-StorageSnapshot([string]$Label, $Snapshot) {
+    Write-Host (
+        "      {0}: Data {1} logical / {2} disk | free {3}" -f
+        $Label,
+        (Format-StorageBytes $Snapshot.TotalLogical),
+        (Format-StorageBytes $Snapshot.TotalDisk),
+        (Format-StorageBytes $Snapshot.Free))
+}
+
+function Show-StorageDelta($Before, $After) {
+    Write-Host
+    Write-Host "Storage usage (disk):"
+    Write-Host (
+        "  {0,-20} {1,12} {2,12} {3,12}" -f
+        "Category", "Before", "Delta", "Total")
+
+    foreach ($row in @(
+        [pscustomobject]@{ Name = "SC Data sources"; Before = $Before.SourcesDisk; After = $After.SourcesDisk },
+        [pscustomobject]@{ Name = "Rithmic targets"; Before = $Before.RithmicDisk; After = $After.RithmicDisk },
+        [pscustomobject]@{ Name = "Bridge archive"; Before = $Before.ArchiveDisk; After = $After.ArchiveDisk },
+        [pscustomobject]@{ Name = "Recovery"; Before = $Before.RecoveryDisk; After = $After.RecoveryDisk },
+        [pscustomobject]@{ Name = "Other Data"; Before = $Before.OtherDisk; After = $After.OtherDisk },
+        [pscustomobject]@{ Name = "Data folder"; Before = $Before.TotalDisk; After = $After.TotalDisk },
+        [pscustomobject]@{ Name = "Free space"; Before = $Before.Free; After = $After.Free }
+    )) {
+        Write-Host (
+            "  {0,-20} {1,12} {2,12} {3,12}" -f
+            $row.Name,
+            (Format-StorageBytes ([long]$row.Before)),
+            (Format-SignedStorageBytes ([long]$row.After - [long]$row.Before)),
+            (Format-StorageBytes ([long]$row.After)))
+    }
+
+    Write-Host (
+        "  Logical Data total: {0} -> {1}" -f
+        (Format-StorageBytes $Before.TotalLogical),
+        (Format-StorageBytes $After.TotalLogical))
+}
+
+function Read-FileArchiveMeta([string]$ArchivePath) {
+    $metadataPath = $ArchivePath + ".meta"
+
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $values = @{}
+        foreach ($line in Get-Content -LiteralPath $metadataPath -ErrorAction Stop) {
+            $separator = $line.IndexOf("=")
+            if ($separator -le 0) {
+                continue
+            }
+
+            $key = $line.Substring(0, $separator)
+            $value = $line.Substring($separator + 1)
+            $values[$key] = $value
+        }
+
+        if (-not $values.ContainsKey("original_name") -or
+            -not $values.ContainsKey("original_bytes") -or
+            -not $values.ContainsKey("sha256")) {
+            return $null
+        }
+
+        $writeTicks = 0L
+        if ($values.ContainsKey("original_write_ticks")) {
+            $writeTicks = [long]$values["original_write_ticks"]
+        }
+
+        return [pscustomobject]@{
+            OriginalName = [string]$values["original_name"]
+            OriginalBytes = [long]$values["original_bytes"]
+            OriginalWriteTicks = $writeTicks
+            Sha256 = [string]$values["sha256"]
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Convert-OptionalDate([string]$Value, [string]$Label) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $parsed = [datetime]::MinValue
+    if (-not [datetime]::TryParse(
+        $Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+        [ref]$parsed)) {
+        throw "$Label is not a valid date: $Value"
+    }
+
+    return $parsed.Date
+}
+
+function Get-ScDataSourceFiles([string]$DataFolder) {
+    $sourcePattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $files = @()
+
+    foreach ($file in @(
+        Get-ChildItem `
+            -LiteralPath $DataFolder `
+            -File `
+            -ErrorAction SilentlyContinue)) {
+
+        $match = $sourcePattern.Match($file.Name)
+        if (-not $match.Success) {
+            continue
+        }
+
+        $yearText = $match.Groups["year"].Value
+        $fullYear = Resolve-FullContractYear $yearText
+        $monthCode = $match.Groups["month"].Value.ToUpperInvariant()
+
+        $files += [pscustomobject]@{
+            Path = $file.FullName
+            Name = $file.Name
+            Root = $match.Groups["root"].Value.ToUpperInvariant()
+            Exchange = $match.Groups["exchange"].Value.ToUpperInvariant()
+            MonthCode = $monthCode
+            FullYear = $fullYear
+            ContractMonth = Get-ContractMonth $fullYear $monthCode
+            Extension = $match.Groups["extension"].Value.ToLowerInvariant()
+            Length = [long]$file.Length
+            LastWriteTimeUtc = $file.LastWriteTimeUtc
+        }
+    }
+
+    return @($files | Sort-Object ContractMonth, Extension, Name)
+}
+
+function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
+    $safeGroup =
+        ($SourceFile.Root + "-" + $SourceFile.Exchange) -replace '[^A-Za-z0-9_.-]', '_'
+
+    $directory =
+        Join-Path `
+            (Join-Path `
+                (Join-Path $DataFolder "SCID_Bridge_Archive") `
+                "SC_Data") `
+            $safeGroup
+
+    $directory =
+        Join-Path $directory ([string]$SourceFile.FullYear)
+
+    return Join-Path $directory ($SourceFile.Name + ".gz")
+}
+
+function Select-ArchiveSourceFiles(
+    $SourceFiles,
+    [datetime]$DefaultBefore,
+    [string]$FromValue,
+    [string]$ToValue,
+    [int]$AgeDays,
+    [bool]$ArchiveAll,
+    [bool]$Ask) {
+
+    $from = Convert-OptionalDate $FromValue "FromDate"
+    $to = Convert-OptionalDate $ToValue "ToDate"
+    $daysValue = $AgeDays
+    $allValue = $ArchiveAll
+
+    $explicit =
+        $allValue -or
+        $daysValue -gt 0 -or
+        $from -or
+        $to
+
+    if ($Ask -and -not $explicit) {
+        Write-Host
+        Write-Host "Archive selection:"
+        Write-Host (
+            "  [Enter] contracts before {0:yyyy-MM} (default)" -f
+            $DefaultBefore)
+        Write-Host "  D       contract date range"
+        Write-Host "  N       archive contract months older than N days"
+        Write-Host "  A       all SC Data source files"
+
+        $choice = (Read-Host "Selection").Trim().ToUpperInvariant()
+
+        if ($choice -eq "D") {
+            $from = Convert-OptionalDate (Read-Host "From contract date (optional, YYYY-MM-DD)") "FromDate"
+            $to = Convert-OptionalDate (Read-Host "Through contract date (optional, YYYY-MM-DD)") "ToDate"
+        }
+        elseif ($choice -eq "N") {
+            $rawDays = Read-Host "Archive contract months older than how many days"
+            $daysValue = [int]$rawDays
+            if ($daysValue -le 0) {
+                throw "Days must be greater than zero."
+            }
+        }
+        elseif ($choice -eq "A") {
+            $allValue = $true
+        }
+        elseif ($choice -ne "") {
+            throw "Unknown archive selection."
+        }
+    }
+
+    $selection = @($SourceFiles)
+
+    if (-not $allValue -and
+        $daysValue -le 0 -and
+        -not $from -and
+        -not $to) {
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -lt $DefaultBefore })
+    }
+
+    if ($daysValue -gt 0) {
+        $cutoff = (Get-Date).Date.AddDays(-$daysValue)
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -le $cutoff })
+    }
+
+    if ($from) {
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -ge $from })
+    }
+
+    if ($to) {
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -le $to })
+    }
+
+    return $selection
+}
+
+function Invoke-SourceArchiveManager(
+    [string]$ResolvedDataFolder,
+    [bool]$AskForFilter) {
+
+    if (Test-SierraChartRunning) {
+        throw (
+            "Close Sierra Chart before archiving SC Data source files. " +
+            "Archived files are unavailable to Sierra until restored.")
+    }
+
+    $window = Get-BridgeWindow
+    $sourceFiles = Get-ScDataSourceFiles $ResolvedDataFolder
+
+    $selection =
+        Select-ArchiveSourceFiles `
+            $sourceFiles `
+            $window.Start `
+            $FromDate `
+            $ToDate `
+            $Days `
+            ([bool]$All) `
+            $AskForFilter
+
+    if ($selection.Count -eq 0) {
+        Write-Host
+        Write-Host "No SC Data source files match the archive filter."
+        return 0
+    }
+
+    $logical =
+        [long](($selection | Measure-Object -Property Length -Sum).Sum)
+
+    $disk = 0L
+    $contractCount =
+        @($selection | Group-Object Root, Exchange, FullYear, MonthCode).Count
+
+    $zeroVolumeFiles = 0
+    $validationWarnings = 0
+
+    foreach ($item in $selection) {
+        try {
+            $disk +=
+                [long][SierraHistoryBridge.ScidBridge]::GetFileAllocatedBytes(
+                    $item.Path)
+
+            if ($item.Extension -eq "dly") {
+                $dailyMeta =
+                    [SierraHistoryBridge.DailyBridge]::GetMeta(
+                        $item.Path)
+
+                if ($dailyMeta.ZeroVolumeRecords -gt 0) {
+                    $zeroVolumeFiles++
+                }
+            }
+            else {
+                [SierraHistoryBridge.ScidBridge]::GetMeta(
+                    $item.Path) | Out-Null
+            }
+        }
+        catch {
+            $validationWarnings++
+            Write-Host (
+                "  SKIP {0} | validation warning: {1}" -f
+                $item.Name,
+                $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+
+    if ($validationWarnings -gt 0) {
+        $selection =
+            @(
+                $selection |
+                Where-Object {
+                    try {
+                        if ($_.Extension -eq "dly") {
+                            [SierraHistoryBridge.DailyBridge]::GetMeta($_.Path) | Out-Null
+                        }
+                        else {
+                            [SierraHistoryBridge.ScidBridge]::GetMeta($_.Path) | Out-Null
+                        }
+                        $true
+                    }
+                    catch {
+                        $false
+                    }
+                }
+            )
+    }
+
+    if ($selection.Count -eq 0) {
+        Write-Host "No valid source files remain to archive."
+        return 2
+    }
+
+    $logical =
+        [long](($selection | Measure-Object -Property Length -Sum).Sum)
+
+    $disk = 0L
+    foreach ($item in $selection) {
+        try {
+            $disk +=
+                [long][SierraHistoryBridge.ScidBridge]::GetFileAllocatedBytes(
+                    $item.Path)
+        }
+        catch {
+            $disk += [long]$item.Length
+        }
+    }
+
+    $contractCount =
+        @($selection | Group-Object Root, Exchange, FullYear, MonthCode).Count
+
+    $firstMonth = ($selection | Sort-Object ContractMonth | Select-Object -First 1).ContractMonth
+    $lastMonth = ($selection | Sort-Object ContractMonth | Select-Object -Last 1).ContractMonth
+
+    Write-Host
+    Write-Host "Archive plan:"
+    Write-Host (
+        "  {0} file(s) across {1} contract(s) | {2:yyyy-MM}..{3:yyyy-MM}" -f
+        $selection.Count,
+        $contractCount,
+        $firstMonth,
+        $lastMonth)
+    Write-Host (
+        "  Current usage: {0} logical / {1} disk" -f
+        (Format-StorageBytes $logical),
+        (Format-StorageBytes $disk))
+    Write-Host "  Archives keep the exact original filename plus .gz and are verified before source deletion."
+
+    if ($zeroVolumeFiles -gt 0) {
+        Write-Host (
+            "  Daily data note: {0} selected DLY file(s) contain zero-volume records; they will be preserved exactly." -f
+            $zeroVolumeFiles) -ForegroundColor Yellow
+    }
+
+    if ($DryRun) {
+        Write-Host "Dry run: no files were changed."
+        return 0
+    }
+
+    if (-not $Yes) {
+        $answer = Read-Host "Archive these SC Data files? [y/N]"
+        if ($answer.Trim().ToLowerInvariant() -notin @("y", "yes")) {
+            Write-Host "Archive canceled."
+            return 0
+        }
+    }
+
+    $before = Get-StorageSnapshot $ResolvedDataFolder
+    $archived = 0
+    $failed = 0
+    $rawBytes = 0L
+    $archiveBytes = 0L
+
+    foreach ($item in $selection) {
+        $archivePath = Get-SourceArchivePath $item $ResolvedDataFolder
+        $status = "ARCHIVE $($item.Name)"
+
+        try {
+            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine($status)
+
+            if ($item.Extension -eq "scid") {
+                $result =
+                    [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+                        $item.Path,
+                        $archivePath,
+                        $true,
+                        $false)
+            }
+            else {
+                $result =
+                    [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
+                        $item.Path,
+                        $archivePath,
+                        $true,
+                        $false)
+            }
+
+            $rawBytes += [long]$result.OriginalBytes
+            $archiveBytes += [long]$result.ArchiveBytes
+            $archived++
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                (
+                    "{0} | OK | {1} -> {2}" -f
+                    $status,
+                    (Format-StorageBytes $result.OriginalBytes),
+                    (Format-StorageBytes $result.ArchiveBytes)))
+        }
+        catch {
+            $failed++
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | FAILED | $($_.Exception.Message)")
+        }
+    }
+
+    $after = Get-StorageSnapshot $ResolvedDataFolder
+
+    Write-Host
+    Write-Host (
+        "Archive done: {0} archived | {1} failed | raw {2} -> archive {3}" -f
+        $archived,
+        $failed,
+        (Format-StorageBytes $rawBytes),
+        (Format-StorageBytes $archiveBytes))
+
+    Show-StorageDelta $before $after
+
+    if ($failed -gt 0) {
+        return 2
+    }
+
+    return 0
+}
+
+function Get-ArchivedSourceFiles([string]$DataFolder) {
+    $root =
+        Join-Path `
+            (Join-Path $DataFolder "SCID_Bridge_Archive") `
+            "SC_Data"
+
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        return @()
+    }
+
+    $sourcePattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $items = @()
+
+    foreach ($archive in @(
+        Get-ChildItem `
+            -LiteralPath $root `
+            -Recurse `
+            -File `
+            -Filter "*.gz" `
+            -ErrorAction SilentlyContinue)) {
+
+        $meta = Read-FileArchiveMeta $archive.FullName
+        if (-not $meta) {
+            Write-Host (
+                "  ARCHIVE WARNING: metadata missing or invalid: {0}" -f
+                $archive.FullName) -ForegroundColor Yellow
+            continue
+        }
+
+        $match = $sourcePattern.Match($meta.OriginalName)
+        if (-not $match.Success) {
+            continue
+        }
+
+        $fullYear = Resolve-FullContractYear $match.Groups["year"].Value
+        $monthCode = $match.Groups["month"].Value.ToUpperInvariant()
+
+        $items += [pscustomobject]@{
+            ArchivePath = $archive.FullName
+            MetadataPath = $archive.FullName + ".meta"
+            OriginalName = $meta.OriginalName
+            Destination = Join-Path $DataFolder $meta.OriginalName
+            OriginalBytes = [long]$meta.OriginalBytes
+            OriginalWriteTicks = [long]$meta.OriginalWriteTicks
+            Sha256 = $meta.Sha256
+            Root = $match.Groups["root"].Value.ToUpperInvariant()
+            Exchange = $match.Groups["exchange"].Value.ToUpperInvariant()
+            FullYear = $fullYear
+            MonthCode = $monthCode
+            ContractMonth = Get-ContractMonth $fullYear $monthCode
+            Extension = $match.Groups["extension"].Value.ToLowerInvariant()
+            ArchiveBytes = [long]$archive.Length
+        }
+    }
+
+    return @($items | Sort-Object ContractMonth, Extension, OriginalName)
+}
+
+function Select-RestoreArchives(
+    $Archives,
+    [string]$FromValue,
+    [string]$ToValue,
+    [int]$RecentDays,
+    [bool]$RestoreAll,
+    [bool]$Ask) {
+
+    $from = Convert-OptionalDate $FromValue "FromDate"
+    $to = Convert-OptionalDate $ToValue "ToDate"
+    $daysValue = $RecentDays
+    $allValue = $RestoreAll
+
+    $explicit =
+        $allValue -or
+        $daysValue -gt 0 -or
+        $from -or
+        $to
+
+    if ($Ask -and -not $explicit) {
+        Write-Host
+        Write-Host "Restore selection:"
+        Write-Host "  [Enter] most recent archived contract (default)"
+        Write-Host "  D       contract date range"
+        Write-Host "  N       restore contract months from the last N days"
+        Write-Host "  A       all archived SC Data files"
+
+        $choice = (Read-Host "Selection").Trim().ToUpperInvariant()
+
+        if ($choice -eq "D") {
+            $from = Convert-OptionalDate (Read-Host "From contract date (optional, YYYY-MM-DD)") "FromDate"
+            $to = Convert-OptionalDate (Read-Host "Through contract date (optional, YYYY-MM-DD)") "ToDate"
+        }
+        elseif ($choice -eq "N") {
+            $rawDays = Read-Host "Restore contract months from the last how many days"
+            $daysValue = [int]$rawDays
+            if ($daysValue -le 0) {
+                throw "Days must be greater than zero."
+            }
+        }
+        elseif ($choice -eq "A") {
+            $allValue = $true
+        }
+        elseif ($choice -ne "") {
+            throw "Unknown restore selection."
+        }
+    }
+
+    $selection = @($Archives)
+
+    if (-not $allValue -and
+        $daysValue -le 0 -and
+        -not $from -and
+        -not $to) {
+
+        $latest =
+            ($selection | Sort-Object ContractMonth -Descending | Select-Object -First 1).ContractMonth
+
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -eq $latest })
+    }
+
+    if ($daysValue -gt 0) {
+        $cutoff = (Get-Date).Date.AddDays(-$daysValue)
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -ge $cutoff })
+    }
+
+    if ($from) {
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -ge $from })
+    }
+
+    if ($to) {
+        $selection =
+            @($selection | Where-Object { $_.ContractMonth -le $to })
+    }
+
+    return $selection
+}
+
+function Invoke-SourceRestoreManager(
+    [string]$ResolvedDataFolder,
+    [bool]$AskForFilter) {
+
+    if (Test-SierraChartRunning) {
+        throw "Close Sierra Chart before restoring archived SC Data files."
+    }
+
+    $archives = Get-ArchivedSourceFiles $ResolvedDataFolder
+    if ($archives.Count -eq 0) {
+        Write-Host
+        Write-Host "No archived SC Data source files are available."
+        return 0
+    }
+
+    $selection =
+        Select-RestoreArchives `
+            $archives `
+            $FromDate `
+            $ToDate `
+            $Days `
+            ([bool]$All) `
+            $AskForFilter
+
+    if ($selection.Count -eq 0) {
+        Write-Host
+        Write-Host "No archives match the restore filter."
+        return 0
+    }
+
+    $rawBytes =
+        [long](($selection | Measure-Object -Property OriginalBytes -Sum).Sum)
+    $compressedBytes =
+        [long](($selection | Measure-Object -Property ArchiveBytes -Sum).Sum)
+
+    $firstMonth = ($selection | Sort-Object ContractMonth | Select-Object -First 1).ContractMonth
+    $lastMonth = ($selection | Sort-Object ContractMonth | Select-Object -Last 1).ContractMonth
+
+    Write-Host
+    Write-Host "Restore plan:"
+    Write-Host (
+        "  {0} file(s) | {1:yyyy-MM}..{2:yyyy-MM}" -f
+        $selection.Count,
+        $firstMonth,
+        $lastMonth)
+    Write-Host (
+        "  Archive {0} -> original files {1} logical" -f
+        (Format-StorageBytes $compressedBytes),
+        (Format-StorageBytes $rawBytes))
+    Write-Host "  Successfully restored archives are removed so the same data is not stored twice."
+
+    $conflicts = @()
+    $alreadyPresent = @()
+    $pending = @()
+
+    foreach ($item in $selection) {
+        if (Test-Path -LiteralPath $item.Destination -PathType Leaf) {
+            try {
+                $existingHash =
+                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                        $item.Destination)
+
+                if ($existingHash -ieq $item.Sha256 -and
+                    (Get-Item -LiteralPath $item.Destination).Length -eq $item.OriginalBytes) {
+                    $alreadyPresent += $item
+                }
+                else {
+                    $conflicts += $item
+                }
+            }
+            catch {
+                $conflicts += $item
+            }
+        }
+        else {
+            $pending += $item
+        }
+    }
+
+    $replaceConflicts = $false
+    if ($conflicts.Count -gt 0) {
+        Write-Host (
+            "  Conflict: {0} destination file(s) already exist with different data." -f
+            $conflicts.Count) -ForegroundColor Yellow
+
+        if (-not $Yes) {
+            $answer = Read-Host "Preserve the existing files in a conflict archive and replace them? [y/N]"
+            $replaceConflicts =
+                $answer.Trim().ToLowerInvariant() -in @("y", "yes")
+        }
+    }
+
+    if ($DryRun) {
+        Write-Host "Dry run: no files were changed."
+        return 0
+    }
+
+    if (-not $Yes -and
+        $pending.Count -gt 0) {
+        $answer = Read-Host "Restore the selected archives? [y/N]"
+        if ($answer.Trim().ToLowerInvariant() -notin @("y", "yes")) {
+            Write-Host "Restore canceled."
+            return 0
+        }
+    }
+
+    $before = Get-StorageSnapshot $ResolvedDataFolder
+    $restored = 0
+    $deduplicated = 0
+    $skippedConflicts = 0
+    $failed = 0
+    $conflictStamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+
+    foreach ($item in $alreadyPresent) {
+        try {
+            Remove-Item -LiteralPath $item.ArchivePath -Force
+            Remove-Item -LiteralPath $item.MetadataPath -Force -ErrorAction SilentlyContinue
+            $deduplicated++
+        }
+        catch {
+            $failed++
+        }
+    }
+
+    foreach ($item in $conflicts) {
+        if (-not $replaceConflicts) {
+            $skippedConflicts++
+            continue
+        }
+
+        try {
+            $conflictDirectory =
+                Join-Path `
+                    (Join-Path `
+                        (Join-Path $ResolvedDataFolder "SCID_Bridge_Archive") `
+                        "Restore_Conflicts") `
+                    $conflictStamp
+
+            $conflictArchive =
+                Join-Path $conflictDirectory ($item.OriginalName + ".gz")
+
+            if ($item.Extension -eq "scid") {
+                [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+                    $item.Destination,
+                    $conflictArchive,
+                    $true,
+                    $false) | Out-Null
+            }
+            else {
+                [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
+                    $item.Destination,
+                    $conflictArchive,
+                    $true,
+                    $false) | Out-Null
+            }
+
+            $pending += $item
+        }
+        catch {
+            $failed++
+            Write-Host (
+                "  FAILED conflict preservation: {0} | {1}" -f
+                $item.OriginalName,
+                $_.Exception.Message) -ForegroundColor Red
+        }
+    }
+
+    foreach ($item in $pending) {
+        $status = "RESTORE $($item.OriginalName)"
+        try {
+            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine($status)
+
+            $isScid = $item.Extension -eq "scid"
+            $result =
+                [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
+                    $item.ArchivePath,
+                    $item.Destination,
+                    [long]$item.OriginalBytes,
+                    [string]$item.Sha256,
+                    [long]$item.OriginalWriteTicks,
+                    [bool]$isScid,
+                    $false)
+
+            Remove-Item -LiteralPath $item.ArchivePath -Force
+            Remove-Item -LiteralPath $item.MetadataPath -Force -ErrorAction SilentlyContinue
+            $restored++
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | OK | $(Format-StorageBytes $result.RestoredBytes)")
+        }
+        catch {
+            $failed++
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | FAILED | $($_.Exception.Message)")
+        }
+    }
+
+    $after = Get-StorageSnapshot $ResolvedDataFolder
+
+    Write-Host
+    Write-Host (
+        "Restore done: {0} restored | {1} already present/deduplicated | {2} conflict(s) skipped | {3} failed" -f
+        $restored,
+        $deduplicated,
+        $skippedConflicts,
+        $failed)
+
+    Show-StorageDelta $before $after
+
+    if ($failed -gt 0) {
+        return 2
+    }
+
+    return 0
+}
+
+function Invoke-StorageReport([string]$ResolvedDataFolder) {
+    $snapshot = Get-StorageSnapshot $ResolvedDataFolder
+
+    Write-Host
+    Write-Host "Storage usage:"
+    Write-Host (
+        "  {0,-20} {1,14} {2,14}" -f
+        "Category", "Logical", "On disk")
+
+    foreach ($row in @(
+        [pscustomobject]@{ Name = "SC Data sources"; Logical = $snapshot.SourcesLogical; Disk = $snapshot.SourcesDisk },
+        [pscustomobject]@{ Name = "Rithmic targets"; Logical = $snapshot.RithmicLogical; Disk = $snapshot.RithmicDisk },
+        [pscustomobject]@{ Name = "Bridge archive"; Logical = $snapshot.ArchiveLogical; Disk = $snapshot.ArchiveDisk },
+        [pscustomobject]@{ Name = "Recovery"; Logical = $snapshot.RecoveryLogical; Disk = $snapshot.RecoveryDisk },
+        [pscustomobject]@{ Name = "Other Data"; Logical = $snapshot.OtherLogical; Disk = $snapshot.OtherDisk },
+        [pscustomobject]@{ Name = "Data folder"; Logical = $snapshot.TotalLogical; Disk = $snapshot.TotalDisk }
+    )) {
+        Write-Host (
+            "  {0,-20} {1,14} {2,14}" -f
+            $row.Name,
+            (Format-StorageBytes ([long]$row.Logical)),
+            (Format-StorageBytes ([long]$row.Disk)))
+    }
+
+    Write-Host (
+        "  {0,-20} {1,14}" -f
+        "Free space",
+        (Format-StorageBytes $snapshot.Free))
+
+    return 0
 }
 
 function Invoke-BridgeStorageCleanup([string]$DataFolder) {
@@ -1642,6 +2650,10 @@ function Invoke-SierraHistoryBridge {
     $resolvedDataFolder = Get-SierraDataFolder $DataFolder
     Write-Host "[2/4] Data       $resolvedDataFolder"
 
+    $storageBeforeRun =
+        Get-StorageSnapshot `
+            $resolvedDataFolder
+
     $storageCleanup =
         Invoke-BridgeStorageCleanup `
             $resolvedDataFolder
@@ -1650,9 +2662,15 @@ function Invoke-SierraHistoryBridge {
         Get-AvailableFreeBytes `
             $resolvedDataFolder
 
+    $storageAfterCleanup =
+        Get-StorageSnapshot `
+            $resolvedDataFolder
+
     Write-Host (
-        "      Storage: {0} free | reclaimed {1} | pruned {2} backup(s) | compressed {3} backup(s) | removed {4} stale temp(s)" -f
+        "      Storage: {0} free | Data {1} logical / {2} disk | reclaimed {3} | pruned {4} backup(s) | compressed {5} backup(s) | removed {6} stale temp(s)" -f
         (Format-StorageBytes $freeAfterCleanup),
+        (Format-StorageBytes $storageAfterCleanup.TotalLogical),
+        (Format-StorageBytes $storageAfterCleanup.TotalDisk),
         (Format-StorageBytes $storageCleanup.ReclaimedBytes),
         $storageCleanup.PrunedBackups,
         $storageCleanup.CompressedBackups,
@@ -1706,10 +2724,10 @@ function Invoke-SierraHistoryBridge {
             ContractKey = $contractKey
             Root = $Root
             MonthCode = $Month.ToUpperInvariant()
-            FullYear = 2000 + [int]$Year
+            FullYear = Resolve-FullContractYear $Year
             ContractMonth =
                 Get-ContractMonth `
-                    (2000 + [int]$Year) `
+                    (Resolve-FullContractYear $Year) `
                     $Month.ToUpperInvariant()
             Group =
                 "$($Root.ToUpperInvariant())|$($Exchange.ToUpperInvariant())"
@@ -1738,6 +2756,9 @@ function Invoke-SierraHistoryBridge {
             DailyLastDateTicks = 0
             DailySize = 0
             DailyModifiedTicks = 0
+            DailyZeroVolumeRecords = 0
+            DailyPositiveVolumeRecords = 0
+            DailyPlaceholder = $false
 
             StateKey = $null
         }
@@ -1807,23 +2828,31 @@ function Invoke-SierraHistoryBridge {
                         [SierraHistoryBridge.DailyBridge]::GetMeta(
                             $file.FullName)
 
+                    $candidate.DailySource =
+                        $file.FullName
+                    $candidate.DailySourceName =
+                        $file.Name
+                    $candidate.DailySize =
+                        [long]$file.Length
+                    $candidate.DailyModifiedTicks =
+                        [long]$file.LastWriteTimeUtc.Ticks
+                    $candidate.DailyZeroVolumeRecords =
+                        [long]$dailyMeta.ZeroVolumeRecords
+                    $candidate.DailyPositiveVolumeRecords =
+                        [long]$dailyMeta.PositiveVolumeRecords
+
                     if ($dailyMeta.Records -gt 0) {
                         $candidate.DailyAvailable = $true
                         $candidate.DailyError = $null
-                        $candidate.DailySource =
-                            $file.FullName
-                        $candidate.DailySourceName =
-                            $file.Name
                         $candidate.DailyRecords =
                             [long]$dailyMeta.Records
                         $candidate.DailyFirstDateTicks =
                             [long]$dailyMeta.FirstDateTicks
                         $candidate.DailyLastDateTicks =
                             [long]$dailyMeta.LastDateTicks
-                        $candidate.DailySize =
-                            [long]$file.Length
-                        $candidate.DailyModifiedTicks =
-                            [long]$file.LastWriteTimeUtc.Ticks
+                    }
+                    else {
+                        $candidate.DailyPlaceholder = $true
                     }
                 }
                 catch {
@@ -1870,21 +2899,9 @@ function Invoke-SierraHistoryBridge {
     # limits single-digit-year Continuous Futures Contract charts to five
     # years. Treat Rithmic-named files as a rolling history set, not
     # as the long-term source archive.
-    $currentMonth =
-        [datetime]::new(
-            (Get-Date).Year,
-            (Get-Date).Month,
-            1)
-
-    $usableHistoryYears = 5
-    $historyBufferMonths = 3
-    $forwardBufferMonths = 6
-
-    $windowStart =
-        $currentMonth.AddYears(-$usableHistoryYears).AddMonths(-$historyBufferMonths)
-
-    $windowEnd =
-        $currentMonth.AddMonths($forwardBufferMonths)
+    $bridgeWindow = Get-BridgeWindow
+    $windowStart = $bridgeWindow.Start
+    $windowEnd = $bridgeWindow.End
 
     $archiveCandidates = $candidates
 
@@ -1906,6 +2923,18 @@ function Invoke-SierraHistoryBridge {
                     $windowStart `
                     $windowEnd)
         }
+
+    $olderSourceContracts =
+        @(
+            $archiveOnly |
+            Where-Object { $_.ContractMonth -lt $windowStart }
+        )
+
+    $futureSourceContracts =
+        @(
+            $archiveOnly |
+            Where-Object { $_.ContractMonth -gt $windowEnd }
+        )
 
     # The selected window is deliberately much shorter than the ten-year
     # Rithmic filename alias cycle. If an unusual source set still maps more
@@ -1943,16 +2972,43 @@ function Invoke-SierraHistoryBridge {
         @($candidates | Where-Object { $_.DailyAvailable }).Count
 
     Write-Host (
-        "{0} eligible contracts | {1} SCID | {2} DLY | {3} source-only | window {4}..{5}" -f
+        "{0} eligible contracts | {1} SCID | {2} DLY | {3} older source | {4} future source | window {5}..{6}" -f
         $candidates.Count,
         $eligibleScid,
         $eligibleDaily,
-        $archiveOnly.Count,
+        $olderSourceContracts.Count,
+        $futureSourceContracts.Count,
         $windowStart.ToString("yyyy-MM"),
         $windowEnd.ToString("yyyy-MM"))
 
     Write-Host (
         "      Policy: 5y Sierra history + 3mo rollover buffer + 6mo forward buffer")
+
+    $dailyZeroVolumeSources =
+        @(
+            $archiveCandidates |
+            Where-Object {
+                $_.DailyZeroVolumeRecords -gt 0
+            }
+        )
+
+    $dailyPlaceholderSources =
+        @(
+            $archiveCandidates |
+            Where-Object {
+                $_.DailyPlaceholder
+            }
+        )
+
+    if ($dailyZeroVolumeSources.Count -gt 0 -or
+        $dailyPlaceholderSources.Count -gt 0) {
+
+        Write-Host (
+            "      Daily source quality: {0} file(s) with zero-volume rows | {1} header-only file(s) | preserved as supplied" -f
+            $dailyZeroVolumeSources.Count,
+            $dailyPlaceholderSources.Count) `
+            -ForegroundColor Yellow
+    }
 
     if ($superseded.Count -gt 0) {
         Write-Host (
@@ -2072,6 +3128,49 @@ function Invoke-SierraHistoryBridge {
     $stateTable = Get-StateTable $state
     $stateDirty = $false
 
+    # Remove obsolete DLY-only state entries once the same contract has a
+    # SCID-owned state entry. Current state keeps SCID and DLY metadata together.
+    foreach ($stateKey in @($stateTable.Keys)) {
+        if (-not $stateKey.EndsWith(
+            ".dly",
+            [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        $scidKey = [IO.Path]::ChangeExtension($stateKey, ".scid")
+        if ($stateTable.ContainsKey($scidKey)) {
+            $stateTable.Remove($stateKey)
+            $stateDirty = $true
+        }
+    }
+
+    # Surface sources which were present on a previous run but disappeared.
+    # This is informational and never deletes or rewrites the surviving target.
+    foreach ($candidate in $candidates) {
+        if (-not $candidate.HasScid) {
+            continue
+        }
+
+        if (-not $stateTable.ContainsKey($candidate.Source)) {
+            continue
+        }
+
+        $previousEntry = $stateTable[$candidate.Source]
+        if ($null -eq $previousEntry -or $previousEntry -is [string]) {
+            continue
+        }
+
+        if ($previousEntry.daily_source_signature -and
+            -not $candidate.DailyAvailable) {
+
+            $expectedDaily = [IO.Path]::ChangeExtension($candidate.Source, ".dly")
+
+            Write-Host (
+                "      SOURCE CHANGE: {0} was present on a previous run but is missing now; existing target left unchanged." -f
+                [IO.Path]::GetFileName($expectedDaily)) -ForegroundColor Yellow
+        }
+    }
+
     # Build a retirement plan for bridge-managed Rithmic files whose
     # SC Data contract has moved outside the managed history window.
     # Only modern state entries with verifiable target metadata are eligible.
@@ -2099,7 +3198,7 @@ function Invoke-SierraHistoryBridge {
             continue
         }
 
-        $fullYear = 2000 + [int]$match.Groups["year"].Value
+        $fullYear = Resolve-FullContractYear $match.Groups["year"].Value
         $monthCode = $match.Groups["month"].Value.ToUpperInvariant()
         $contractMonth = Get-ContractMonth $fullYear $monthCode
 
@@ -2924,7 +4023,7 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host (
-        "Plan: {0} ready | {1} deferred SCID | {2} unchanged | {3} source-only | {4} retire | {5} unverified" -f
+        "Plan: {0} ready | {1} deferred SCID | {2} unchanged | {3} outside window | {4} retire | {5} unverified" -f
         $ready.Count,
         $deferredScid.Count,
         $unchanged,
@@ -2957,7 +4056,14 @@ function Invoke-SierraHistoryBridge {
                     "SCID live merge"
                 }
                 else {
-                    "SCID validated replace"
+                    if ($candidate.ScidValidationReference -and
+                        $candidate.ScidValidationReference.Independent) {
+
+                        "SCID cross-feed validated replace"
+                    }
+                    else {
+                        "SCID replace [managed consistency check]"
+                    }
                 }
             }
             else {
@@ -4123,10 +5229,15 @@ function Invoke-SierraHistoryBridge {
             $resolvedDataFolder `
             "SCID_Bridge_Archive"
 
-    $freeAtEnd =
-        Get-AvailableFreeBytes `
+    $storageAtEnd =
+        Get-StorageSnapshot `
             $resolvedDataFolder
 
+    $freeAtEnd = $storageAtEnd.Free
+
+    Show-StorageDelta $storageBeforeRun $storageAtEnd
+
+    Write-Host
     Write-Host "Log:      $logPath"
     Write-Host "Archive:  $archiveDirectory"
     Write-Host "Recovery: $backupDirectory"
@@ -4149,6 +5260,15 @@ function Invoke-SierraHistoryBridge {
             Write-Host "  $name"
         }
         Write-Host "Run the bridge again when you are ready to update them."
+    }
+
+    if ($olderSourceContracts.Count -gt 0) {
+        Write-Host
+        Write-Host (
+            "Archive option: {0} older SC Data contract(s) are outside the bridge window and remain available to Sierra." -f
+            $olderSourceContracts.Count)
+        Write-Host (
+            "Use Archive Historical Data / archive.cmd when you want to compress selected source contracts. Restoring returns the exact original filenames.")
     }
 
     switch ($sierraHandling) {
@@ -4199,10 +5319,55 @@ function Invoke-SierraHistoryBridge {
     return 0
 }
 
+function Invoke-SierraHistoryUtilityMode {
+    Show-Banner
+
+    if (-not (Test-Path -LiteralPath $ConverterSource)) {
+        throw "ScidBridge.cs was not found next to SierraHistoryBridge.ps1."
+    }
+
+    Write-Host -NoNewline "[1/2] Engine     "
+    Add-Type -Path $ConverterSource
+    Write-Host "OK"
+
+    $resolvedDataFolder =
+        Get-SierraDataFolder $DataFolder
+
+    Write-Host "[2/2] Data       $resolvedDataFolder"
+
+    switch ($Mode) {
+        "Archive" {
+            return Invoke-SourceArchiveManager `
+                $resolvedDataFolder `
+                ([bool]$Interactive)
+        }
+
+        "Restore" {
+            return Invoke-SourceRestoreManager `
+                $resolvedDataFolder `
+                ([bool]$Interactive)
+        }
+
+        "Storage" {
+            return Invoke-StorageReport `
+                $resolvedDataFolder
+        }
+
+        default {
+            throw "Unsupported utility mode: $Mode"
+        }
+    }
+}
+
 $exitCode = 0
 
 try {
-    $exitCode = Invoke-SierraHistoryBridge
+    if ($Mode -eq "Update") {
+        $exitCode = Invoke-SierraHistoryBridge
+    }
+    else {
+        $exitCode = Invoke-SierraHistoryUtilityMode
+    }
 }
 catch {
     Write-Host

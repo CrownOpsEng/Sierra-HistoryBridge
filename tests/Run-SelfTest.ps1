@@ -331,6 +331,35 @@ try {
         $writer.Dispose()
         $stream.Dispose()
     }
+    $restoredBaselineTarget =
+        Join-Path $temp "NQU6-restored.CME.scid"
+
+    $baselineMetaLines =
+        Get-Content -LiteralPath ($baselineArchive + ".meta")
+
+    $baselineMeta = @{}
+    foreach ($line in $baselineMetaLines) {
+        $separator = $line.IndexOf("=")
+        if ($separator -gt 0) {
+            $baselineMeta[$line.Substring(0, $separator)] =
+                $line.Substring($separator + 1)
+        }
+    }
+
+    [void][SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
+        $baselineArchive,
+        $restoredBaselineTarget,
+        [long]$baselineMeta["original_bytes"],
+        [string]$baselineMeta["sha256"],
+        [long]$baselineMeta["original_write_ticks"],
+        $true,
+        $false)
+
+    if (-not (Test-Path -LiteralPath $restoredBaselineTarget)) {
+        throw "Compressed SCID restore round-trip failed."
+    }
+
+    Write-Host "PASS: compressed SCID restore round-trip"
 
     $mergeResult =
         [SierraHistoryBridge.ScidBridge]::Convert(
@@ -437,6 +466,26 @@ try {
         "2026/01/03, 10225.00000000, 10325.00000000, 10125.00000000, 10300.00000000, 1300, 12",
         "2026/01/04, 10300.00000000, 10400.00000000, 10200.00000000, 10350.00000000, 1400, 13"
     ) | Set-Content -LiteralPath $dailyTarget -Encoding ASCII
+
+    $zeroVolumeDaily =
+        Join-Path $temp "NQU00-CME.dly"
+
+    @(
+        "Date, Open, High, Low, Close, Volume, OpenInterest",
+        "2000/06/01, 100.00, 101.00, 99.00, 100.50, 0, 0",
+        "2000/06/02, 101.00, 102.00, 100.00, 101.50, 10, 0"
+    ) | Set-Content -LiteralPath $zeroVolumeDaily -Encoding ASCII
+
+    $zeroDailyMeta =
+        [SierraHistoryBridge.DailyBridge]::GetMeta(
+            $zeroVolumeDaily)
+
+    if ($zeroDailyMeta.ZeroVolumeRecords -ne 1 -or
+        $zeroDailyMeta.PositiveVolumeRecords -ne 1) {
+        throw "Historical Daily zero-volume metadata accounting failed."
+    }
+
+    Write-Host "PASS: Historical Daily zero-volume quality accounting"
 
 
     $dailyScaleSource =

@@ -336,3 +336,21 @@ The bridge minimizes everything around that requirement:
 SC Data source files are intentionally outside automatic storage cleanup. They
 are the authoritative source data and removing/compressing them would make them
 unavailable to Sierra Chart until restored.
+
+
+## Validation terminology
+
+`CROSS-FEED` is reserved for comparisons against independent Rithmic evidence,
+including an immutable Rithmic baseline captured before the bridge modified the
+target. A bridge-managed target can still be compared for consistency, but is
+reported as `MANAGED CONSISTENT` rather than independent corroboration.
+
+New source-only SCIDs which pass full structural validation are reported as
+`SOURCE VALID`; the absence of a second feed is stated explicitly.
+
+## Archive year resolution
+
+Two-digit SC Data contract years use a sliding century window. With a current
+year of 2026, `99` resolves to 1999 rather than 2099. This is required for
+1999-2026 source-history archive filtering and prevents early history from being
+misclassified as future data.

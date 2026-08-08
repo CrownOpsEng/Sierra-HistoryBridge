@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge contributors"
-$Version = "0.0.15"
+$Version = "0.0.16"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -136,7 +136,7 @@ function Get-ExistingInstallation {
         }
     }
 
-    # Development builds before v0.0.15 stored program files below the mutable
+    # Development builds before v0.0.16 stored program files below the mutable
     # application-data folder. Detect them so setup can migrate cleanly.
     $legacyApp = Join-Path $UserDataRoot "app"
     if (Test-Path -LiteralPath (Join-Path $legacyApp "SierraHistoryBridge.ps1")) {
@@ -361,6 +361,9 @@ function Copy-ApplicationPayload([string]$PayloadRoot, [string]$InstallDirectory
         "VERSION",
         "setup.cmd",
         "run.cmd",
+        "archive.cmd",
+        "restore.cmd",
+        "storage.cmd",
         "repair.cmd",
         "uninstall.cmd"
     )) {
@@ -404,6 +407,9 @@ function New-InstalledRepairPayload([string]$InstallDirectory) {
             "VERSION",
             "setup.cmd",
             "run.cmd",
+            "archive.cmd",
+            "restore.cmd",
+            "storage.cmd",
             "repair.cmd",
             "uninstall.cmd"
         )) {
@@ -573,6 +579,30 @@ function Install-StartMenuShortcuts(
         -IconLocation "$PowerShellExe,0"
 
     New-Shortcut `
+        -ShortcutPath (Join-Path $directory "Archive Historical Data.lnk") `
+        -TargetPath $PowerShellExe `
+        -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Archive -Interactive') `
+        -WorkingDirectory $InstallDirectory `
+        -Description "Compress selected SC Data source files for offline archival." `
+        -IconLocation "$env:SystemRoot\System32\shell32.dll,46"
+
+    New-Shortcut `
+        -ShortcutPath (Join-Path $directory "Restore Historical Data.lnk") `
+        -TargetPath $PowerShellExe `
+        -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Restore -Interactive') `
+        -WorkingDirectory $InstallDirectory `
+        -Description "Restore archived SC Data source files to Sierra Chart." `
+        -IconLocation "$env:SystemRoot\System32\shell32.dll,167"
+
+    New-Shortcut `
+        -ShortcutPath (Join-Path $directory "Storage Report.lnk") `
+        -TargetPath $PowerShellExe `
+        -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Storage -Interactive') `
+        -WorkingDirectory $InstallDirectory `
+        -Description "Show Sierra Chart Data logical, disk, archive, recovery, and free-space usage." `
+        -IconLocation "$env:SystemRoot\System32\shell32.dll,4"
+
+    New-Shortcut `
         -ShortcutPath (Join-Path $directory "Repair $ProductName.lnk") `
         -TargetPath $PowerShellExe `
         -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $setupScript + '" -Mode Repair -Scope ' + $InstallScope + ' -Interactive') `
@@ -739,6 +769,9 @@ function Invoke-InstallOrRepair(
             Write-Host
             Write-Host "Start Menu / All apps:"
             Write-Host "  $ProductName"
+            Write-Host "  Archive Historical Data"
+            Write-Host "  Restore Historical Data"
+            Write-Host "  Storage Report"
             Write-Host "  Repair $ProductName"
             Write-Host "  Uninstall $ProductName"
             Write-Host "  $ProductName Documentation"

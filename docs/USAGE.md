@@ -194,3 +194,37 @@ immutable compressed Rithmic baseline when the target has not previously
 been managed. Future comparisons read that `.gz` baseline directly without
 extracting it. The normal raw `.bak` file
 continues to hold the immediately previous target and may change on later runs.
+
+
+## Archive and restore commands
+
+Archiving is opt-in. It is separate from the normal update run.
+
+```text
+archive.cmd
+restore.cmd
+storage.cmd
+```
+
+The interactive archive defaults to contract months older than the current
+bridge window. The interactive restore defaults to the most recent archived
+contract month. Both tools can filter by contract date range or number of days.
+
+Examples from an installed directory:
+
+```text
+archive.cmd -ToDate 2015-12-31
+archive.cmd -Days 3650
+restore.cmd -FromDate 2015-01-01 -ToDate 2016-12-31
+restore.cmd -Days 3650
+storage.cmd
+```
+
+`-Days` refers to **contract-month age**, not the Windows file modification
+time. This is deliberate because a bulk historical download can give decades
+of files the same modification date.
+
+Archive/restore requires Sierra Chart to be closed. A source archive is removed
+after a verified restore, so the same source is not retained twice by default.
+Conflicting destination files require an explicit decision and are preserved
+before replacement when that option is chosen.

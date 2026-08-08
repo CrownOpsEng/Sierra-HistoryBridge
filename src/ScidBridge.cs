@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Text;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 
 namespace SierraHistoryBridge
 {
@@ -88,6 +89,13 @@ namespace SierraHistoryBridge
     {
         public long OriginalBytes;
         public long ArchiveBytes;
+        public string Sha256;
+        public double ElapsedSeconds;
+    }
+
+    public sealed class GzipRestoreResult
+    {
+        public long RestoredBytes;
         public string Sha256;
         public double ElapsedSeconds;
     }
@@ -276,6 +284,185 @@ namespace SierraHistoryBridge
                     0);
 
                 return BytesToHex(sha.Hash);
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetCompressedFileSizeW(
+            string lpFileName,
+            out uint lpFileSizeHigh);
+
+        public static long GetFileAllocatedBytes(string path)
+        {
+            uint high;
+            uint low = GetCompressedFileSizeW(path, out high);
+
+            if (low == 0xFFFFFFFF)
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error != 0)
+                    return new FileInfo(path).Length;
+            }
+
+            return ((long)high << 32) | low;
+        }
+
+        public static string HashFileSha256(string path)
+        {
+            byte[] buffer = new byte[8 * 1024 * 1024];
+
+            using (var input = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var sha = SHA256.Create())
+            {
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    sha.TransformBlock(buffer, 0, read, buffer, 0);
+                }
+
+                sha.TransformFinalBlock(new byte[0], 0, 0);
+                return BytesToHex(sha.Hash);
+            }
+        }
+
+        public static GzipRestoreResult RestoreFileGzipVerified(
+            string archivePath,
+            string destinationPath,
+            long expectedBytes,
+            string expectedSha256,
+            long originalWriteTicks,
+            bool validateScid,
+            bool replaceExisting)
+        {
+            DateTime started = DateTime.UtcNow;
+            string temporaryPath = destinationPath + ".restore.tmp";
+
+            try
+            {
+                if (!File.Exists(archivePath))
+                    throw new FileNotFoundException("Archive was not found.", archivePath);
+
+                string destinationDirectory = Path.GetDirectoryName(destinationPath);
+                if (!String.IsNullOrEmpty(destinationDirectory))
+                    Directory.CreateDirectory(destinationDirectory);
+
+                if (File.Exists(temporaryPath))
+                    File.Delete(temporaryPath);
+
+                string root = Path.GetPathRoot(Path.GetFullPath(destinationPath));
+                if (!String.IsNullOrEmpty(root))
+                {
+                    var drive = new DriveInfo(root);
+                    long required = expectedBytes + (256L * 1024L * 1024L);
+                    if (drive.AvailableFreeSpace < required)
+                    {
+                        throw new IOException(
+                            "INSUFFICIENT_DISK_SPACE: restore requires " +
+                            required.ToString(CultureInfo.InvariantCulture) +
+                            " free bytes including reserve; " +
+                            drive.AvailableFreeSpace.ToString(CultureInfo.InvariantCulture) +
+                            " bytes are available.");
+                    }
+                }
+
+                byte[] buffer = new byte[8 * 1024 * 1024];
+                long restoredBytes = 0;
+                string restoredHash;
+
+                using (var input = new FileStream(
+                    archivePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    8 * 1024 * 1024,
+                    FileOptions.SequentialScan))
+                using (var gzip = new GZipStream(input, CompressionMode.Decompress))
+                using (var output = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    8 * 1024 * 1024,
+                    FileOptions.SequentialScan))
+                using (var sha = SHA256.Create())
+                {
+                    int read;
+                    while ((read = gzip.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        output.Write(buffer, 0, read);
+                        sha.TransformBlock(buffer, 0, read, buffer, 0);
+                        restoredBytes += read;
+                    }
+
+                    sha.TransformFinalBlock(new byte[0], 0, 0);
+                    output.Flush(true);
+                    restoredHash = BytesToHex(sha.Hash);
+                }
+
+                if (restoredBytes != expectedBytes ||
+                    !String.Equals(restoredHash, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException("Restored file did not match archive metadata.");
+                }
+
+                if (validateScid)
+                {
+                    ScidMeta meta = GetMeta(temporaryPath);
+                    if (meta.Length != expectedBytes)
+                        throw new IOException("Restored SCID length validation failed.");
+                }
+
+                if (File.Exists(destinationPath))
+                {
+                    if (!replaceExisting)
+                        throw new IOException("Restore destination already exists.");
+
+                    string oldPath = destinationPath + ".restore-old";
+                    if (File.Exists(oldPath))
+                        File.Delete(oldPath);
+
+                    File.Replace(temporaryPath, destinationPath, oldPath, true);
+                    if (File.Exists(oldPath))
+                        File.Delete(oldPath);
+                }
+                else
+                {
+                    File.Move(temporaryPath, destinationPath);
+                }
+
+                if (originalWriteTicks > 0)
+                {
+                    try
+                    {
+                        File.SetLastWriteTimeUtc(
+                            destinationPath,
+                            new DateTime(originalWriteTicks, DateTimeKind.Utc));
+                    }
+                    catch { }
+                }
+
+                return new GzipRestoreResult
+                {
+                    RestoredBytes = restoredBytes,
+                    Sha256 = restoredHash,
+                    ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
+                };
+            }
+            catch
+            {
+                try
+                {
+                    if (File.Exists(temporaryPath))
+                        File.Delete(temporaryPath);
+                }
+                catch { }
+                throw;
             }
         }
 
@@ -2750,6 +2937,9 @@ namespace SierraHistoryBridge
         public long FirstDateTicks;
         public long LastDateTicks;
         public long Length;
+        public long ZeroVolumeRecords;
+        public long PositiveVolumeRecords;
+        public long ZeroOpenInterestRecords;
     }
 
     public sealed class DailySyncResult
@@ -2895,13 +3085,30 @@ namespace SierraHistoryBridge
         public static DailyMeta GetMeta(string path)
         {
             List<DailyRecord> records = ReadRecords(path);
+            long zeroVolume = 0;
+            long positiveVolume = 0;
+            long zeroOpenInterest = 0;
+
+            for (int i = 0; i < records.Count; i++)
+            {
+                if (records[i].Volume == 0)
+                    zeroVolume++;
+                else if (records[i].Volume > 0)
+                    positiveVolume++;
+
+                if (records[i].OpenInterest == 0)
+                    zeroOpenInterest++;
+            }
 
             return new DailyMeta
             {
                 Records = records.Count,
                 FirstDateTicks = records.Count > 0 ? records[0].Date.Ticks : 0,
                 LastDateTicks = records.Count > 0 ? records[records.Count - 1].Date.Ticks : 0,
-                Length = new FileInfo(path).Length
+                Length = new FileInfo(path).Length,
+                ZeroVolumeRecords = zeroVolume,
+                PositiveVolumeRecords = positiveVolume,
+                ZeroOpenInterestRecords = zeroOpenInterest
             };
         }
 

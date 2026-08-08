@@ -1,5 +1,5 @@
 SIERRA HISTORY BRIDGE
-Version 0.0.15
+Version 0.0.16
 
 Updates Rithmic-named Sierra Chart history files from matching SC Data files.
 
@@ -58,3 +58,31 @@ not fit.
 
 SC Data source files are not automatically deleted or compressed because they
 are the authoritative originals and may still be used directly by Sierra Chart.
+
+
+ARCHIVE / RESTORE
+  SC Data source files are never archived automatically.
+
+  Archive Historical Data:
+    archive.cmd
+    Default: contracts older than the rolling Rithmic bridge window.
+    Filters: contract date range, contract age in days, or all.
+    Sierra Chart must be closed.
+
+  Restore Historical Data:
+    restore.cmd
+    Default: most recent archived contract.
+    Filters: contract date range, recent contract days, or all.
+    Sierra Chart must be closed.
+
+  Storage Report:
+    storage.cmd
+
+  Archives preserve the exact original filename plus .gz and are verified
+  before the source is deleted. Successful restore returns the exact filename
+  and removes the archive copy to avoid duplicate storage.
+
+EARLY NQ DAILY HISTORY
+  Zero-volume/missing-date records in the oldest SC Data are preserved as
+  supplied. Sierra History Bridge never invents volume to silence continuous-
+  contract warnings.

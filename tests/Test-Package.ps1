@@ -53,10 +53,12 @@ if ($appText -match '(?m)-and\s*\r?\n\s*Test-SierraChartRunning\)') {
 
 
 foreach ($requiredPolicyToken in @(
-    '$usableHistoryYears = 5',
-    '$historyBufferMonths = 3',
-    '$forwardBufferMonths = 6',
-    'source-only',
+    'function Get-BridgeWindow',
+    '$currentMonth.AddYears(-5).AddMonths(-3)',
+    '$currentMonth.AddMonths(6)',
+    'function Test-ContractInRithmicWindow',
+    'older source',
+    'future source',
     'outside rolling Rithmic history window'
 )) {
     if ($appText -notlike "*$requiredPolicyToken*") {
@@ -225,6 +227,33 @@ if ($appText -match '(?m)^\s*\$currentMonth\.\s*$') {
     throw "Windows PowerShell 5.1 regression: multiline member chaining was reintroduced."
 }
 
+
+foreach ($archiveManagerToken in @(
+    'Resolve-FullContractYear',
+    'Invoke-SourceArchiveManager',
+    'Invoke-SourceRestoreManager',
+    'Invoke-StorageReport',
+    'Show-StorageDelta',
+    'SOURCE CHANGE:',
+    'CROSS-FEED',
+    'MANAGED CONSISTENT',
+    'Daily source quality:'
+)) {
+    if ($appText -notlike "*$archiveManagerToken*") {
+        throw "Archive/restore regression: missing $archiveManagerToken"
+    }
+}
+
+foreach ($archiveEngineToken in @(
+    'GetFileAllocatedBytes',
+    'RestoreFileGzipVerified',
+    'HashFileSha256'
+)) {
+    if ($converterText -notlike "*$archiveEngineToken*") {
+        throw "Archive/restore engine regression: missing $archiveEngineToken"
+    }
+}
+
 if ($appText -notmatch 'Group-Object\s+TargetName') {
     throw "Rithmic alias regression: eligible contracts are not grouped by target filename."
 }
@@ -232,6 +261,7 @@ if ($appText -notmatch 'Group-Object\s+TargetName') {
 if ($converterText -notmatch 'Path\.GetFileName\(sourcePath\)\s*\+\s*"__"\s*\+\s*Path\.GetFileName\(targetPath\)') {
     throw "Baseline naming regression: raw baseline does not include both source and target names."
 }
+
 
 if ($appText -match '(?ms)(?<!\$)\(\s*(if|foreach|for|switch|try|while|do)\b') {
     throw "PowerShell syntax regression: a statement block is being used directly inside parenthesized expression syntax."
@@ -244,6 +274,9 @@ $required = @(
     "scripts\Build-Release.ps1",
     "setup.cmd",
     "run.cmd",
+    "archive.cmd",
+    "restore.cmd",
+    "storage.cmd",
     "repair.cmd",
     "uninstall.cmd",
     "README.md",
@@ -300,6 +333,9 @@ try {
         "README.md",
         "README.txt",
         "setup.cmd",
+        "archive.cmd",
+        "restore.cmd",
+        "storage.cmd",
         "repair.cmd",
         "uninstall.cmd"
     )) {

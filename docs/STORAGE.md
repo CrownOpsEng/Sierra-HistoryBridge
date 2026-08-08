@@ -111,3 +111,25 @@ Storage cleanup never deletes an unverified unknown SCID file.
 
 If a file cannot be identified or an archive cannot be verified, the original
 is left untouched and a warning is reported.
+
+
+## Logical size versus disk usage
+
+Storage reporting includes both logical byte size and allocated/on-disk usage.
+On NTFS-compressed or sparse Sierra data, these can be very different. Archive,
+restore, update, and cleanup reports therefore show a before/delta/total view
+using allocated usage while retaining logical totals for reference.
+
+## User-managed SC Data archives
+
+Long-term SC Data remains online by default because Sierra Chart can use it
+directly. The bridge never archives those files merely because they are old.
+
+`archive.cmd` is an explicit space-management operation. It validates each
+selected `.scid`/`.dly`, writes a GZip archive, decompresses and hashes the
+archive for verification, and only then removes the original. `restore.cmd`
+performs the inverse operation with the same byte-count/SHA-256 checks and an
+atomic destination update.
+
+Archive filters are based on futures contract month rather than file
+modification time.

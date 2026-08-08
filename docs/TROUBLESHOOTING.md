@@ -89,10 +89,23 @@ You can also manually remove:
 
 ## Setup reports a C# compiler or assembly-reference error
 
-Use the current v0.0.15 package and rerun `setup.cmd`.
+Use the current v0.0.16 package and rerun `setup.cmd`.
 
 The installed SCID engine is compiled with the stock Windows PowerShell 5.1
 `Add-Type -Path` behavior. The converter does not require custom compiler
 parameters, unsafe compilation, LINQ, or optional framework references.
 
 If a compiler error still appears, attach `%LOCALAPPDATA%\SierraHistoryBridge\setup.log`.
+
+
+## Zero-volume warnings in very early NQ Daily history
+
+Do not edit these rows merely to remove Sierra Chart warnings. The bridge treats
+zero-volume Daily rows as source-data quality information and preserves the
+original file exactly.
+
+For continuous back-adjusted history reaching the beginning of E-mini
+Nasdaq-100 trading, Sierra Chart can report zero-volume or missing-date
+conditions because the required early Daily history is incomplete. Reducing the
+continuous chart's loaded history avoids using those dates, but keeping the
+full historical files is valid when the limitation is understood.

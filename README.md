@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.15 — pre-stable**
+**Version 0.0.16 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -100,10 +100,9 @@ converted to conflicting Rithmic filenames.
 Sierra Chart does not normally need to be closed for historical updates.
 
 The bridge distinguishes recent SCID targets from historical files. A SCID
-update is treated as live-sensitive when its source/target contains data from
-the last seven days or the target file was modified within the last ten
-minutes. The time window is a conservative safety check for weekends and
-exchange holidays.
+update is treated as live-sensitive when its source or target timestamps reach
+the recent-data window. File modification time alone does not make an old
+historical target live-sensitive.
 
 When Sierra Chart is running and a live-sensitive SCID update is required, the
 application offers:
@@ -171,7 +170,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.15 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.16 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -252,3 +251,64 @@ Rithmic filename as `<original-filename>.gz` beneath the two-digit SC contract
 directory, preventing one-digit-year collisions. Historical rolling backups
 are discarded after verification; live/temporary merges retain one compressed
 rollback.
+
+
+## Optional archive and restore
+
+SC Data history is never archived automatically. Keeping the two-digit SC Data
+files in the Sierra Chart `Data` folder keeps that history immediately usable
+by Sierra Chart.
+
+When disk space is needed, use **Archive Historical Data** from the Start Menu
+or run:
+
+```text
+archive.cmd
+```
+
+The default selection is contracts older than the bridge's rolling Rithmic
+window. Before changing anything, the archive tool shows the contract range,
+file count, logical size, and actual disk usage and asks for confirmation.
+Other selections can be made by contract date range, by contract age in days,
+or explicitly all source contracts.
+
+Archives are verified GZip files under:
+
+```text
+SCID_Bridge_Archive\SC_Data
+```
+
+The original Sierra filename is preserved as `<original-filename>.gz`. The
+source is removed only after the compressed archive decompresses to the exact
+same byte count and SHA-256 hash. Sierra Chart must be closed because archived
+source files disappear from its active `Data` folder.
+
+Use **Restore Historical Data** or:
+
+```text
+restore.cmd
+```
+
+to return archives to the exact original filenames. The default restores the
+most recent archived contract; date-range, recent-days, and all filters are
+also available. A successful restore removes the archive copy so the same data
+is not stored twice. If a different file already exists at the destination, it
+is never silently overwritten; interactive restore can preserve the existing
+file in a verified conflict archive before replacing it.
+
+Use **Storage Report** or `storage.cmd` at any time to show both logical file
+size and allocated/on-disk usage. This distinction matters on NTFS-compressed
+or sparse files, where Explorer can report a much larger `Size` than
+`Size on disk`.
+
+
+## Very early NQ Daily data
+
+The bridge preserves Historical Daily rows exactly, including zero-volume rows.
+It does not synthesize volume or settlement data.
+
+The earliest E-mini Nasdaq-100 Daily history can contain zero-volume records or
+missing contract dates. These conditions are reported as source-data quality
+notes rather than silently "repaired." They can limit volume-based or
+back-adjusted continuous-contract calculations at the beginning of the
+available history.

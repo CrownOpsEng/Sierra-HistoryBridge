@@ -1,10 +1,28 @@
 # Changelog
 
-## v0.0.15 - 2026-08-07
+## v0.0.16 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- scan output summarizes zero-volume and header-only Historical Daily source files as preserved source-quality notes
+
+- Historical Daily metadata records zero-volume quality information without synthesizing replacement data
+
+- two-digit contract years use sliding-century resolution so 99 maps to 1999 rather than 2099 in the current era
+
+- archive and restore are available through dedicated command files and Start Menu shortcuts
+
+- optional verified SC Data archive and restore modes support contract-date and contract-age filters
+
+- storage reports now show category totals together with before/delta/total allocated usage
+
+- missing previously-seen Daily sources are surfaced as SOURCE CHANGE without changing the surviving target
+
+- source-only SCIDs which pass structural validation are labeled SOURCE VALID rather than cross-feed validated
+
+- preflight output now distinguishes independent CROSS-FEED validation from MANAGED consistency checks
 
 - eligible-contract alias collision handling now groups by Rithmic target filename
 
@@ -97,6 +115,12 @@ Initial pre-stable release.
 - metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
+
+- package checks now reject statement blocks placed directly inside parenthesized expression syntax
+
+- setup syntax-validation failures now report the exact line and column
+
+- fixed the PowerShell parse error in initial SCID action selection
 
 - run.cmd now keeps nonzero startup failures visible
 
