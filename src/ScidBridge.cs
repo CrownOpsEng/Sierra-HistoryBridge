@@ -327,7 +327,10 @@ namespace SierraHistoryBridge
 
         public static void CompleteStatusLine(string line)
         {
-            line = FitStatusLine(line ?? String.Empty);
+            // Final result lines are never truncated: they contain exact record
+            // totals used for verification. A very narrow console may wrap the
+            // line, but no verification data is discarded.
+            line = line ?? String.Empty;
 
             if (Console.IsOutputRedirected)
             {

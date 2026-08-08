@@ -128,7 +128,7 @@ CONVERT -> FLUSHING -> VALIDATE -> REPLACE -> VERIFY
 The final line is retained as a compact result, for example:
 
 ```text
-[1/5] NQH26-CME -> NQH6.CME | OK | 30.84M rec | 1.15 GB | 13.8s
+[1/5] NQH26-CME -> NQH6.CME | OK | src=30,838,586 -> out=30,838,586 | 13.8s
 ```
 
 A timestamp anomaly is shown on the same final line as a warning. Full anomaly
@@ -136,3 +136,15 @@ details and per-stage timings remain in the run log.
 
 This keeps the console useful as a reviewable run report while still showing
 live progress during large conversions.
+
+
+Exact source, tail, and output record totals are retained on the final line for
+each file. When a newer Rithmic tail is preserved, the final line shows the
+arithmetic explicitly:
+
+```text
+src=34,259,267 + tail=1,240 -> out=34,260,507
+```
+
+Compact notation is used only for live progress where exact counts are not
+needed.

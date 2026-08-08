@@ -4,11 +4,15 @@ All notable changes to Sierra History Bridge are documented here.
 
 The project uses pre-stable semantic versioning while conversion behavior and supported service/symbol mappings are validated.
 
-## v0.0.5 - 2026-08-07
+## v0.0.6 - 2026-08-07
 
 Initial Git-tracked version.
 
 ### Application
+
+- final per-file result lines are never truncated, preserving exact verification counts even in narrow consoles
+
+- exact source, preserved-tail, and output record totals retained in each final console status line
 
 - conversion/flush/validation/replacement timings recorded in the detailed run log
 

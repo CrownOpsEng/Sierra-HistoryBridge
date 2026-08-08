@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.5"
+$Version = "0.0.6"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -642,16 +642,29 @@ function Invoke-SierraHistoryBridge {
                 minimum_target_last_datetime = [long]$targetMeta.LastDateTime
             }
 
+            if ($result.TailRecords -gt 0) {
+                $recordSummary =
+                    "src={0:N0} + tail={1:N0} -> out={2:N0}" -f
+                    $result.SourceRecords,
+                    $result.TailRecords,
+                    $result.OutputRecords
+            }
+            else {
+                $recordSummary =
+                    "src={0:N0} -> out={1:N0}" -f
+                    $result.SourceRecords,
+                    $result.OutputRecords
+            }
+
             $finalStatus =
-                "{0} | OK | {1} rec | {2} | {3:0.0}s" -f
+                "{0} | OK | {1} | {2:0.0}s" -f
                 $statusPrefix,
-                (Format-CompactCount $result.OutputRecords),
-                (Format-CompactSize $targetMeta.Length),
+                $recordSummary,
                 $result.ElapsedSeconds
 
             if ($result.OutOfOrderRecords -gt 0) {
                 $finalStatus +=
-                    " | WARN: {0} timestamp inversion(s)" -f
+                    " | WARN:{0}" -f
                     $result.OutOfOrderRecords
             }
 
