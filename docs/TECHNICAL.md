@@ -124,3 +124,24 @@ log.
 
 This policy avoids silently changing trade ordering while still allowing an
 otherwise usable SC Data file to be converted.
+
+
+## Processed-file state and target validation
+
+A source signature alone is not sufficient to skip a future conversion because
+the Rithmic target can be deleted, truncated, or recreated by Sierra Chart.
+
+After a successful conversion, state stores:
+
+- source signature
+- target path
+- minimum target record count
+- target first timestamp
+- minimum target last timestamp
+
+On the next run the target must still be a valid non-empty SCID file and satisfy
+those minimum metadata checks. Current-contract targets are allowed to grow as
+Rithmic appends live records.
+
+Older pre-release state entries that contain only a source signature are treated
+as unverifiable and are reprocessed once.

@@ -4,11 +4,17 @@ All notable changes to Sierra History Bridge are documented here.
 
 The project uses pre-stable semantic versioning while conversion behavior and supported service/symbol mappings are validated.
 
-## v0.0.3 - 2026-08-07
+## v0.0.4 - 2026-08-07
 
 Initial Git-tracked version.
 
 ### Application
+
+- stores minimum target record/timestamp metadata so deleted or recreated targets are automatically rebuilt
+
+- detects header-only Sierra/Rithmic placeholder files and labels them explicitly in the update plan
+
+- validates processed target files before treating a source as unchanged
 
 - verifies the replaced target record count after every successful conversion
 

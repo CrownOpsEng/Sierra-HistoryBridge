@@ -97,3 +97,20 @@ bridge prints a warning and records the details in the run log. Conversion
 continues and the original record sequence is preserved.
 
 The bridge does not sort or rewrite those source timestamps.
+
+
+## Deleted or recreated target files
+
+The bridge does not treat a file as valid merely because the filename exists.
+
+Sierra Chart can create a header-only `.scid` placeholder when a symbol is
+opened. The bridge identifies a zero-record target as a placeholder and shows:
+
+```text
+replace ... (header-only placeholder: 56 bytes, 0 records)
+```
+
+Processed-file state also stores minimum target metadata. If a converted target
+is deleted, truncated, or later recreated as a placeholder, the source is
+automatically placed back in the update plan even when the SC Data source file
+itself has not changed.

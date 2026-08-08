@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge contributors"
-$Version = "0.0.3"
+$Version = "0.0.4"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -136,7 +136,7 @@ function Get-ExistingInstallation {
         }
     }
 
-    # Development builds before v0.0.3 stored program files below the mutable
+    # Development builds before v0.0.4 stored program files below the mutable
     # application-data folder. Detect them so setup can migrate cleanly.
     $legacyApp = Join-Path $UserDataRoot "app"
     if (Test-Path -LiteralPath (Join-Path $legacyApp "SierraHistoryBridge.ps1")) {

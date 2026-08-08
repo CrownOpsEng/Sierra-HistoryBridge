@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.3"
+$Version = "0.0.4"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -186,11 +186,101 @@ function Get-StateTable($State) {
 
     if ($State.sources) {
         foreach ($property in $State.sources.PSObject.Properties) {
-            $table[$property.Name] = [string]$property.Value
+            $table[$property.Name] = $property.Value
         }
     }
 
     return $table
+}
+
+function Get-TargetStatus([string]$TargetPath) {
+    if (-not (Test-Path -LiteralPath $TargetPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            Exists = $false
+            Kind = "missing"
+            Records = 0
+            Length = 0
+            FirstDateTime = 0
+            LastDateTime = 0
+        }
+    }
+
+    try {
+        $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($TargetPath)
+
+        return [pscustomobject]@{
+            Exists = $true
+            Kind = $(if ($meta.Records -eq 0) { "placeholder" } else { "data" })
+            Records = [long]$meta.Records
+            Length = [long]$meta.Length
+            FirstDateTime = [long]$meta.FirstDateTime
+            LastDateTime = [long]$meta.LastDateTime
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Exists = $true
+            Kind = "invalid"
+            Records = 0
+            Length = [long](Get-Item -LiteralPath $TargetPath).Length
+            FirstDateTime = 0
+            LastDateTime = 0
+        }
+    }
+}
+
+function Test-ProcessedTargetStillValid(
+    $StateEntry,
+    [string]$SourceSignature,
+    $TargetStatus) {
+
+    # Older pre-release state stored only the source signature. It cannot prove
+    # that the target file still contains the converted output, so reprocess it.
+    if ($StateEntry -is [string]) {
+        return $false
+    }
+
+    if ($null -eq $StateEntry -or
+        -not $StateEntry.source_signature -or
+        [string]$StateEntry.source_signature -ne $SourceSignature) {
+        return $false
+    }
+
+    if (-not $TargetStatus.Exists -or
+        $TargetStatus.Kind -ne "data") {
+        return $false
+    }
+
+    try {
+        $minimumRecords = [long]$StateEntry.minimum_target_records
+        $expectedFirst = [long]$StateEntry.target_first_datetime
+        $minimumLast = [long]$StateEntry.minimum_target_last_datetime
+    }
+    catch {
+        return $false
+    }
+
+    if ($minimumRecords -le 0) {
+        return $false
+    }
+
+    # Current-contract Rithmic files can legitimately grow after conversion,
+    # so records/last timestamp are minimums rather than exact values.
+    if ($TargetStatus.Records -lt $minimumRecords) {
+        return $false
+    }
+
+    if ($expectedFirst -ne 0 -and
+        $TargetStatus.FirstDateTime -ne $expectedFirst) {
+        return $false
+    }
+
+    if ($minimumLast -ne 0 -and
+        $TargetStatus.LastDateTime -lt $minimumLast) {
+        return $false
+    }
+
+    return $true
 }
 
 function Convert-HashtableToObject([hashtable]$Table) {
@@ -353,15 +443,28 @@ function Invoke-SierraHistoryBridge {
         $signature =
             "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
 
+        $targetStatus = Get-TargetStatus $candidate.Target
+
+        $candidate |
+            Add-Member -NotePropertyName Signature -NotePropertyValue $signature
+
+        $candidate |
+            Add-Member -NotePropertyName TargetStatus -NotePropertyValue $targetStatus
+
+        $stateEntry =
+            if ($stateTable.ContainsKey($candidate.Source)) {
+                $stateTable[$candidate.Source]
+            }
+            else {
+                $null
+            }
+
         if (-not $Force -and
-            (Test-Path -LiteralPath $candidate.Target) -and
-            $stateTable.ContainsKey($candidate.Source) -and
-            [string]($stateTable[$candidate.Source]) -eq $signature) {
+            (Test-ProcessedTargetStillValid $stateEntry $signature $targetStatus)) {
             $unchanged++
             continue
         }
 
-        $candidate | Add-Member -NotePropertyName Signature -NotePropertyValue $signature
         $ready += $candidate
     }
 
@@ -373,18 +476,37 @@ function Invoke-SierraHistoryBridge {
     Write-Host
 
     foreach ($candidate in $ready) {
-        if (Test-Path -LiteralPath $candidate.Target) {
-            $action = "update"
+        $status = $candidate.TargetStatus
+
+        if (-not $status.Exists) {
+            $action = "create"
+            $detail = "target missing"
+        }
+        elseif ($status.Kind -eq "placeholder") {
+            $action = "replace"
+            $detail = "header-only placeholder: $($status.Length) bytes, 0 records"
+        }
+        elseif ($status.Kind -eq "invalid") {
+            $action = "replace"
+            $detail = "existing target is not a valid SCID file"
         }
         else {
-            $action = "create"
+            $action = "update"
+            $detail = "{0:N0} existing records, {1:N1} MB" -f
+                $status.Records,
+                ($status.Length / 1MB)
         }
 
         Write-Host (
-            "  {0,-6} {1} -> {2}" -f
+            "  {0,-7} {1} -> {2}" -f
             $action,
             $candidate.SourceName,
             $candidate.TargetName)
+
+        Write-Host (
+            "          Target: {0} ({1})" -f
+            $candidate.Target,
+            $detail)
     }
 
     if ($ready.Count -eq 0) {
@@ -482,7 +604,14 @@ function Invoke-SierraHistoryBridge {
             }
 
             $updated++
-            $stateTable[$candidate.Source] = $candidate.Signature
+
+            $stateTable[$candidate.Source] = [pscustomobject]@{
+                source_signature = $candidate.Signature
+                target_path = $candidate.Target
+                minimum_target_records = [long]$targetMeta.Records
+                target_first_datetime = [long]$targetMeta.FirstDateTime
+                minimum_target_last_datetime = [long]$targetMeta.LastDateTime
+            }
 
             Write-Host (
                 "      OK: {0:N0} SC records + {1:N0} newer Rithmic records; {2:N1} s" -f

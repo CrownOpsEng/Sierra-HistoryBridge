@@ -1,5 +1,5 @@
 SIERRA HISTORY BRIDGE
-Version 0.0.3 - experimental / pre-stable
+Version 0.0.4 - experimental / pre-stable
 
 WHAT IT DOES
 ============
