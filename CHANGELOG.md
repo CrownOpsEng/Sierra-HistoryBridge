@@ -1,16 +1,10 @@
 # Changelog
 
-## v0.0.23 - 2026-08-07
+## v0.0.24 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
-
-- legacy archive flattening never overwrites different existing data and prunes empty old group/year folders afterward
-
-- Archive, Restore, and Storage Report automatically flatten archives created by earlier nested-layout builds
-
-- SC Data archives are now stored flat directly under SCID_Bridge_Archive\SC_Data rather than split by market group and year
 
 - removed a duplicated stale temporary-file cleanup sweep left by an earlier storage patch
 
@@ -149,6 +143,12 @@ Initial pre-stable release.
 - metadata-checked retirement of bridge-managed Rithmic files
 
 ### Windows integration
+
+- cleanup output records the helper PID and that handle inheritance is disabled for easier diagnosis
+
+- unresolved empty-folder cleanup is persisted in pending-cleanup.json and retried automatically on the next utility run
+
+- deferred cleanup helper now launches through ProcessStartInfo with UseShellExecute=false so it does not inherit Explorer/parent context-menu handles
 
 - post-exit cleanup retains the same non-empty-directory and configured-base safety boundaries as immediate prune-on-delete
 

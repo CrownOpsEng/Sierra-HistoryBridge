@@ -282,11 +282,3 @@ cleanup-YYYYMMDD-HHMMSS.log
 
 The cleanup log is created only when an empty bridge-owned directory has to be
 retried after the main process exits.
-
-
-## Flat archive browsing and bulk restore
-
-All user-managed SC Data archives live directly in
-`SCID_Bridge_Archive\SC_Data`. Restore's existing date-range, recent-days, and
-all-archive filters operate across the entire flat collection, so archived
-history is not partitioned by year folders.

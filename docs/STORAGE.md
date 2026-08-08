@@ -245,12 +245,16 @@ Data/Archive/Recovery/Logs base boundary. Results are written to
 `SCID_Bridge_Logs\cleanup-*.log`.
 
 
-## SC Data archive layout
+## Deferred cleanup handle isolation
 
-`SC_Data` is intentionally flat, matching Sierra Chart's Data folder. The
-original filename already identifies root, contract month/year, exchange, and
-file type. Additional group/year directories add no useful identity and get in
-the way of bulk restore.
+The cleanup helper is launched with `.UseShellExecute = false` and
+`.CreateNoWindow = true`. This uses the normal process-creation path without
+inheriting the parent/context-menu handle set. That matters because a handle
+inherited from Explorer or the restore process can otherwise keep the exact
+directory the helper is trying to remove locked even after the visible process
+exits.
 
-Legacy nested archives are migrated automatically. A different archive already
-occupying the intended flat filename is never overwritten.
+If cleanup still fails after the isolated helper has retried for 30 seconds,
+the directory/root pair is saved in per-user `pending-cleanup.json`. Archive,
+Restore, and Storage retry pending cleanup automatically on the next run and
+queue another isolated post-exit retry if necessary.

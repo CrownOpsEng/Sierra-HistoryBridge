@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.23"
+$Version = "0.0.24"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -31,6 +31,10 @@ $script:DeferredCleanupDirectories = @()
 $script:CleanupDataFolder = $null
 $script:UtilityTranscriptActive = $false
 $script:UtilityLogPath = $null
+$script:PendingCleanupPath =
+    Join-Path `
+        $AppDataDirectory `
+        "pending-cleanup.json"
 
 function Show-Banner {
     Clear-Host
@@ -455,6 +459,130 @@ function Add-DeferredDirectoryCleanup(
     return $true
 }
 
+function Read-PendingDirectoryCleanup {
+    if (-not (
+        Test-Path `
+            -LiteralPath $script:PendingCleanupPath `
+            -PathType Leaf)) {
+
+        return @()
+    }
+
+    try {
+        return @(
+            Get-Content `
+                -LiteralPath $script:PendingCleanupPath `
+                -Raw |
+            ConvertFrom-Json
+        )
+    }
+    catch {
+        Write-Host (
+            "CLEANUP WARNING: pending cleanup state is invalid: " +
+            $_.Exception.Message) `
+            -ForegroundColor Yellow
+
+        return @()
+    }
+}
+
+function Write-PendingDirectoryCleanup($Items) {
+    $itemsArray =
+        @($Items)
+
+    if ($itemsArray.Count -eq 0) {
+        Remove-Item `
+            -LiteralPath $script:PendingCleanupPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+        return
+    }
+
+    $itemsArray |
+        ConvertTo-Json `
+            -Depth 4 |
+        Set-Content `
+            -LiteralPath $script:PendingCleanupPath `
+            -Encoding UTF8
+}
+
+function Invoke-PendingDirectoryCleanup(
+    [string]$DataFolder) {
+
+    $pending =
+        Read-PendingDirectoryCleanup
+
+    if ($pending.Count -eq 0) {
+        return 0
+    }
+
+    $remaining = @()
+    $removed = 0
+
+    foreach ($item in $pending) {
+        $directory =
+            [string]$item.Directory
+
+        $root =
+            [string]$item.ProtectedRoot
+
+        if ([string]::IsNullOrWhiteSpace($directory) -or
+            [string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+
+        try {
+            $removed +=
+                Remove-EmptyParentChain `
+                    $directory `
+                    $root
+
+            if (Test-Path `
+                -LiteralPath $directory `
+                -PathType Container) {
+
+                $remaining +=
+                    [pscustomobject]@{
+                        Directory = $directory
+                        ProtectedRoot = $root
+                    }
+            }
+        }
+        catch {
+            $remaining +=
+                [pscustomobject]@{
+                    Directory = $directory
+                    ProtectedRoot = $root
+                }
+        }
+    }
+
+    Write-PendingDirectoryCleanup `
+        $remaining
+
+    if ($removed -gt 0) {
+        Write-Host (
+            "Pending cleanup: removed {0} empty folder(s)." -f
+            $removed)
+    }
+
+    if ($remaining.Count -gt 0) {
+        Write-Host (
+            "Pending cleanup: {0} folder chain(s) still locked." -f
+            $remaining.Count) `
+            -ForegroundColor Yellow
+
+        foreach ($item in $remaining) {
+            [void](Add-DeferredDirectoryCleanup `
+                ([string]$item.Directory) `
+                ([string]$item.ProtectedRoot))
+        }
+    }
+
+    return $removed
+}
+
 function Start-DeferredDirectoryCleanupWorker {
     if ($script:DeferredCleanupDirectories.Count -eq 0 -or
         [string]::IsNullOrWhiteSpace(
@@ -497,6 +625,11 @@ function Start-DeferredDirectoryCleanupWorker {
             [Text.Encoding]::Unicode.GetBytes(
                 $logPath))
 
+    $pending64 =
+        [Convert]::ToBase64String(
+            [Text.Encoding]::Unicode.GetBytes(
+                $script:PendingCleanupPath))
+
     $parentPid =
         [int]$PID
 
@@ -506,6 +639,7 @@ $ErrorActionPreference = "Continue"
 $parentPid = __PARENT_PID__
 $payload64 = "__PAYLOAD64__"
 $log64 = "__LOG64__"
+$pending64 = "__PENDING64__"
 
 $payloadJson =
     [Text.Encoding]::Unicode.GetString(
@@ -517,6 +651,11 @@ $logPath =
         [Convert]::FromBase64String(
             $log64))
 
+$pendingPath =
+    [Text.Encoding]::Unicode.GetString(
+        [Convert]::FromBase64String(
+            $pending64))
+
 $items =
     @(
         $payloadJson |
@@ -524,6 +663,7 @@ $items =
     )
 
 $lines = @()
+$failedItems = @()
 $lines +=
     "Sierra History Bridge deferred cleanup"
 $lines +=
@@ -631,6 +771,13 @@ foreach ($item in $items) {
                 $current +
                 " | " +
                 $lastError
+
+            $failedItems +=
+                [pscustomobject]@{
+                    Directory = $current
+                    ProtectedRoot = $root
+                }
+
             break
         }
 
@@ -657,6 +804,35 @@ foreach ($item in $items) {
 $lines +=
     "Finished UTC: " +
     (Get-Date).ToUniversalTime().ToString("o")
+
+try {
+    if ($failedItems.Count -gt 0) {
+        $pendingDirectory =
+            Split-Path `
+                -Parent `
+                $pendingPath
+
+        New-Item `
+            -ItemType Directory `
+            -Path $pendingDirectory `
+            -Force |
+            Out-Null
+
+        $failedItems |
+            ConvertTo-Json `
+                -Depth 4 |
+            Set-Content `
+                -LiteralPath $pendingPath `
+                -Encoding UTF8
+    }
+    else {
+        Remove-Item `
+            -LiteralPath $pendingPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+}
+catch { }
 
 try {
     $directory =
@@ -693,6 +869,11 @@ catch { }
             "__LOG64__",
             $log64)
 
+    $worker =
+        $worker.Replace(
+            "__PENDING64__",
+            $pending64)
+
     $encoded =
         [Convert]::ToBase64String(
             [Text.Encoding]::Unicode.GetBytes(
@@ -703,21 +884,44 @@ catch { }
             $PSHOME `
             "powershell.exe"
 
-    Start-Process `
-        -FilePath $powershellExe `
-        -ArgumentList @(
-            "-NoLogo",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-EncodedCommand",
-            $encoded
-        ) `
-        -WorkingDirectory $script:CleanupDataFolder `
-        -WindowStyle Hidden |
-        Out-Null
+    $processInfo =
+        New-Object `
+            Diagnostics.ProcessStartInfo
+
+    $processInfo.FileName =
+        $powershellExe
+
+    $processInfo.Arguments =
+        '-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand "' +
+        $encoded +
+        '"'
+
+    $processInfo.WorkingDirectory =
+        $script:CleanupDataFolder
+
+    # UseShellExecute=false goes through CreateProcess rather than ShellExecute.
+    # With no redirected handles, .NET starts this helper without inheriting the
+    # selected-folder/context-menu handle set from Explorer or the parent.
+    $processInfo.UseShellExecute =
+        $false
+
+    $processInfo.CreateNoWindow =
+        $true
+
+    $processInfo.WindowStyle =
+        [Diagnostics.ProcessWindowStyle]::Hidden
+
+    $workerProcess =
+        [Diagnostics.Process]::Start(
+            $processInfo)
+
+    if ($null -eq $workerProcess) {
+        throw "Failed to start deferred cleanup helper."
+    }
+
+    Write-Host (
+        "Cleanup helper PID: {0} | handle inheritance disabled" -f
+        $workerProcess.Id)
 
     Write-Host
     Write-Host (
@@ -1492,17 +1696,23 @@ function Get-ScDataSourceFiles([string]$DataFolder) {
 }
 
 function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
+    $safeGroup =
+        ($SourceFile.Root + "-" + $SourceFile.Exchange) -replace '[^A-Za-z0-9_.-]', '_'
+
     $bridgePaths =
         Get-BridgePaths $DataFolder
 
     $directory =
         Join-Path `
-            $bridgePaths.Archive `
-            "SC_Data"
+            (Join-Path `
+                $bridgePaths.Archive `
+                "SC_Data") `
+            $safeGroup
 
-    return Join-Path `
-        $directory `
-        ($SourceFile.Name + ".gz")
+    $directory =
+        Join-Path $directory ([string]$SourceFile.FullYear)
+
+    return Join-Path $directory ($SourceFile.Name + ".gz")
 }
 
 function Select-ArchiveSourceFiles(
@@ -1588,16 +1798,6 @@ function Select-ArchiveSourceFiles(
 function Invoke-SourceArchiveManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
-
-    $layoutMigration =
-        Convert-LegacyScDataArchiveLayout `
-            $ResolvedDataFolder
-
-    if ($layoutMigration.Moved -gt 0) {
-        Write-Host (
-            "Archive layout: flattened {0} legacy archive file(s)." -f
-            $layoutMigration.Moved)
-    }
 
     Set-Location `
         -LiteralPath $ResolvedDataFolder
@@ -2280,154 +2480,6 @@ function Invoke-BridgeDirectoryHousekeeping(
 }
 
 
-function Convert-LegacyScDataArchiveLayout(
-    [string]$DataFolder) {
-
-    $bridgePaths =
-        Get-BridgePaths $DataFolder
-
-    $root =
-        Join-Path `
-            $bridgePaths.Archive `
-            "SC_Data"
-
-    if (-not (
-        Test-Path `
-            -LiteralPath $root `
-            -PathType Container)) {
-
-        return [pscustomobject]@{
-            Moved = 0
-            Conflicts = 0
-            EmptyDirectories = 0
-        }
-    }
-
-    $rootFull =
-        [IO.Path]::GetFullPath(
-            $root).TrimEnd('\')
-
-    $moved = 0
-    $conflicts = 0
-
-    $nestedArchives =
-        @(
-            Get-ChildItem `
-                -LiteralPath $rootFull `
-                -Recurse `
-                -File `
-                -Filter "*.gz" `
-                -ErrorAction SilentlyContinue |
-            Where-Object {
-                -not $_.DirectoryName.Equals(
-                    $rootFull,
-                    [StringComparison]::OrdinalIgnoreCase)
-            }
-        )
-
-    foreach ($archive in $nestedArchives) {
-        $destination =
-            Join-Path `
-                $rootFull `
-                $archive.Name
-
-        $sourceMeta =
-            $archive.FullName + ".meta"
-
-        $destinationMeta =
-            $destination + ".meta"
-
-        if (Test-Path `
-            -LiteralPath $destination `
-            -PathType Leaf) {
-
-            $same = $false
-
-            try {
-                $same =
-                    (Get-Item -LiteralPath $destination).Length -eq
-                        $archive.Length -and
-                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
-                        $destination) -eq
-                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
-                        $archive.FullName)
-            }
-            catch {
-                $same = $false
-            }
-
-            if (-not $same) {
-                $conflicts++
-                Write-Host (
-                    "  ARCHIVE LAYOUT WARNING: flat destination already exists with different data: " +
-                    $destination) `
-                    -ForegroundColor Yellow
-                continue
-            }
-
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $archive.FullName `
-                $DataFolder)
-
-            if (Test-Path `
-                -LiteralPath $sourceMeta `
-                -PathType Leaf) {
-
-                if (-not (
-                    Test-Path `
-                        -LiteralPath $destinationMeta `
-                        -PathType Leaf)) {
-
-                    Move-Item `
-                        -LiteralPath $sourceMeta `
-                        -Destination $destinationMeta `
-                        -Force
-                }
-                else {
-                    [void](Remove-BridgeOwnedFileAndPrune `
-                        $sourceMeta `
-                        $DataFolder)
-                }
-            }
-
-            $moved++
-            continue
-        }
-
-        Move-Item `
-            -LiteralPath $archive.FullName `
-            -Destination $destination `
-            -Force
-
-        if (Test-Path `
-            -LiteralPath $sourceMeta `
-            -PathType Leaf) {
-
-            Move-Item `
-                -LiteralPath $sourceMeta `
-                -Destination $destinationMeta `
-                -Force
-        }
-
-        $moved++
-
-        [void](Remove-EmptyParentChain `
-            $archive.DirectoryName `
-            $rootFull)
-    }
-
-    $emptyDirectories =
-        Remove-EmptyBridgeDirectories `
-            $rootFull `
-            -PreserveRoot
-
-    return [pscustomobject]@{
-        Moved = $moved
-        Conflicts = $conflicts
-        EmptyDirectories = $emptyDirectories
-    }
-}
-
 function Get-ArchivedSourceFiles([string]$DataFolder) {
     $bridgePaths =
         Get-BridgePaths $DataFolder
@@ -2575,16 +2627,6 @@ function Select-RestoreArchives(
 function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
-
-    $layoutMigration =
-        Convert-LegacyScDataArchiveLayout `
-            $ResolvedDataFolder
-
-    if ($layoutMigration.Moved -gt 0) {
-        Write-Host (
-            "Archive layout: flattened {0} legacy archive file(s)." -f
-            $layoutMigration.Moved)
-    }
 
     Set-Location `
         -LiteralPath $ResolvedDataFolder
@@ -3154,16 +3196,6 @@ function Invoke-VerifiedBaselineCleanup(
 }
 
 function Invoke-StorageReport([string]$ResolvedDataFolder) {
-    $layoutMigration =
-        Convert-LegacyScDataArchiveLayout `
-            $ResolvedDataFolder
-
-    if ($layoutMigration.Moved -gt 0) {
-        Write-Host (
-            "Archive layout: flattened {0} legacy archive file(s)." -f
-            $layoutMigration.Moved)
-    }
-
     $snapshot = Get-StorageSnapshot $ResolvedDataFolder
 
     Write-Host
@@ -7070,6 +7102,9 @@ function Invoke-SierraHistoryUtilityMode {
 
     $script:CleanupDataFolder =
         $resolvedDataFolder
+
+    [void](Invoke-PendingDirectoryCleanup `
+        $resolvedDataFolder)
 
     [void](Start-UtilityOperationLog `
         $Mode `

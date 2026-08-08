@@ -359,18 +359,20 @@ foreach ($deferredCleanupToken in @(
 }
 
 
-foreach ($flatArchiveToken in @(
-    'Convert-LegacyScDataArchiveLayout',
-    'Archive layout: flattened',
-    '($SourceFile.Name + ".gz")'
+foreach ($noInheritToken in @(
+    'UseShellExecute',
+    'CreateNoWindow',
+    'handle inheritance disabled',
+    'pending-cleanup.json',
+    'Invoke-PendingDirectoryCleanup'
 )) {
-    if ($appText -notlike "*$flatArchiveToken*") {
-        throw "Flat SC_Data archive regression: missing $flatArchiveToken"
+    if ($appText -notlike "*$noInheritToken*") {
+        throw "Deferred cleanup handle/persistence regression: missing $noInheritToken"
     }
 }
 
-if ($appText -match '\$safeGroup\s*=') {
-    throw "Flat SC_Data archive regression: group/year archive layout was reintroduced."
+if ($appText -match 'Start-Process\s+`\s*\r?\n\s*-FilePath \$powershellExe') {
+    throw "Deferred cleanup regression: helper launch reverted to Start-Process."
 }
 
 $required = @(

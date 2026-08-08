@@ -360,7 +360,7 @@ misclassified as future data.
 
 The old pre-release signature included `LastWriteTimeUtc`, which could cause a
 semantically unchanged Sierra source to be treated as dirty after Sierra or
-Windows touched the file. v0.0.23 now stores:
+Windows touched the file. v0.0.24 now stores:
 
 ```text
 v2 | byte length | first SCID timestamp | last SCID timestamp | sampled SHA-256
