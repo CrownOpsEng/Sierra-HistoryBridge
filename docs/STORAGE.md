@@ -243,3 +243,14 @@ launched process.
 The helper never removes non-empty directories and never crosses the configured
 Data/Archive/Recovery/Logs base boundary. Results are written to
 `SCID_Bridge_Logs\cleanup-*.log`.
+
+
+## SC Data archive layout
+
+`SC_Data` is intentionally flat, matching Sierra Chart's Data folder. The
+original filename already identifies root, contract month/year, exchange, and
+file type. Additional group/year directories add no useful identity and get in
+the way of bulk restore.
+
+Legacy nested archives are migrated automatically. A different archive already
+occupying the intended flat filename is never overwritten.

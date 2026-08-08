@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.22 — pre-stable**
+**Version 0.0.23 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -170,7 +170,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.22 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.23 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -331,7 +331,7 @@ Explorer commands are deliberately scoped rather than added to every folder:
 The bridge does not install a global blank-space/background command. Windows'
 static `Directory\Background` verbs cannot be reliably filtered by the current
 folder using `AppliesTo`; making that menu truly dynamic requires an in-process
-Shell extension. Avoiding that Explorer-loaded component keeps v0.0.22 simpler
+Shell extension. Avoiding that Explorer-loaded component keeps v0.0.23 simpler
 and reduces the risk of slowing or destabilizing File Explorer.
 
 Archive and restore now wait interactively when Sierra Chart is open. Close all
@@ -344,7 +344,7 @@ window after the process is gone.
 Normal runs do not use Windows file modification time as proof that an SCID
 source changed. SCID state now uses a stable structural/content fingerprint
 (length, first/last timestamps, and deterministic record samples). Existing
-v0.0.22 state which used modification time is migrated without rewriting files
+v0.0.23 state which used modification time is migrated without rewriting files
 when the structural source identity is unchanged.
 
 If saved provenance is stale or missing but the current Rithmic-named target
@@ -387,3 +387,29 @@ operation, the bridge queues that folder for a detached post-exit cleanup
 worker. The helper waits until the visible bridge process exits, retries the
 empty-folder removal for up to 30 seconds, and writes a `cleanup-*.log`
 recording what was removed or what remained locked.
+
+
+## Flat SC Data archive
+
+User-managed SC Data archives mirror Sierra Chart's flat market-data directory.
+All archived source files are stored directly under:
+
+```text
+SCID_Bridge_Archive\SC_Data
+```
+
+Examples:
+
+```text
+NQH00-CME.dly.gz
+NQZ14-CME.scid.gz
+NQM20-CME.scid.gz
+```
+
+There are no market-group or year subdirectories. The Sierra filename already
+contains the contract identity, and a flat layout makes bulk browsing and mass
+restore much easier.
+
+Archives created by older bridge builds under paths such as
+`SC_Data\NQ-CME\2000` are automatically moved into flat `SC_Data` the next time
+Archive, Restore, or Storage Report runs. Empty legacy folders are pruned.

@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.22"
+$Version = "0.0.23"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1492,23 +1492,17 @@ function Get-ScDataSourceFiles([string]$DataFolder) {
 }
 
 function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
-    $safeGroup =
-        ($SourceFile.Root + "-" + $SourceFile.Exchange) -replace '[^A-Za-z0-9_.-]', '_'
-
     $bridgePaths =
         Get-BridgePaths $DataFolder
 
     $directory =
         Join-Path `
-            (Join-Path `
-                $bridgePaths.Archive `
-                "SC_Data") `
-            $safeGroup
+            $bridgePaths.Archive `
+            "SC_Data"
 
-    $directory =
-        Join-Path $directory ([string]$SourceFile.FullYear)
-
-    return Join-Path $directory ($SourceFile.Name + ".gz")
+    return Join-Path `
+        $directory `
+        ($SourceFile.Name + ".gz")
 }
 
 function Select-ArchiveSourceFiles(
@@ -1594,6 +1588,16 @@ function Select-ArchiveSourceFiles(
 function Invoke-SourceArchiveManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
+
+    $layoutMigration =
+        Convert-LegacyScDataArchiveLayout `
+            $ResolvedDataFolder
+
+    if ($layoutMigration.Moved -gt 0) {
+        Write-Host (
+            "Archive layout: flattened {0} legacy archive file(s)." -f
+            $layoutMigration.Moved)
+    }
 
     Set-Location `
         -LiteralPath $ResolvedDataFolder
@@ -2276,6 +2280,154 @@ function Invoke-BridgeDirectoryHousekeeping(
 }
 
 
+function Convert-LegacyScDataArchiveLayout(
+    [string]$DataFolder) {
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $root =
+        Join-Path `
+            $bridgePaths.Archive `
+            "SC_Data"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $root `
+            -PathType Container)) {
+
+        return [pscustomobject]@{
+            Moved = 0
+            Conflicts = 0
+            EmptyDirectories = 0
+        }
+    }
+
+    $rootFull =
+        [IO.Path]::GetFullPath(
+            $root).TrimEnd('\')
+
+    $moved = 0
+    $conflicts = 0
+
+    $nestedArchives =
+        @(
+            Get-ChildItem `
+                -LiteralPath $rootFull `
+                -Recurse `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not $_.DirectoryName.Equals(
+                    $rootFull,
+                    [StringComparison]::OrdinalIgnoreCase)
+            }
+        )
+
+    foreach ($archive in $nestedArchives) {
+        $destination =
+            Join-Path `
+                $rootFull `
+                $archive.Name
+
+        $sourceMeta =
+            $archive.FullName + ".meta"
+
+        $destinationMeta =
+            $destination + ".meta"
+
+        if (Test-Path `
+            -LiteralPath $destination `
+            -PathType Leaf) {
+
+            $same = $false
+
+            try {
+                $same =
+                    (Get-Item -LiteralPath $destination).Length -eq
+                        $archive.Length -and
+                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                        $destination) -eq
+                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                        $archive.FullName)
+            }
+            catch {
+                $same = $false
+            }
+
+            if (-not $same) {
+                $conflicts++
+                Write-Host (
+                    "  ARCHIVE LAYOUT WARNING: flat destination already exists with different data: " +
+                    $destination) `
+                    -ForegroundColor Yellow
+                continue
+            }
+
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $archive.FullName `
+                $DataFolder)
+
+            if (Test-Path `
+                -LiteralPath $sourceMeta `
+                -PathType Leaf) {
+
+                if (-not (
+                    Test-Path `
+                        -LiteralPath $destinationMeta `
+                        -PathType Leaf)) {
+
+                    Move-Item `
+                        -LiteralPath $sourceMeta `
+                        -Destination $destinationMeta `
+                        -Force
+                }
+                else {
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $sourceMeta `
+                        $DataFolder)
+                }
+            }
+
+            $moved++
+            continue
+        }
+
+        Move-Item `
+            -LiteralPath $archive.FullName `
+            -Destination $destination `
+            -Force
+
+        if (Test-Path `
+            -LiteralPath $sourceMeta `
+            -PathType Leaf) {
+
+            Move-Item `
+                -LiteralPath $sourceMeta `
+                -Destination $destinationMeta `
+                -Force
+        }
+
+        $moved++
+
+        [void](Remove-EmptyParentChain `
+            $archive.DirectoryName `
+            $rootFull)
+    }
+
+    $emptyDirectories =
+        Remove-EmptyBridgeDirectories `
+            $rootFull `
+            -PreserveRoot
+
+    return [pscustomobject]@{
+        Moved = $moved
+        Conflicts = $conflicts
+        EmptyDirectories = $emptyDirectories
+    }
+}
+
 function Get-ArchivedSourceFiles([string]$DataFolder) {
     $bridgePaths =
         Get-BridgePaths $DataFolder
@@ -2423,6 +2575,16 @@ function Select-RestoreArchives(
 function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
+
+    $layoutMigration =
+        Convert-LegacyScDataArchiveLayout `
+            $ResolvedDataFolder
+
+    if ($layoutMigration.Moved -gt 0) {
+        Write-Host (
+            "Archive layout: flattened {0} legacy archive file(s)." -f
+            $layoutMigration.Moved)
+    }
 
     Set-Location `
         -LiteralPath $ResolvedDataFolder
@@ -2992,6 +3154,16 @@ function Invoke-VerifiedBaselineCleanup(
 }
 
 function Invoke-StorageReport([string]$ResolvedDataFolder) {
+    $layoutMigration =
+        Convert-LegacyScDataArchiveLayout `
+            $ResolvedDataFolder
+
+    if ($layoutMigration.Moved -gt 0) {
+        Write-Host (
+            "Archive layout: flattened {0} legacy archive file(s)." -f
+            $layoutMigration.Moved)
+    }
+
     $snapshot = Get-StorageSnapshot $ResolvedDataFolder
 
     Write-Host

@@ -358,6 +358,21 @@ foreach ($deferredCleanupToken in @(
     }
 }
 
+
+foreach ($flatArchiveToken in @(
+    'Convert-LegacyScDataArchiveLayout',
+    'Archive layout: flattened',
+    '($SourceFile.Name + ".gz")'
+)) {
+    if ($appText -notlike "*$flatArchiveToken*") {
+        throw "Flat SC_Data archive regression: missing $flatArchiveToken"
+    }
+}
+
+if ($appText -match '\$safeGroup\s*=') {
+    throw "Flat SC_Data archive regression: group/year archive layout was reintroduced."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

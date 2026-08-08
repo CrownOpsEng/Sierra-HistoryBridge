@@ -1,10 +1,16 @@
 # Changelog
 
-## v0.0.22 - 2026-08-07
+## v0.0.23 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
+
+- legacy archive flattening never overwrites different existing data and prunes empty old group/year folders afterward
+
+- Archive, Restore, and Storage Report automatically flatten archives created by earlier nested-layout builds
+
+- SC Data archives are now stored flat directly under SCID_Bridge_Archive\SC_Data rather than split by market group and year
 
 - removed a duplicated stale temporary-file cleanup sweep left by an earlier storage patch
 
