@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Globalization;
 using System.Text;
+using System.IO.Compression;
+using System.Security.Cryptography;
 
 namespace SierraHistoryBridge
 {
@@ -79,6 +81,14 @@ namespace SierraHistoryBridge
         public double AggregateVolumeDifferencePercent;
         public double SourceRichPercent;
         public double TargetRichPercent;
+        public double ElapsedSeconds;
+    }
+
+    public sealed class GzipArchiveResult
+    {
+        public long OriginalBytes;
+        public long ArchiveBytes;
+        public string Sha256;
         public double ElapsedSeconds;
     }
 
@@ -169,6 +179,681 @@ namespace SierraHistoryBridge
                 if (read <= 0)
                     throw new EndOfStreamException();
                 offset += read;
+            }
+        }
+
+        private static void ReadExact(Stream stream, byte[] buffer, int count)
+        {
+            int offset = 0;
+            while (offset < count)
+            {
+                int read = stream.Read(buffer, offset, count - offset);
+                if (read <= 0)
+                    throw new EndOfStreamException();
+                offset += read;
+            }
+        }
+
+        private static void ValidateSequentialHeader(
+            Stream stream,
+            long uncompressedLength,
+            string label)
+        {
+            if (uncompressedLength < HeaderSize)
+                throw new IOException(
+                    Path.GetFileName(label) +
+                    ": archived file is too small to be SCID data.");
+
+            if ((uncompressedLength - HeaderSize) % RecordSize != 0)
+                throw new IOException(
+                    Path.GetFileName(label) +
+                    ": archived file length is not aligned to SCID records.");
+
+            byte[] header = new byte[HeaderSize];
+            ReadExact(stream, header, HeaderSize);
+
+            if (header[0] != (byte)'S' || header[1] != (byte)'C' ||
+                header[2] != (byte)'I' || header[3] != (byte)'D')
+                throw new IOException(
+                    Path.GetFileName(label) +
+                    ": SCID header was not found in archive.");
+
+            int headerSize = BitConverter.ToInt32(header, 4);
+            int recordSize = BitConverter.ToInt32(header, 8);
+
+            if (headerSize != HeaderSize || recordSize != RecordSize)
+                throw new IOException(
+                    Path.GetFileName(label) +
+                    ": unsupported archived SCID layout.");
+        }
+
+        private static string BytesToHex(byte[] bytes)
+        {
+            var builder = new StringBuilder(bytes.Length * 2);
+
+            for (int i = 0; i < bytes.Length; i++)
+                builder.Append(bytes[i].ToString("x2"));
+
+            return builder.ToString();
+        }
+
+        private static string HashDecompressedGzip(
+            string archivePath,
+            out long uncompressedBytes)
+        {
+            uncompressedBytes = 0;
+            byte[] buffer = new byte[8 * 1024 * 1024];
+
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            using (var sha = SHA256.Create())
+            {
+                int read;
+
+                while ((read = gzip.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    sha.TransformBlock(
+                        buffer,
+                        0,
+                        read,
+                        buffer,
+                        0);
+
+                    uncompressedBytes += read;
+                }
+
+                sha.TransformFinalBlock(
+                    new byte[0],
+                    0,
+                    0);
+
+                return BytesToHex(sha.Hash);
+            }
+        }
+
+        public static GzipArchiveResult ArchiveFileGzipVerified(
+            string sourcePath,
+            string archivePath,
+            bool deleteSource,
+            bool replaceExisting)
+        {
+            try
+            {
+                DateTime started =
+                    DateTime.UtcNow;
+
+                var sourceInfo =
+                    new FileInfo(sourcePath);
+
+                long sourceLength =
+                    sourceInfo.Length;
+
+                DateTime sourceWriteTime =
+                    sourceInfo.LastWriteTimeUtc;
+
+                string archiveDirectory =
+                    Path.GetDirectoryName(
+                        archivePath);
+
+                if (!String.IsNullOrEmpty(
+                    archiveDirectory))
+                    Directory.CreateDirectory(
+                        archiveDirectory);
+
+                string temporaryPath =
+                    archivePath + ".tmp";
+
+                if (File.Exists(temporaryPath))
+                    File.Delete(temporaryPath);
+
+                byte[] buffer =
+                    new byte[1024 * 1024];
+
+                string sourceHash;
+
+                using (var source =
+                    new FileStream(
+                        sourcePath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        1024 * 1024,
+                        FileOptions.SequentialScan))
+                using (var output =
+                    new FileStream(
+                        temporaryPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        1024 * 1024,
+                        FileOptions.SequentialScan))
+                using (var sha =
+                    SHA256.Create())
+                {
+                    using (var gzip =
+                        new GZipStream(
+                            output,
+                            CompressionMode.Compress,
+                            true))
+                    {
+                        int read;
+
+                        while ((read =
+                            source.Read(
+                                buffer,
+                                0,
+                                buffer.Length)) > 0)
+                        {
+                            sha.TransformBlock(
+                                buffer,
+                                0,
+                                read,
+                                buffer,
+                                0);
+
+                            gzip.Write(
+                                buffer,
+                                0,
+                                read);
+                        }
+
+                        sha.TransformFinalBlock(
+                            new byte[0],
+                            0,
+                            0);
+                    }
+
+                    output.Flush(true);
+                    sourceHash =
+                        BytesToHex(sha.Hash);
+                }
+
+                var sourceInfoAfter =
+                    new FileInfo(sourcePath);
+
+                if (sourceInfoAfter.Length !=
+                        sourceLength ||
+                    sourceInfoAfter.LastWriteTimeUtc !=
+                        sourceWriteTime)
+                {
+                    File.Delete(temporaryPath);
+
+                    throw new IOException(
+                        "Archive source changed while it was being compressed.");
+                }
+
+                long verifiedBytes;
+                string verifiedHash =
+                    HashDecompressedGzip(
+                        temporaryPath,
+                        out verifiedBytes);
+
+                if (verifiedBytes !=
+                        sourceLength ||
+                    !String.Equals(
+                        sourceHash,
+                        verifiedHash,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(temporaryPath);
+
+                    throw new IOException(
+                        "Compressed archive verification failed.");
+                }
+
+                if (File.Exists(archivePath))
+                {
+                    if (!replaceExisting)
+                    {
+                        long existingBytes;
+                        string existingHash =
+                            HashDecompressedGzip(
+                                archivePath,
+                                out existingBytes);
+
+                        if (existingBytes !=
+                                sourceLength ||
+                            !String.Equals(
+                                existingHash,
+                                sourceHash,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            File.Delete(
+                                temporaryPath);
+
+                            throw new IOException(
+                                "An existing archive contains different data.");
+                        }
+
+                        File.Delete(
+                            temporaryPath);
+                    }
+                    else
+                    {
+                        string oldArchive =
+                            archivePath +
+                            ".old";
+
+                        if (File.Exists(
+                            oldArchive))
+                            File.Delete(
+                                oldArchive);
+
+                        File.Replace(
+                            temporaryPath,
+                            archivePath,
+                            oldArchive,
+                            true);
+
+                        if (File.Exists(
+                            oldArchive))
+                            File.Delete(
+                                oldArchive);
+                    }
+                }
+                else
+                {
+                    File.Move(
+                        temporaryPath,
+                        archivePath);
+                }
+
+                string metadataPath =
+                    archivePath + ".meta";
+
+                string metadataTemporary =
+                    metadataPath + ".tmp";
+
+                if (File.Exists(
+                    metadataTemporary))
+                    File.Delete(
+                        metadataTemporary);
+
+                string originalName =
+                    archivePath.EndsWith(
+                        ".gz",
+                        StringComparison.OrdinalIgnoreCase)
+                    ? Path.GetFileName(
+                        archivePath.Substring(
+                            0,
+                            archivePath.Length - 3))
+                    : Path.GetFileName(
+                        sourcePath);
+
+                File.WriteAllLines(
+                    metadataTemporary,
+                    new string[]
+                    {
+                        "version=1",
+                        "original_name=" +
+                            originalName,
+                        "original_bytes=" +
+                            sourceLength.ToString(
+                                CultureInfo.InvariantCulture),
+                        "original_write_ticks=" +
+                            sourceWriteTime.Ticks.ToString(
+                                CultureInfo.InvariantCulture),
+                        "sha256=" +
+                            sourceHash
+                    },
+                    new UTF8Encoding(false));
+
+                if (File.Exists(metadataPath))
+                {
+                    string oldMetadata =
+                        metadataPath +
+                        ".old";
+
+                    if (File.Exists(
+                        oldMetadata))
+                        File.Delete(
+                            oldMetadata);
+
+                    File.Replace(
+                        metadataTemporary,
+                        metadataPath,
+                        oldMetadata,
+                        true);
+
+                    if (File.Exists(
+                        oldMetadata))
+                        File.Delete(
+                            oldMetadata);
+                }
+                else
+                {
+                    File.Move(
+                        metadataTemporary,
+                        metadataPath);
+                }
+
+                if (deleteSource)
+                    File.Delete(
+                        sourcePath);
+
+                return new GzipArchiveResult
+                {
+                    OriginalBytes =
+                        sourceLength,
+                    ArchiveBytes =
+                        new FileInfo(
+                            archivePath).Length,
+                    Sha256 =
+                        sourceHash,
+                    ElapsedSeconds =
+                        (DateTime.UtcNow -
+                            started).TotalSeconds
+                };
+            }
+            catch
+            {
+                string failedArchiveTemporary =
+                    archivePath + ".tmp";
+
+                string failedMetadataTemporary =
+                    archivePath +
+                    ".meta.tmp";
+
+                try
+                {
+                    if (File.Exists(
+                        failedArchiveTemporary))
+                        File.Delete(
+                            failedArchiveTemporary);
+                }
+                catch { }
+
+                try
+                {
+                    if (File.Exists(
+                        failedMetadataTemporary))
+                        File.Delete(
+                            failedMetadataTemporary);
+                }
+                catch { }
+
+                throw;
+            }
+        }
+
+        public static GzipArchiveResult ArchiveScidGzipVerified(
+            string sourcePath,
+            string archivePath,
+            bool deleteSource,
+            bool replaceExisting)
+        {
+            try
+            {
+
+                DateTime started = DateTime.UtcNow;
+
+                ScidMeta sourceMeta = GetMeta(sourcePath);
+                DateTime originalWriteTime =
+                    File.GetLastWriteTimeUtc(sourcePath);
+
+                string archiveDirectory =
+                    Path.GetDirectoryName(archivePath);
+
+                if (!String.IsNullOrEmpty(archiveDirectory))
+                    Directory.CreateDirectory(archiveDirectory);
+
+                string temporaryPath =
+                    archivePath + ".tmp";
+
+                if (File.Exists(temporaryPath))
+                    File.Delete(temporaryPath);
+
+                byte[] buffer = new byte[8 * 1024 * 1024];
+                string sourceHash;
+
+                using (var source = new FileStream(
+                    sourcePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite,
+                    8 * 1024 * 1024,
+                    FileOptions.SequentialScan))
+                using (var output = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    8 * 1024 * 1024,
+                    FileOptions.SequentialScan))
+                using (var sha = SHA256.Create())
+                {
+                    using (var gzip = new GZipStream(
+                        output,
+                        CompressionMode.Compress,
+                        true))
+                    {
+                        int read;
+
+                        while ((read = source.Read(
+                            buffer,
+                            0,
+                            buffer.Length)) > 0)
+                        {
+                            sha.TransformBlock(
+                                buffer,
+                                0,
+                                read,
+                                buffer,
+                                0);
+
+                            gzip.Write(
+                                buffer,
+                                0,
+                                read);
+                        }
+
+                        sha.TransformFinalBlock(
+                            new byte[0],
+                            0,
+                            0);
+                    }
+
+                    output.Flush(true);
+                    sourceHash = BytesToHex(sha.Hash);
+                }
+
+                ScidMeta sourceMetaAfter =
+                    GetMeta(sourcePath);
+
+                DateTime originalWriteTimeAfter =
+                    File.GetLastWriteTimeUtc(sourcePath);
+
+                if (sourceMetaAfter.Length != sourceMeta.Length ||
+                    sourceMetaAfter.Records != sourceMeta.Records ||
+                    sourceMetaAfter.FirstDateTime != sourceMeta.FirstDateTime ||
+                    sourceMetaAfter.LastDateTime != sourceMeta.LastDateTime ||
+                    originalWriteTimeAfter != originalWriteTime)
+                {
+                    File.Delete(temporaryPath);
+
+                    throw new IOException(
+                        "Archive source changed while it was being compressed.");
+                }
+
+                long verifiedBytes;
+                string verifiedHash =
+                    HashDecompressedGzip(
+                        temporaryPath,
+                        out verifiedBytes);
+
+                if (verifiedBytes != sourceMeta.Length ||
+                    !String.Equals(
+                        sourceHash,
+                        verifiedHash,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(temporaryPath);
+
+                    throw new IOException(
+                        "Compressed archive verification failed.");
+                }
+
+                if (File.Exists(archivePath))
+                {
+                    if (!replaceExisting)
+                    {
+                        long existingBytes;
+                        string existingHash =
+                            HashDecompressedGzip(
+                                archivePath,
+                                out existingBytes);
+
+                        if (existingBytes != sourceMeta.Length ||
+                            !String.Equals(
+                                existingHash,
+                                sourceHash,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            File.Delete(temporaryPath);
+
+                            throw new IOException(
+                                "An existing archive contains different data.");
+                        }
+
+                        File.Delete(temporaryPath);
+                    }
+                    else
+                    {
+                        string oldArchive =
+                            archivePath + ".old";
+
+                        if (File.Exists(oldArchive))
+                            File.Delete(oldArchive);
+
+                        File.Replace(
+                            temporaryPath,
+                            archivePath,
+                            oldArchive,
+                            true);
+
+                        if (File.Exists(oldArchive))
+                            File.Delete(oldArchive);
+                    }
+                }
+                else
+                {
+                    File.Move(
+                        temporaryPath,
+                        archivePath);
+                }
+
+                string metadataPath =
+                    archivePath + ".meta";
+
+                string metadataTemporary =
+                    metadataPath + ".tmp";
+
+                if (File.Exists(metadataTemporary))
+                    File.Delete(metadataTemporary);
+
+                File.WriteAllLines(
+                    metadataTemporary,
+                    new string[]
+                    {
+                        "version=1",
+                        "original_name=" +
+                            (
+                                archivePath.EndsWith(
+                                    ".gz",
+                                    StringComparison.OrdinalIgnoreCase)
+                                ? Path.GetFileName(
+                                    archivePath.Substring(
+                                        0,
+                                        archivePath.Length - 3))
+                                : Path.GetFileName(sourcePath)
+                            ),
+                        "original_bytes=" +
+                            sourceMeta.Length.ToString(
+                                CultureInfo.InvariantCulture),
+                        "records=" +
+                            sourceMeta.Records.ToString(
+                                CultureInfo.InvariantCulture),
+                        "first_datetime=" +
+                            sourceMeta.FirstDateTime.ToString(
+                                CultureInfo.InvariantCulture),
+                        "last_datetime=" +
+                            sourceMeta.LastDateTime.ToString(
+                                CultureInfo.InvariantCulture),
+                        "original_write_ticks=" +
+                            originalWriteTime.Ticks.ToString(
+                                CultureInfo.InvariantCulture),
+                        "sha256=" + sourceHash
+                    },
+                    new UTF8Encoding(false));
+
+                if (File.Exists(metadataPath))
+                {
+                    string oldMetadata =
+                        metadataPath + ".old";
+
+                    if (File.Exists(oldMetadata))
+                        File.Delete(oldMetadata);
+
+                    File.Replace(
+                        metadataTemporary,
+                        metadataPath,
+                        oldMetadata,
+                        true);
+
+                    if (File.Exists(oldMetadata))
+                        File.Delete(oldMetadata);
+                }
+                else
+                {
+                    File.Move(
+                        metadataTemporary,
+                        metadataPath);
+                }
+
+                if (deleteSource)
+                    File.Delete(sourcePath);
+
+                return new GzipArchiveResult
+                {
+                    OriginalBytes = sourceMeta.Length,
+                    ArchiveBytes =
+                        new FileInfo(archivePath).Length,
+                    Sha256 = sourceHash,
+                    ElapsedSeconds =
+                        (DateTime.UtcNow - started).TotalSeconds
+                };
+                    }
+            catch
+            {
+                string failedArchiveTemporary =
+                    archivePath + ".tmp";
+
+                string failedMetadataTemporary =
+                    archivePath + ".meta.tmp";
+
+                try
+                {
+                    if (File.Exists(failedArchiveTemporary))
+                        File.Delete(failedArchiveTemporary);
+                }
+                catch { }
+
+                try
+                {
+                    if (File.Exists(failedMetadataTemporary))
+                        File.Delete(failedMetadataTemporary);
+                }
+                catch { }
+
+                throw;
             }
         }
 
@@ -520,7 +1205,7 @@ namespace SierraHistoryBridge
 
         private sealed class SequentialRecordReader : IDisposable
         {
-            private readonly FileStream _stream;
+            private readonly Stream _stream;
             private readonly byte[] _buffer;
             private readonly long _records;
             private long _recordsRead;
@@ -547,14 +1232,42 @@ namespace SierraHistoryBridge
 
             public SequentialRecordReader(string path)
             {
-                _stream = new FileStream(
-                    path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
-                    8 * 1024 * 1024, FileOptions.SequentialScan);
+                var file = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite,
+                    8 * 1024 * 1024,
+                    FileOptions.SequentialScan);
 
-                ValidateHeader(_stream, path);
-                _records = (_stream.Length - HeaderSize) / RecordSize;
-                _stream.Position = HeaderSize;
-                _buffer = new byte[100000 * RecordSize];
+                ValidateHeader(file, path);
+                _records =
+                    (file.Length - HeaderSize) /
+                    RecordSize;
+
+                file.Position = HeaderSize;
+                _stream = file;
+                _buffer =
+                    new byte[100000 * RecordSize];
+            }
+
+            public SequentialRecordReader(
+                Stream stream,
+                long uncompressedLength,
+                string label)
+            {
+                ValidateSequentialHeader(
+                    stream,
+                    uncompressedLength,
+                    label);
+
+                _records =
+                    (uncompressedLength - HeaderSize) /
+                    RecordSize;
+
+                _stream = stream;
+                _buffer =
+                    new byte[100000 * RecordSize];
             }
 
             private bool TryReadRecord(out RawScidRecord record)
@@ -951,6 +1664,263 @@ namespace SierraHistoryBridge
             }
         }
 
+        public static ScidPairValidation ValidatePairGzipTarget(
+            string sourcePath,
+            string targetArchivePath,
+            long targetOriginalLength,
+            long targetFirstDateTime,
+            long targetLastDateTime,
+            double scale,
+            string statusPrefix)
+        {
+            DateTime started = DateTime.UtcNow;
+            ScidMeta sourceMetaBefore = GetMeta(sourcePath);
+            DateTime sourceWriteBefore =
+                File.GetLastWriteTimeUtc(sourcePath);
+
+            long archiveLengthBefore =
+                new FileInfo(targetArchivePath).Length;
+
+            DateTime targetWriteBefore =
+                File.GetLastWriteTimeUtc(
+                    targetArchivePath);
+
+            if (targetOriginalLength < HeaderSize ||
+                (targetOriginalLength - HeaderSize) % RecordSize != 0)
+                throw new IOException(
+                    "Archived Rithmic baseline metadata is invalid.");
+
+            long targetRecords =
+                (targetOriginalLength - HeaderSize) /
+                RecordSize;
+
+            if (sourceMetaBefore.Records <= 0 ||
+                targetRecords <= 0)
+                throw new IOException(
+                    "Pair validation requires non-empty SCID source and target files.");
+
+            long targetFirstSecond =
+                targetFirstDateTime / 1000000L;
+
+            long targetLastSecond =
+                targetLastDateTime / 1000000L;
+            long sourceFirstSecond = sourceMetaBefore.FirstDateTime / 1000000L;
+            long sourceLastSecond = sourceMetaBefore.LastDateTime / 1000000L;
+
+            long sourceOverlapSeconds = 0;
+            long targetOverlapSeconds = 0;
+            long commonSeconds = 0;
+            long sourceOnlySeconds = 0;
+            long targetOnlySeconds = 0;
+            long commonVolumeEqualSeconds = 0;
+            long commonBidEqualSeconds = 0;
+            long commonAskEqualSeconds = 0;
+            long commonLastPriceEqualSeconds = 0;
+            long sourceOverlapVolume = 0;
+            long targetOverlapVolume = 0;
+
+            using (var source =
+                new SequentialRecordReader(sourcePath))
+            using (var archiveInput =
+                new FileStream(
+                    targetArchivePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    8 * 1024 * 1024,
+                    FileOptions.SequentialScan))
+            using (var gzip =
+                new GZipStream(
+                    archiveInput,
+                    CompressionMode.Decompress))
+            using (var target =
+                new SequentialRecordReader(
+                    gzip,
+                    targetOriginalLength,
+                    targetArchivePath))
+            {
+                SecondAggregate sourceSecond;
+                SecondAggregate targetSecond;
+                bool haveSource = source.TryReadSecond(out sourceSecond);
+                bool haveTarget = target.TryReadSecond(out targetSecond);
+                long lastProgressRecords = 0;
+
+                while (haveSource || haveTarget)
+                {
+                    long progressRecords = source.RecordsRead + target.RecordsRead;
+                    if (progressRecords - lastProgressRecords >= 2000000)
+                    {
+                        lastProgressRecords = progressRecords;
+                        double denominator =
+                            (double)(source.Records + target.Records);
+                        int percent = denominator > 0
+                            ? (int)Math.Min(99.0,
+                                100.0 * progressRecords / denominator)
+                            : 0;
+
+                        UpdateStatusLine(
+                            statusPrefix +
+                            " | VALIDATE " +
+                            percent.ToString() + "%");
+                    }
+
+                    if (!haveTarget ||
+                        (haveSource && sourceSecond.Second < targetSecond.Second))
+                    {
+                        if (sourceSecond.Second >= targetFirstSecond &&
+                            sourceSecond.Second <= targetLastSecond)
+                        {
+                            sourceOverlapSeconds++;
+                            sourceOverlapVolume += sourceSecond.Volume;
+                            sourceOnlySeconds++;
+                        }
+
+                        haveSource = source.TryReadSecond(out sourceSecond);
+                        continue;
+                    }
+
+                    if (!haveSource || targetSecond.Second < sourceSecond.Second)
+                    {
+                        if (targetSecond.Second >= sourceFirstSecond &&
+                            targetSecond.Second <= sourceLastSecond)
+                        {
+                            targetOverlapSeconds++;
+                            targetOverlapVolume += targetSecond.Volume;
+                            targetOnlySeconds++;
+                        }
+
+                        haveTarget = target.TryReadSecond(out targetSecond);
+                        continue;
+                    }
+
+                    // Both feeds have data in this second.
+                    sourceOverlapSeconds++;
+                    targetOverlapSeconds++;
+                    sourceOverlapVolume += sourceSecond.Volume;
+                    targetOverlapVolume += targetSecond.Volume;
+                    commonSeconds++;
+
+                    if (sourceSecond.Volume == targetSecond.Volume)
+                        commonVolumeEqualSeconds++;
+                    if (sourceSecond.BidVolume == targetSecond.BidVolume)
+                        commonBidEqualSeconds++;
+                    if (sourceSecond.AskVolume == targetSecond.AskVolume)
+                        commonAskEqualSeconds++;
+
+                    double scaledClose =
+                        (double)sourceSecond.LastClose * scale;
+
+                    if (Math.Abs(scaledClose - (double)targetSecond.LastClose) <= 0.001)
+                        commonLastPriceEqualSeconds++;
+
+                    haveSource = source.TryReadSecond(out sourceSecond);
+                    haveTarget = target.TryReadSecond(out targetSecond);
+                }
+
+                ScidMeta sourceMetaAfter =
+                    GetMeta(sourcePath);
+
+                DateTime sourceWriteAfter =
+                    File.GetLastWriteTimeUtc(sourcePath);
+
+                long archiveLengthAfter =
+                    new FileInfo(targetArchivePath).Length;
+
+                DateTime targetWriteAfter =
+                    File.GetLastWriteTimeUtc(
+                        targetArchivePath);
+
+                if (sourceMetaAfter.Length != sourceMetaBefore.Length ||
+                    sourceMetaAfter.Records != sourceMetaBefore.Records ||
+                    sourceMetaAfter.FirstDateTime != sourceMetaBefore.FirstDateTime ||
+                    sourceMetaAfter.LastDateTime != sourceMetaBefore.LastDateTime ||
+                    sourceWriteAfter != sourceWriteBefore)
+                {
+                    throw new IOException(
+                        "SOURCE_CHANGED_DURING_VALIDATION: the SC Data source changed " +
+                        "while the preflight comparison was running.");
+                }
+
+                if (archiveLengthAfter !=
+                        archiveLengthBefore ||
+                    targetWriteAfter !=
+                        targetWriteBefore)
+                {
+                    throw new IOException(
+                        "TARGET_CHANGED_DURING_VALIDATION: the archived Rithmic " +
+                        "baseline changed while the preflight comparison was running.");
+                }
+
+                long overlapDenominator =
+                    Math.Max(sourceOverlapSeconds, targetOverlapSeconds);
+
+                long volumeBase =
+                    Math.Max(sourceOverlapVolume, targetOverlapVolume);
+
+                double aggregateVolumeDifferencePercent =
+                    volumeBase > 0
+                    ? 100.0 * Math.Abs(
+                        (double)sourceOverlapVolume -
+                        (double)targetOverlapVolume) /
+                        (double)volumeBase
+                    : 0.0;
+
+                return new ScidPairValidation
+                {
+                    SourceRecords = sourceMetaBefore.Records,
+                    TargetRecords = targetRecords,
+                    SourceFirstDateTime = sourceMetaBefore.FirstDateTime,
+                    SourceLastDateTime = sourceMetaBefore.LastDateTime,
+                    TargetFirstDateTime = targetFirstDateTime,
+                    TargetLastDateTime = targetLastDateTime,
+                    SourceLength = sourceMetaBefore.Length,
+                    TargetLength = targetOriginalLength,
+                    SourceWriteTimeUtcTicks = sourceWriteBefore.Ticks,
+                    TargetWriteTimeUtcTicks = targetWriteBefore.Ticks,
+
+                    SourceOutOfOrderRecords = source.OutOfOrderRecords,
+                    TargetOutOfOrderRecords = target.OutOfOrderRecords,
+                    SourceRichRecords = source.RichRecords,
+                    TargetRichRecords = target.RichRecords,
+                    SourceControlOpenRecords = source.ControlOpenRecords,
+                    TargetControlOpenRecords = target.ControlOpenRecords,
+                    SourceUnclassifiedVolumeRecords = source.UnclassifiedVolumeRecords,
+                    TargetUnclassifiedVolumeRecords = target.UnclassifiedVolumeRecords,
+
+                    SourceOverlapSeconds = sourceOverlapSeconds,
+                    TargetOverlapSeconds = targetOverlapSeconds,
+                    CommonSeconds = commonSeconds,
+                    SourceOnlySeconds = sourceOnlySeconds,
+                    TargetOnlySeconds = targetOnlySeconds,
+                    CommonVolumeEqualSeconds = commonVolumeEqualSeconds,
+                    CommonBidEqualSeconds = commonBidEqualSeconds,
+                    CommonAskEqualSeconds = commonAskEqualSeconds,
+                    CommonLastPriceEqualSeconds = commonLastPriceEqualSeconds,
+                    SourceOverlapVolume = sourceOverlapVolume,
+                    TargetOverlapVolume = targetOverlapVolume,
+
+                    CommonCoveragePercent =
+                        Percent(commonSeconds, overlapDenominator),
+                    VolumeMatchPercent =
+                        Percent(commonVolumeEqualSeconds, commonSeconds),
+                    BidMatchPercent =
+                        Percent(commonBidEqualSeconds, commonSeconds),
+                    AskMatchPercent =
+                        Percent(commonAskEqualSeconds, commonSeconds),
+                    LastPriceMatchPercent =
+                        Percent(commonLastPriceEqualSeconds, commonSeconds),
+                    AggregateVolumeDifferencePercent =
+                        aggregateVolumeDifferencePercent,
+                    SourceRichPercent =
+                        Percent(source.RichRecords, sourceMetaBefore.Records),
+                    TargetRichPercent =
+                        Percent(target.RichRecords, targetRecords),
+                    ElapsedSeconds =
+                        (DateTime.UtcNow - started).TotalSeconds
+                };
+            }
+        }
+
         public static ScaleInference InferScale(string sourcePath, string targetPath)
         {
             using (var source = new FileStream(
@@ -1336,6 +2306,41 @@ namespace SierraHistoryBridge
             long totalWorkBytes =
                 sourcePayloadBytes +
                 tailBytes;
+
+            long expectedOutputBytes =
+                HeaderSize +
+                totalWorkBytes;
+
+            string targetRoot =
+                Path.GetPathRoot(
+                    Path.GetFullPath(
+                        targetPath));
+
+            if (!String.IsNullOrEmpty(targetRoot))
+            {
+                var drive =
+                    new DriveInfo(
+                        targetRoot);
+
+                long requiredFreeBytes =
+                    expectedOutputBytes +
+                    (256L * 1024L * 1024L);
+
+                if (drive.AvailableFreeSpace <
+                    requiredFreeBytes)
+                {
+                    throw new IOException(
+                        "INSUFFICIENT_DISK_SPACE: " +
+                        "safe SCID conversion requires " +
+                        requiredFreeBytes.ToString(
+                            CultureInfo.InvariantCulture) +
+                        " free bytes including reserve; " +
+                        drive.AvailableFreeSpace.ToString(
+                            CultureInfo.InvariantCulture) +
+                        " bytes are available. No target was changed.");
+                }
+            }
+
             long completedBytes = 0;
             int lastPercent = -1;
 
@@ -1618,6 +2623,8 @@ namespace SierraHistoryBridge
                     string baselinePath =
                         Path.Combine(
                             backupDirectory,
+                            Path.GetFileName(sourcePath) +
+                            "__" +
                             Path.GetFileName(targetPath) +
                             ".rithmic-baseline.bak");
 

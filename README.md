@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.14 — pre-stable**
+**Version 0.0.15 — pre-stable**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -121,16 +121,47 @@ afterward so they reread their chart-data files from disk.
 The application does not silently mark a skipped live SCID source as processed.
 It will remain eligible on the next run.
 
-## Backups and logs
+## Storage, archives, and logs
 
-Existing Rithmic files are backed up before replacement.
+The bridge minimizes persistent duplicate data.
 
 ```text
+SierraChart\Data\SCID_Bridge_Archive
 SierraChart\Data\SCID_Bridge_Backups
 SierraChart\Data\SCID_Bridge_Logs
 ```
 
-The backup directory can contain both `.scid.bak` and `.dly.bak` files.
+`SCID_Bridge_Archive` contains compressed `.gz` evidence/recovery files. The
+archive filename is the original Sierra filename plus `.gz`, so removing the
+`.gz` suffix gives the original filename.
+
+The first independent Rithmic SCID used for cross-feed validation is retained
+as a compressed immutable baseline under
+`SCID_Bridge_Archive\Rithmic_Baselines\<SC-contract>`. Future preflight
+validation reads that baseline directly through streaming decompression; it
+does not extract another multi-gigabyte copy.
+
+Historical `.scid.bak` files created during atomic replacement are deleted
+after the new target passes post-replacement validation because the target can
+be regenerated from its SC Data source. For live or temporary merges, one
+compressed rollback is retained instead. Historical Daily `.bak` files are
+also removed after successful verification.
+
+`SCID_Bridge_Backups` is therefore a recovery/staging directory, not a
+permanent second copy of every target. A raw backup is left there only when it
+cannot be safely pruned or compressed.
+
+At startup the bridge removes stale temporary conversion files older than one
+hour and safely prunes/compresses leftover bridge backups. It reports free
+space and reclaimed space before scanning. Each SCID update also checks free
+space before creating its full-size temporary output and defers the update
+instead of filling the drive.
+
+SC Data source files are not automatically deleted or compressed. They are the
+authoritative originals and may still be needed directly by Sierra Chart.
+Likewise, bridge-generated Rithmic targets outside the rolling window are not
+redundantly archived when they can be regenerated; the independent compressed
+Rithmic baseline remains available when one was captured.
 
 ## Repair and uninstall
 
@@ -140,7 +171,7 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.14 is pre-stable. The SCID path has been checked against real NQ SC
+Version 0.0.15 is pre-stable. The SCID path has been checked against real NQ SC
 Data and Rithmic files. Historical Daily handling follows Sierra Chart's
 documented text/CSV format and is covered by the project self-test.
 
@@ -152,6 +183,7 @@ CME Group, or their affiliates.
 - [Installation and maintenance](docs/INSTALLATION.md)
 - [Usage](docs/USAGE.md)
 - [Technical design](docs/TECHNICAL.md)
+- [Storage behavior](docs/STORAGE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Development](docs/DEVELOPMENT.md)
 - [Publishing](docs/PUBLISHING.md)
@@ -215,5 +247,8 @@ segment, an optional temporary merge can be used without marking the contract
 complete; the bridge will revisit it on the next run.
 
 For repeatable cross-feed validation, the first untouched Rithmic target is
-preserved separately as an immutable `<SC-source>__<Rithmic-target>.rithmic-baseline.bak` before replacement.
-The ordinary `.bak` remains a rolling recovery backup.
+preserved as an immutable compressed baseline. The archive keeps the original
+Rithmic filename as `<original-filename>.gz` beneath the two-digit SC contract
+directory, preventing one-digit-year collisions. Historical rolling backups
+are discarded after verification; live/temporary merges retain one compressed
+rollback.

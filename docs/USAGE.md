@@ -190,6 +190,7 @@ strongly validated and Rithmic contributes later coverage without an earlier
 coverage segment that would be lost.
 
 The first time an existing Rithmic SCID is replaced, the bridge preserves an
-immutable `<SC-source>__<Rithmic-target>.rithmic-baseline.bak` when the target has not previously been
-managed. Future comparisons prefer that baseline. The normal `.bak` file
+immutable compressed Rithmic baseline when the target has not previously
+been managed. Future comparisons read that `.gz` baseline directly without
+extracting it. The normal raw `.bak` file
 continues to hold the immediately previous target and may change on later runs.

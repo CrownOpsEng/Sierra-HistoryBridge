@@ -167,9 +167,76 @@ try {
         throw "Expected monotonic source timestamps."
     }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $backup "NQU6.CME.scid.rithmic-baseline.bak"))) {
+    $baselineRaw =
+        Join-Path `
+            $backup `
+            "NQU26-CME.scid__NQU6.CME.scid.rithmic-baseline.bak"
+
+    if (-not (Test-Path -LiteralPath $baselineRaw)) {
         throw "Expected immutable Rithmic baseline backup was not created."
     }
+
+    $baselineArchive =
+        Join-Path `
+            $temp `
+            "NQU6.CME.scid.gz"
+
+    $archiveResult =
+        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+            $baselineRaw,
+            $baselineArchive,
+            $true,
+            $false)
+
+    if (Test-Path -LiteralPath $baselineRaw) {
+        throw "Compressed baseline should remove the raw baseline after verification."
+    }
+
+    if (-not (Test-Path -LiteralPath $baselineArchive) -or
+        -not (Test-Path -LiteralPath ($baselineArchive + ".meta"))) {
+        throw "Compressed baseline archive or metadata is missing."
+    }
+
+    $archivedPair =
+        [SierraHistoryBridge.ScidBridge]::ValidatePairGzipTarget(
+            $source,
+            $baselineArchive,
+            $pairValidation.TargetLength,
+            $pairValidation.TargetFirstDateTime,
+            $pairValidation.TargetLastDateTime,
+            $inference.Factor,
+            "[test] archived validation")
+
+    if ($archivedPair.CommonSeconds -ne 20 -or
+        $archivedPair.VolumeMatchPercent -ne 100.0 -or
+        $archivedPair.LastPriceMatchPercent -ne 100.0) {
+        throw "Compressed Rithmic baseline validation failed."
+    }
+
+    Write-Host "PASS: compressed Rithmic baseline round-trip and validation"
+
+    $legacyDaily =
+        Join-Path $temp "NQU6.CME.dly.bak"
+
+    [IO.File]::WriteAllText(
+        $legacyDaily,
+        "Date, Open, High, Low, Close, Volume, OpenInterest`r`n2026/08/07, 1, 2, 0, 1, 10, 0`r`n")
+
+    $legacyDailyArchive =
+        Join-Path $temp "NQU6.CME.dly.gz"
+
+    [void][SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
+        $legacyDaily,
+        $legacyDailyArchive,
+        $true,
+        $false)
+
+    if ((Test-Path -LiteralPath $legacyDaily) -or
+        -not (Test-Path -LiteralPath $legacyDailyArchive)) {
+        throw "Generic compressed backup archive failed."
+    }
+
+    Write-Host "PASS: generic compressed legacy backup"
 
     $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($target)
     if ($meta.Records -ne 20) {

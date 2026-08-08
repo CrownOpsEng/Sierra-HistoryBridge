@@ -1,16 +1,34 @@
 # Changelog
 
-## v0.0.14 - 2026-08-07
+## v0.0.15 - 2026-08-07
 
 Initial pre-stable release.
 
 ### History processing
 
+- eligible-contract alias collision handling now groups by Rithmic target filename
+
+- fixed the rolling-window PowerShell expression to avoid multiline member chaining on Windows PowerShell 5.1
+
+- SCID conversion now checks available free space and defers before writing when the temporary output cannot fit with a 256 MB reserve
+
+- startup storage maintenance safely prunes leftover backups and stale bridge temporary files
+
+- live and temporary-merge rollback backups are retained as one compressed archive
+
+- historical SCID and DLY replacement backups are pruned after successful post-replacement verification
+
+- preflight validation can compare directly against compressed Rithmic baselines without extracting them
+
+- compressed baseline filenames preserve the original Rithmic filename under a two-digit source-contract directory
+
+- original Rithmic SCID baselines are now stored as verified compressed `.gz` archives instead of permanent full-size `.bak` files
+
 - previously managed targets without a baseline are labeled as non-independent validation references
 
 - later preflight checks prefer the immutable Rithmic baseline instead of validating against bridge-generated output
 
-- first-use Rithmic SCID targets are preserved as immutable `.rithmic-baseline.bak` validation references
+- first-use Rithmic SCID targets are preserved as immutable compressed Rithmic-baseline validation references
 
 - live SCID overlap validation runs after disconnect/close and before conversion
 

@@ -283,15 +283,56 @@ is discarded and the SCID update is deferred.
 ### Independent Rithmic baseline
 
 On the first bridge replacement of an existing Rithmic SCID target, the bridge
-can preserve an immutable validation copy in `SCID_Bridge_Backups` using the
-suffix `<SC-source>__<Rithmic-target>.rithmic-baseline.bak`. Later preflight runs prefer this baseline over a
-target that has already been modified by the bridge, avoiding circular
-validation against the bridge's own prior output.
+preserves an immutable compressed validation copy under:
 
-The existing `.bak` file remains the rolling immediately-previous target used
-for ordinary recovery. The immutable Rithmic baseline is not overwritten.
+```text
+SCID_Bridge_Archive\Rithmic_Baselines\<SC-contract>\<Rithmic-filename>.gz
+```
+
+The two-digit source-contract directory prevents Rithmic one-digit-year alias
+collisions. The `.gz` filename preserves the original Rithmic filename. A small
+`.meta` sidecar stores uncompressed size, record count, first/last timestamps,
+original write time, and SHA-256.
+
+Later preflight runs compare directly against the compressed baseline by
+streaming decompression, avoiding both circular validation and a full-size
+temporary extraction.
+
+Raw `.bak` files are temporary recovery files. Historical replacements delete
+them after post-replacement validation. Live and temporary merges retain one
+compressed rollback archive instead. The immutable Rithmic baseline is never
+overwritten.
 
 For installations that were already processed by an older bridge version and
 do not have an immutable baseline, the current target can still be compared but
 is labeled `managed target`; it is not presented as independent Rithmic
 evidence.
+
+
+## Disk-space policy
+
+SCID conversion requires one full-size temporary output in the Sierra Data
+folder so replacement remains atomic. That scratch copy is the unavoidable
+peak cost of a safe conversion.
+
+The bridge minimizes everything around that requirement:
+
+- conversions run sequentially, so temporary SCID space is not multiplied by
+  the number of contracts
+- each SCID checks available free space immediately before writing
+- a 256 MB reserve is required beyond the estimated temporary output
+- insufficient-space updates are deferred before the target is touched
+- historical replacement backups are deleted only after successful
+  post-replacement validation
+- live/temporary rollback data and original Rithmic baselines are compressed
+  with streaming GZip and verified before raw files are deleted
+- leftover historical/Daily backups are pruned at startup when the current
+  target can be validated
+- stale `.scbridge.tmp` and `.dailybridge.tmp` files older than one hour are
+  removed at startup
+- bridge-generated targets retired outside the rolling Rithmic window are not
+  redundantly archived when the SC Data source can regenerate them
+
+SC Data source files are intentionally outside automatic storage cleanup. They
+are the authoritative source data and removing/compressing them would make them
+unavailable to Sierra Chart until restored.

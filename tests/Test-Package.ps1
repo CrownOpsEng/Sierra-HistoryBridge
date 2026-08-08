@@ -56,7 +56,7 @@ foreach ($requiredPolicyToken in @(
     '$usableHistoryYears = 5',
     '$historyBufferMonths = 3',
     '$forwardBufferMonths = 6',
-    'archive-only',
+    'source-only',
     'outside rolling Rithmic history window'
 )) {
     if ($appText -notlike "*$requiredPolicyToken*") {
@@ -197,6 +197,40 @@ foreach ($preflightToken in @(
         $appText -notlike "*$preflightToken*") {
         throw "SCID preflight regression: missing $preflightToken"
     }
+}
+
+
+foreach ($storageToken in @(
+    'ArchiveScidGzipVerified',
+    'ArchiveFileGzipVerified',
+    'ValidatePairGzipTarget',
+    'SCID_Bridge_Archive',
+    'Rithmic_Baselines',
+    'Rollbacks',
+    'INSUFFICIENT_DISK_SPACE',
+    'Finalize-ScidBackupStorage',
+    'Invoke-BridgeStorageCleanup'
+)) {
+    if ($converterText -notlike "*$storageToken*" -and
+        $appText -notlike "*$storageToken*") {
+        throw "Storage regression: missing $storageToken"
+    }
+}
+
+if ($appText -match 'Compress-Archive') {
+    throw "Storage regression: Compress-Archive should not be used for multi-gigabyte SCID archives."
+}
+
+if ($appText -match '(?m)^\s*\$currentMonth\.\s*$') {
+    throw "Windows PowerShell 5.1 regression: multiline member chaining was reintroduced."
+}
+
+if ($appText -notmatch 'Group-Object\s+TargetName') {
+    throw "Rithmic alias regression: eligible contracts are not grouped by target filename."
+}
+
+if ($converterText -notmatch 'Path\.GetFileName\(sourcePath\)\s*\+\s*"__"\s*\+\s*Path\.GetFileName\(targetPath\)') {
+    throw "Baseline naming regression: raw baseline does not include both source and target names."
 }
 
 if ($appText -match '(?ms)(?<!\$)\(\s*(if|foreach|for|switch|try|while|do)\b') {
