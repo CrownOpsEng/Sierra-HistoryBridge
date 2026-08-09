@@ -134,3 +134,13 @@ validation confirms:
 - neither side contains out-of-order records
 
 Uncertain baselines are kept.
+
+
+## Exact rollback deduplication
+
+Exact duplicate rollback archives for the same Rithmic target are redundant.
+The bridge groups rollback copies by target filename, uncompressed byte length,
+and SHA-256, keeps one verified copy, and removes additional identical copies.
+
+This cleanup runs during normal storage cleanup and Storage Report. Different
+rollback content is never deduplicated.

@@ -210,3 +210,18 @@ metrics, record counts, hashes, timings, and errors are kept in logs.
 
 The application targets stock Windows PowerShell 5.1 and compiles the embedded
 C# engine through plain `Add-Type`.
+
+
+### Rollback backup identity
+
+Flat backup filenames encode the actual Rithmic target after the final `__`.
+That explicit filename identity is parsed before archive metadata. This avoids
+mistaking a composite manual/baseline archive name for a Rithmic symbol.
+
+Exact rollback copies are identified by:
+
+- target filename
+- uncompressed byte length
+- SHA-256
+
+Only bit-identical copies for the same target are deduplicated.

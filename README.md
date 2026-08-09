@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.27**
+**Version 0.0.28**
 
 Sierra History Bridge maintains Rithmic-named Sierra Chart history files from
 matching Sierra Chart SC Data files.

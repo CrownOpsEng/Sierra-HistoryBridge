@@ -535,6 +535,48 @@ if ($rollbackText -notlike '*existingUndo*' -or
     throw "Rollback regression: exact existing undo backups are not reused."
 }
 
+
+$targetNameStart =
+    $appText.IndexOf(
+        'function Get-RithmicTargetNameFromBackupArchive')
+
+$targetNameEnd =
+    $appText.IndexOf(
+        'function Get-ScDataSourceNameFromBaselineArchive',
+        $targetNameStart)
+
+$targetNameText =
+    $appText.Substring(
+        $targetNameStart,
+        $targetNameEnd - $targetNameStart)
+
+$separatorPosition =
+    $targetNameText.IndexOf(
+        '$separator =')
+
+$metadataPosition =
+    $targetNameText.IndexOf(
+        '$Meta.OriginalName')
+
+if ($separatorPosition -lt 0 -or
+    $metadataPosition -lt 0 -or
+    $separatorPosition -gt
+        $metadataPosition) {
+
+    throw "Rollback identity regression: composite filename target identity must be parsed before metadata."
+}
+
+foreach ($dedupeToken in @(
+    'Get-ExactRithmicRollbackBackup',
+    'Remove-DuplicateRithmicRollbackBackups',
+    'DuplicateRollbacks',
+    'Using existing undo backup:'
+)) {
+    if ($appText -notlike "*$dedupeToken*") {
+        throw "Rollback deduplication regression: missing $dedupeToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

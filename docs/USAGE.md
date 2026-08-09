@@ -150,3 +150,11 @@ Detailed operation logs are written to the configured Logs folder.
 
 Use the console for current progress and decisions; use logs for validation
 metrics, record counts, timings, hashes, warnings, and error details.
+
+
+### Duplicate rollback protection
+
+Rollback backup identity is based on the Rithmic target, uncompressed byte
+length, and SHA-256. Exact duplicate rollback archives are collapsed
+automatically. Rollback also checks again after creating an undo archive, so a
+retry cannot leave another bit-identical manual backup.
