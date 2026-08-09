@@ -136,11 +136,16 @@ validation confirms:
 Uncertain baselines are kept.
 
 
-## Exact rollback deduplication
+## Duplicate rollback review
 
-Exact duplicate rollback archives for the same Rithmic target are redundant.
-The bridge groups rollback copies by target filename, uncompressed byte length,
-and SHA-256, keeps one verified copy, and removes additional identical copies.
+Exact duplicate rollback archives for the same Rithmic target are identified by:
 
-This cleanup runs during normal storage cleanup and Storage Report. Different
-rollback content is never deduplicated.
+- target filename
+- uncompressed byte length
+- SHA-256
+
+Duplicates are reported with the redundant-copy count and reclaimable space.
+They are not removed automatically.
+
+Interactive Update, Storage Report, and Rollback runs ask before redundant
+copies are removed. Different rollback content is never grouped as a duplicate.

@@ -152,9 +152,12 @@ Use the console for current progress and decisions; use logs for validation
 metrics, record counts, timings, hashes, warnings, and error details.
 
 
-### Duplicate rollback protection
+### Duplicate rollback review
 
 Rollback backup identity is based on the Rithmic target, uncompressed byte
-length, and SHA-256. Exact duplicate rollback archives are collapsed
-automatically. Rollback also checks again after creating an undo archive, so a
-retry cannot leave another bit-identical manual backup.
+length, and SHA-256. Exact duplicates are reported; they are never removed
+without confirmation.
+
+Update, Storage Report, and Rollback can surface duplicate rollback groups.
+Interactive runs ask whether redundant copies should be removed while keeping
+one verified copy of each exact state.

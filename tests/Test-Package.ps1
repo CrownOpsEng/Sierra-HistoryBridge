@@ -566,15 +566,39 @@ if ($separatorPosition -lt 0 -or
     throw "Rollback identity regression: composite filename target identity must be parsed before metadata."
 }
 
-foreach ($dedupeToken in @(
+foreach ($duplicateReviewToken in @(
     'Get-ExactRithmicRollbackBackup',
-    'Remove-DuplicateRithmicRollbackBackups',
-    'DuplicateRollbacks',
+    'Get-DuplicateRithmicRollbackBackups',
+    'Review-RithmicRollbackDuplicates',
+    'Clear-ConfirmedRithmicRollbackDuplicates',
+    'Remove redundant copies, keeping one verified backup per exact state? [y/N]',
     'Using existing undo backup:'
 )) {
-    if ($appText -notlike "*$dedupeToken*") {
-        throw "Rollback deduplication regression: missing $dedupeToken"
+    if (-not $appText.Contains($duplicateReviewToken)) {
+        throw "Rollback duplicate-review regression: missing $duplicateReviewToken"
     }
+}
+
+if ($appText -like '*Remove-DuplicateRithmicRollbackBackups*') {
+    throw "Rollback duplicate-review regression: automatic deduplication function returned."
+}
+
+$storageCleanupStart =
+    $appText.IndexOf(
+        'function Invoke-BridgeStorageCleanup')
+
+$storageCleanupEnd =
+    $appText.IndexOf(
+        'function Finalize-ScidBackupStorage',
+        $storageCleanupStart)
+
+$storageCleanupText =
+    $appText.Substring(
+        $storageCleanupStart,
+        $storageCleanupEnd - $storageCleanupStart)
+
+if ($storageCleanupText -like '*Clear-ConfirmedRithmicRollbackDuplicates*') {
+    throw "Rollback duplicate-review regression: normal storage cleanup deletes persistent rollback duplicates."
 }
 
 $required = @(

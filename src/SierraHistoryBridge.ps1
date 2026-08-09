@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.28"
+$Version = "0.0.29"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -3281,8 +3281,9 @@ function Get-ExactRithmicRollbackBackup(
     return $matches[0]
 }
 
-function Remove-DuplicateRithmicRollbackBackups(
+function Get-DuplicateRithmicRollbackBackups(
     [string]$DataFolder,
+    [string]$TargetName,
     [string]$PreserveArchivePath) {
 
     $rollbacks =
@@ -3290,19 +3291,26 @@ function Remove-DuplicateRithmicRollbackBackups(
             Get-RithmicBackupArchives `
                 $DataFolder |
             Where-Object {
-                $_.Kind -eq "rollback"
+                $_.Kind -eq "rollback" -and
+                (
+                    [string]::IsNullOrWhiteSpace(
+                        $TargetName) -or
+                    $_.TargetName -ieq
+                        $TargetName
+                )
             }
         )
 
     if ($rollbacks.Count -lt 2) {
         return [pscustomobject]@{
-            Removed = 0
-            ReclaimedBytes = 0L
-            Warnings = 0
+            Groups = @()
+            GroupCount = 0
+            RedundantCount = 0
+            ReclaimableBytes = 0L
         }
     }
 
-    $groups = @{}
+    $groupTable = @{}
 
     foreach ($item in $rollbacks) {
         $key =
@@ -3314,31 +3322,33 @@ function Remove-DuplicateRithmicRollbackBackups(
                 $item.Sha256.ToUpperInvariant()
             )
 
-        if (-not $groups.ContainsKey(
+        if (-not $groupTable.ContainsKey(
                 $key)) {
 
-            $groups[$key] =
+            $groupTable[$key] =
                 New-Object System.Collections.Generic.List[object]
         }
 
-        $groups[$key].Add(
+        $groupTable[$key].Add(
             $item)
     }
 
-    $removed = 0
-    $reclaimed = 0L
-    $warnings = 0
+    $duplicateGroups =
+        New-Object System.Collections.Generic.List[object]
 
-    foreach ($key in $groups.Keys) {
-        $group =
+    $redundantCount = 0
+    $reclaimableBytes = 0L
+
+    foreach ($key in $groupTable.Keys) {
+        $items =
             @(
-                $groups[$key] |
+                $groupTable[$key] |
                 Sort-Object `
                     ArchiveWriteTime,
                     ArchivePath
             )
 
-        if ($group.Count -lt 2) {
+        if ($items.Count -lt 2) {
             continue
         }
 
@@ -3347,9 +3357,9 @@ function Remove-DuplicateRithmicRollbackBackups(
         if (-not [string]::IsNullOrWhiteSpace(
                 $PreserveArchivePath)) {
 
-            $keeper =
+            $keeperMatch =
                 @(
-                    $group |
+                    $items |
                     Where-Object {
                         $_.ArchivePath.Equals(
                             $PreserveArchivePath,
@@ -3358,27 +3368,94 @@ function Remove-DuplicateRithmicRollbackBackups(
                     Select-Object -First 1
                 )
 
-            if ($keeper.Count -gt 0) {
+            if ($keeperMatch.Count -gt 0) {
                 $keeper =
-                    $keeper[0]
-            }
-            else {
-                $keeper =
-                    $null
+                    $keeperMatch[0]
             }
         }
 
         if (-not $keeper) {
             $keeper =
-                $group[0]
+                $items[0]
         }
 
-        foreach ($duplicate in $group) {
-            if ($duplicate.ArchivePath.Equals(
-                    $keeper.ArchivePath,
-                    [StringComparison]::OrdinalIgnoreCase)) {
-                continue
+        $duplicates =
+            @(
+                $items |
+                Where-Object {
+                    -not $_.ArchivePath.Equals(
+                        $keeper.ArchivePath,
+                        [StringComparison]::OrdinalIgnoreCase)
+                }
+            )
+
+        $groupReclaimable = 0L
+
+        foreach ($duplicate in $duplicates) {
+            $groupReclaimable +=
+                [long]$duplicate.ArchiveBytes
+
+            if (Test-Path `
+                -LiteralPath $duplicate.MetadataPath `
+                -PathType Leaf) {
+
+                $groupReclaimable +=
+                    [long](
+                        Get-Item `
+                            -LiteralPath $duplicate.MetadataPath).Length
             }
+        }
+
+        $duplicateGroups.Add(
+            [pscustomobject]@{
+                TargetName =
+                    $keeper.TargetName
+                OriginalBytes =
+                    [long]$keeper.OriginalBytes
+                Sha256 =
+                    [string]$keeper.Sha256
+                Count =
+                    $items.Count
+                Keeper =
+                    $keeper
+                Duplicates =
+                    $duplicates
+                ReclaimableBytes =
+                    $groupReclaimable
+            })
+
+        $redundantCount +=
+            $duplicates.Count
+
+        $reclaimableBytes +=
+            $groupReclaimable
+    }
+
+    return [pscustomobject]@{
+        Groups =
+            @($duplicateGroups)
+        GroupCount =
+            $duplicateGroups.Count
+        RedundantCount =
+            $redundantCount
+        ReclaimableBytes =
+            $reclaimableBytes
+    }
+}
+
+function Clear-ConfirmedRithmicRollbackDuplicates(
+    [string]$DataFolder,
+    $DuplicateReport) {
+
+    $removed = 0
+    $reclaimed = 0L
+    $warnings = 0
+
+    foreach ($group in @(
+        $DuplicateReport.Groups)) {
+
+        foreach ($duplicate in @(
+            $group.Duplicates)) {
 
             try {
                 $bytes =
@@ -3409,6 +3486,15 @@ function Remove-DuplicateRithmicRollbackBackups(
             }
             catch {
                 $warnings++
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "DUPLICATE" `
+                    (
+                        "target={0}; archive={1}; action=KEEP; error={2}" -f
+                        $group.TargetName,
+                        $duplicate.ArchivePath,
+                        $_.Exception.Message)
             }
         }
     }
@@ -3419,6 +3505,133 @@ function Remove-DuplicateRithmicRollbackBackups(
         Warnings = $warnings
     }
 }
+
+function Review-RithmicRollbackDuplicates(
+    [string]$DataFolder,
+    [string]$TargetName,
+    [string]$PreserveArchivePath,
+    [bool]$AskToClear) {
+
+    $report =
+        Get-DuplicateRithmicRollbackBackups `
+            $DataFolder `
+            $TargetName `
+            $PreserveArchivePath
+
+    if ($report.GroupCount -eq 0) {
+        return [pscustomobject]@{
+            Found = $false
+            Cleared = $false
+            Groups = 0
+            Redundant = 0
+            Removed = 0
+            ReclaimedBytes = 0L
+            Warnings = 0
+        }
+    }
+
+    Write-Host
+    Write-Host "Duplicate rollback backups:"
+
+    foreach ($group in $report.Groups) {
+        Write-Host (
+            "  {0} | {1} identical copies | {2} redundant" -f
+            $group.TargetName,
+            $group.Count,
+            (Format-StorageBytes `
+                $group.ReclaimableBytes))
+
+        Write-UtilityLog `
+            "WARN" `
+            "DUPLICATE" `
+            (
+                "target={0}; copies={1}; redundant={2}; reclaimable_bytes={3}; keeper={4}; duplicates={5}" -f
+                $group.TargetName,
+                $group.Count,
+                $group.Duplicates.Count,
+                $group.ReclaimableBytes,
+                $group.Keeper.ArchivePath,
+                (($group.Duplicates |
+                    ForEach-Object {
+                        $_.ArchivePath
+                    }) -join " | "))
+    }
+
+    Write-Host (
+        "  Total: {0} group(s) | {1} redundant backup(s) | {2} reclaimable" -f
+        $report.GroupCount,
+        $report.RedundantCount,
+        (Format-StorageBytes `
+            $report.ReclaimableBytes))
+
+    $clear =
+        $false
+
+    if ($Yes) {
+        $clear =
+            $true
+    }
+    elseif ($AskToClear) {
+        $answer =
+            Read-Host (
+                "Remove redundant copies, keeping one verified backup per exact state? [y/N]")
+
+        $clear =
+            $answer.Trim().ToLowerInvariant() -in @(
+                "y",
+                "yes")
+    }
+
+    if (-not $clear) {
+        Write-Host "  Duplicates left unchanged."
+
+        return [pscustomobject]@{
+            Found = $true
+            Cleared = $false
+            Groups = $report.GroupCount
+            Redundant = $report.RedundantCount
+            Removed = 0
+            ReclaimedBytes = 0L
+            Warnings = 0
+        }
+    }
+
+    $result =
+        Clear-ConfirmedRithmicRollbackDuplicates `
+            $DataFolder `
+            $report
+
+    Write-Host (
+        "  Removed {0} redundant backup(s) | {1} reclaimed" -f
+        $result.Removed,
+        (Format-StorageBytes `
+            $result.ReclaimedBytes))
+
+    Write-UtilityLog `
+        $(if ($result.Warnings -eq 0) {
+            "INFO"
+        }
+        else {
+            "WARN"
+        }) `
+        "CLEANUP" `
+        (
+            "duplicate_rollbacks_removed={0}; reclaimed_bytes={1}; warnings={2}" -f
+            $result.Removed,
+            $result.ReclaimedBytes,
+            $result.Warnings)
+
+    return [pscustomobject]@{
+        Found = $true
+        Cleared = $true
+        Groups = $report.GroupCount
+        Redundant = $report.RedundantCount
+        Removed = $result.Removed
+        ReclaimedBytes = $result.ReclaimedBytes
+        Warnings = $result.Warnings
+    }
+}
+
 
 function Invalidate-BridgeStateForRithmicTarget(
     [string]$TargetPath,
@@ -3652,34 +3865,19 @@ function Invoke-RithmicRollbackManager(
         return 0
     }
 
-    $duplicateCleanup =
-        Remove-DuplicateRithmicRollbackBackups `
+    $duplicateReview =
+        Review-RithmicRollbackDuplicates `
             $ResolvedDataFolder `
+            $selection.TargetName `
             $(if ($selection.Kind -eq "rollback") {
                 $selection.ArchivePath
             }
             else {
                 $null
-            })
+            }) `
+            ([bool]$AskForSelection)
 
-    if ($duplicateCleanup.Removed -gt 0) {
-        Write-Host (
-            "Rollback cleanup: {0} duplicate backup(s) removed | {1} reclaimed" -f
-            $duplicateCleanup.Removed,
-            (Format-StorageBytes `
-                $duplicateCleanup.ReclaimedBytes))
-
-        Write-UtilityLog `
-            "INFO" `
-            "CLEANUP" `
-            (
-                "duplicate_rollbacks_removed={0}; reclaimed_bytes={1}; warnings={2}" -f
-                $duplicateCleanup.Removed,
-                $duplicateCleanup.ReclaimedBytes,
-                $duplicateCleanup.Warnings)
-    }
-
-    # Refresh inventory after cleanup so exact-undo lookup reflects disk state.
+    # Refresh inventory after any user-confirmed cleanup.
     $backups =
         Get-RithmicBackupArchives `
             $ResolvedDataFolder
@@ -3851,23 +4049,27 @@ function Invoke-RithmicRollbackManager(
                     $undoArchive
 
             if ($duplicateUndo) {
-                [void](Remove-BridgeOwnedFileAndPrune `
-                    $undoArchive `
-                    $ResolvedDataFolder)
+                $postCreateReview =
+                    Review-RithmicRollbackDuplicates `
+                        $ResolvedDataFolder `
+                        $selection.TargetName `
+                        $duplicateUndo.ArchivePath `
+                        ([bool]$AskForSelection)
 
-                [void](Remove-BridgeOwnedFileAndPrune `
-                    ($undoArchive + ".meta") `
-                    $ResolvedDataFolder `
-                    -IgnoreMissing)
+                if ($postCreateReview.Cleared) {
+                    $undoArchive =
+                        $duplicateUndo.ArchivePath
 
-                $undoArchive =
-                    $duplicateUndo.ArchivePath
+                    $undoReused =
+                        $true
 
-                $undoReused =
-                    $true
-
-                Write-Host (
-                    "Using existing undo backup: $undoArchive")
+                    Write-Host (
+                        "Using existing undo backup: $undoArchive")
+                }
+                else {
+                    Write-Host (
+                        "Undo backup: $undoArchive")
+                }
             }
             else {
                 Write-Host (
@@ -4399,30 +4601,9 @@ function Invoke-VerifiedBaselineCleanup(
 
 function Invoke-StorageReport([string]$ResolvedDataFolder) {
 
-    $rollbackCleanup =
-        Remove-DuplicateRithmicRollbackBackups `
-            $ResolvedDataFolder `
-            $null
-
-    if ($rollbackCleanup.Removed -gt 0) {
-        Write-Host
-        Write-Host (
-            "Rollback cleanup: {0} duplicate backup(s) removed | {1} reclaimed" -f
-            $rollbackCleanup.Removed,
-            (Format-StorageBytes `
-                $rollbackCleanup.ReclaimedBytes))
-
-        Write-UtilityLog `
-            "INFO" `
-            "CLEANUP" `
-            (
-                "duplicate_rollbacks_removed={0}; reclaimed_bytes={1}; warnings={2}" -f
-                $rollbackCleanup.Removed,
-                $rollbackCleanup.ReclaimedBytes,
-                $rollbackCleanup.Warnings)
-    }
-
-    $snapshot = Get-StorageSnapshot $ResolvedDataFolder
+    $snapshot =
+        Get-StorageSnapshot `
+            $ResolvedDataFolder
 
     Write-Host
     Write-Host "Storage usage:"
@@ -4519,6 +4700,12 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
                 $rithmicBackupBytes))
     }
 
+    [void](Review-RithmicRollbackDuplicates `
+        $ResolvedDataFolder `
+        $null `
+        $null `
+        ([bool]$Interactive))
+
     $baselines =
         Get-RithmicBaselineArchives `
             $ResolvedDataFolder
@@ -4565,22 +4752,13 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
 
     $reclaimed = 0L
     $staleTemps = 0
-    $duplicateRollbacks = 0
     $warnings = 0
 
-    $rollbackCleanup =
-        Remove-DuplicateRithmicRollbackBackups `
+    $duplicateReport =
+        Get-DuplicateRithmicRollbackBackups `
             $DataFolder `
+            $null `
             $null
-
-    $duplicateRollbacks =
-        $rollbackCleanup.Removed
-
-    $reclaimed +=
-        [long]$rollbackCleanup.ReclaimedBytes
-
-    $warnings +=
-        $rollbackCleanup.Warnings
 
     # Reclaim abandoned conversion/output files before scanning market data.
     $cutoff =
@@ -4676,7 +4854,9 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
     return [pscustomobject]@{
         ReclaimedBytes = $reclaimed
         StaleTemps = $staleTemps
-        DuplicateRollbacks = $duplicateRollbacks
+        DuplicateRollbackGroups = $duplicateReport.GroupCount
+        DuplicateRollbackFiles = $duplicateReport.RedundantCount
+        DuplicateRollbackBytes = $duplicateReport.ReclaimableBytes
         RecoveryFiles = $recoveryFiles
         EmptyDirectories = $emptyDirectories
         Warnings = $warnings
@@ -5490,6 +5670,51 @@ function Invoke-SierraHistoryBridge {
         Invoke-BridgeStorageCleanup `
             $resolvedDataFolder
 
+    $duplicateReview =
+        $null
+
+    if ($storageCleanup.DuplicateRollbackFiles -gt 0) {
+        $duplicateReview =
+            Review-RithmicRollbackDuplicates `
+                $resolvedDataFolder `
+                $null `
+                $null `
+                ([bool]$Interactive)
+
+        $duplicateStatus =
+            Get-DuplicateRithmicRollbackBackups `
+                $resolvedDataFolder `
+                $null `
+                $null
+
+        $storageCleanup.DuplicateRollbackGroups =
+            $duplicateStatus.GroupCount
+
+        $storageCleanup.DuplicateRollbackFiles =
+            $duplicateStatus.RedundantCount
+
+        $storageCleanup.DuplicateRollbackBytes =
+            $duplicateStatus.ReclaimableBytes
+
+        $script:EarlyUpdateDiagnostics.Add(
+            (
+                Format-LogRecord `
+                    "INFO" `
+                    "DUPLICATE" `
+                    (
+                        "groups={0}; redundant={1}; reclaimable_bytes={2}; removed={3}; user_confirmed={4}" -f
+                        $duplicateReview.Groups,
+                        $duplicateReview.Redundant,
+                        $(if ($duplicateReview.Cleared) {
+                            $duplicateReview.ReclaimedBytes
+                        }
+                        else {
+                            $storageCleanup.DuplicateRollbackBytes
+                        }),
+                        $duplicateReview.Removed,
+                        $duplicateReview.Cleared)))
+    }
+
     $freeAfterCleanup =
         Get-AvailableFreeBytes `
             $resolvedDataFolder
@@ -5504,14 +5729,12 @@ function Invoke-SierraHistoryBridge {
         (Format-StorageBytes $storageAfterCleanup.DataDisk))
 
     if ($storageCleanup.StaleTemps -gt 0 -or
-        $storageCleanup.DuplicateRollbacks -gt 0 -or
         $storageCleanup.EmptyDirectories -gt 0 -or
         $storageCleanup.ReclaimedBytes -gt 0) {
 
         Write-Host (
-            "      Cleanup: {0} stale temp | {1} duplicate rollback | {2} empty folder | {3} reclaimed" -f
+            "      Cleanup: {0} stale temp | {1} empty folder | {2} reclaimed" -f
             $storageCleanup.StaleTemps,
-            $storageCleanup.DuplicateRollbacks,
             $storageCleanup.EmptyDirectories,
             (Format-StorageBytes `
                 $storageCleanup.ReclaimedBytes))
@@ -7672,12 +7895,14 @@ function Invoke-SierraHistoryBridge {
                 "INFO" `
                 "STORAGE" `
                 (
-                    "free_bytes={0}; data_logical={1}; data_disk={2}; stale_temp_removed={3}; duplicate_rollbacks_removed={4}; empty_folders_removed={5}; recovery_files={6}; reclaimed_bytes={7}" -f
+                    "free_bytes={0}; data_logical={1}; data_disk={2}; stale_temp_removed={3}; duplicate_rollback_groups={4}; duplicate_rollback_files={5}; duplicate_rollback_bytes={6}; empty_folders_removed={7}; recovery_files={8}; reclaimed_bytes={9}" -f
                     $freeAfterCleanup,
                     $storageAfterCleanup.DataLogical,
                     $storageAfterCleanup.DataDisk,
                     $storageCleanup.StaleTemps,
-                    $storageCleanup.DuplicateRollbacks,
+                    $storageCleanup.DuplicateRollbackGroups,
+                    $storageCleanup.DuplicateRollbackFiles,
+                    $storageCleanup.DuplicateRollbackBytes,
                     $storageCleanup.EmptyDirectories,
                     $storageCleanup.RecoveryFiles,
                     $storageCleanup.ReclaimedBytes)))

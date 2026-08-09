@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.28 - 2026-08-08
+## v0.0.29 - 2026-08-08
 
 Experimental release.
 
@@ -30,7 +30,7 @@ Experimental release.
 - flat Rithmic baseline and rollback categories
 - verified GZip archive/restore
 - Rithmic rollback with verified undo protection and atomic target replacement
-- exact duplicate Rithmic rollback backups are automatically collapsed
+- exact duplicate Rithmic rollback backups are reported and can be cleared with explicit confirmation
 - restore conflict preservation
 - temporary recovery staging
 - bridge-owned empty-directory cleanup

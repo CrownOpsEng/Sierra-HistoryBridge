@@ -224,4 +224,5 @@ Exact rollback copies are identified by:
 - uncompressed byte length
 - SHA-256
 
-Only bit-identical copies for the same target are deduplicated.
+Only bit-identical copies for the same target are reported as duplicates.
+Removal requires explicit confirmation.
