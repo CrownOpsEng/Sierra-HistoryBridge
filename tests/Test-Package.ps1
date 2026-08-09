@@ -601,6 +601,65 @@ if ($storageCleanupText -like '*Clear-ConfirmedRithmicRollbackDuplicates*') {
     throw "Rollback duplicate-review regression: normal storage cleanup deletes persistent rollback duplicates."
 }
 
+
+$duplicateFunctionStart =
+    $appText.IndexOf(
+        'function Get-DuplicateRithmicRollbackBackups')
+
+$duplicateFunctionEnd =
+    $appText.IndexOf(
+        'function Clear-ConfirmedRithmicRollbackDuplicates',
+        $duplicateFunctionStart)
+
+$duplicateFunctionText =
+    $appText.Substring(
+        $duplicateFunctionStart,
+        $duplicateFunctionEnd - $duplicateFunctionStart)
+
+if ($duplicateFunctionText -like '*@($duplicateGroups)*') {
+    throw "Duplicate-review regression: Generic.List array-subexpression is not Windows PowerShell 5.1 safe."
+}
+
+if ($duplicateFunctionText -notlike '*$duplicateGroups.ToArray()*') {
+    throw "Duplicate-review regression: duplicate groups are not materialized to an object array."
+}
+
+$reviewStart =
+    $appText.IndexOf(
+        'function Review-RithmicRollbackDuplicates')
+
+$reviewEnd =
+    $appText.IndexOf(
+        'function Invalidate-BridgeStateForRithmicTarget',
+        $reviewStart)
+
+$reviewText =
+    $appText.Substring(
+        $reviewStart,
+        $reviewEnd - $reviewStart)
+
+if ($reviewText -match 'if \(\$Yes\)') {
+    throw "Duplicate-review regression: general -Yes must not authorize persistent rollback deletion."
+}
+
+$rollbackStart =
+    $appText.IndexOf(
+        'function Invoke-RithmicRollbackManager')
+
+$rollbackEnd =
+    $appText.IndexOf(
+        'function Get-RithmicBaselineArchives',
+        $rollbackStart)
+
+$rollbackText =
+    $appText.Substring(
+        $rollbackStart,
+        $rollbackEnd - $rollbackStart)
+
+if ($rollbackText -notmatch 'Review-RithmicRollbackDuplicates\s+`\s*\r?\n\s+\$ResolvedDataFolder\s+`\s*\r?\n\s+\$null') {
+    throw "Duplicate-review regression: Rollback is not reviewing duplicates across all targets."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

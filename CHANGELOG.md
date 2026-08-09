@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.29 - 2026-08-08
+## v0.0.30 - 2026-08-08
 
 Experimental release.
 
@@ -31,6 +31,8 @@ Experimental release.
 - verified GZip archive/restore
 - Rithmic rollback with verified undo protection and atomic target replacement
 - exact duplicate Rithmic rollback backups are reported and can be cleared with explicit confirmation
+- duplicate rollback review is compatible with Windows PowerShell 5.1 collection binding
+- Rollback reports duplicate groups across all Rithmic rollback targets before proceeding
 - restore conflict preservation
 - temporary recovery staging
 - bridge-owned empty-directory cleanup

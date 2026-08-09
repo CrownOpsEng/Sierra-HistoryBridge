@@ -147,5 +147,9 @@ Exact duplicate rollback archives for the same Rithmic target are identified by:
 Duplicates are reported with the redundant-copy count and reclaimable space.
 They are not removed automatically.
 
-Interactive Update, Storage Report, and Rollback runs ask before redundant
-copies are removed. Different rollback content is never grouped as a duplicate.
+Interactive Update, Storage Report, and Rollback runs report all duplicate
+groups and ask before redundant copies are removed. The general `-Yes` switch
+does not authorize deletion of persistent rollback backups; the duplicate
+cleanup prompt requires its own confirmation.
+
+Different rollback content is never grouped as a duplicate.

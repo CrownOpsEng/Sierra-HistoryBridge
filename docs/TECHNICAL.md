@@ -226,3 +226,10 @@ Exact rollback copies are identified by:
 
 Only bit-identical copies for the same target are reported as duplicates.
 Removal requires explicit confirmation.
+
+
+### Duplicate-report collection
+
+Duplicate groups are materialized as a normal object array before being returned
+to PowerShell. This avoids Windows PowerShell 5.1 binder issues with
+`Generic.List[object]` array-subexpression conversion.

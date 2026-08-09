@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.29"
+$Version = "0.0.30"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -3433,7 +3433,7 @@ function Get-DuplicateRithmicRollbackBackups(
 
     return [pscustomobject]@{
         Groups =
-            @($duplicateGroups)
+            $duplicateGroups.ToArray()
         GroupCount =
             $duplicateGroups.Count
         RedundantCount =
@@ -3567,11 +3567,7 @@ function Review-RithmicRollbackDuplicates(
     $clear =
         $false
 
-    if ($Yes) {
-        $clear =
-            $true
-    }
-    elseif ($AskToClear) {
+    if ($AskToClear) {
         $answer =
             Read-Host (
                 "Remove redundant copies, keeping one verified backup per exact state? [y/N]")
@@ -3868,7 +3864,7 @@ function Invoke-RithmicRollbackManager(
     $duplicateReview =
         Review-RithmicRollbackDuplicates `
             $ResolvedDataFolder `
-            $selection.TargetName `
+            $null `
             $(if ($selection.Kind -eq "rollback") {
                 $selection.ArchivePath
             }
