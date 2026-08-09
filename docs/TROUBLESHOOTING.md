@@ -110,3 +110,17 @@ Collect:
 - whether Sierra Chart was open
 
 Do not include credentials or unrelated trading records.
+
+
+## Rithmic files use much more disk than expected
+
+Compare **Logical** and **On disk** in Storage Report.
+
+If Rithmic logical size is expected but On disk is nearly the same size, run
+Storage Report. It will report any uncompressed Rithmic market-data files and
+offer to enable Windows file compression.
+
+Sierra Chart must be closed while existing files are compressed.
+
+If the Data volume does not support per-file compression, the bridge reports
+that condition and leaves the files unchanged.

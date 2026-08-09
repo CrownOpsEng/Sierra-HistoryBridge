@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.30**
+**Version 0.0.31**
 
 Sierra History Bridge maintains Rithmic-named Sierra Chart history files from
 matching Sierra Chart SC Data files.
@@ -25,6 +25,7 @@ SCID and Historical Daily files are discovered and processed independently.
 - retain verified Rithmic baselines and rollback copies
 - roll a Rithmic target back to a verified backup
 - report logical and allocated disk usage
+- use Windows file compression for generated/restored market-data targets
 - keep archive, recovery, and log locations configurable
 
 ## Installation
@@ -169,3 +170,21 @@ Group, or their affiliates.
 ## License
 
 Mozilla Public License 2.0. See [LICENSE](LICENSE).
+
+
+## File compression
+
+On volumes that support per-file compression, bridge-generated Rithmic `.scid`
+and `.dly` files are created with Windows file compression enabled before their
+payload is written. The final published target is verified to retain that
+compression state.
+
+SC Data and Rithmic files keep their normal logical byte length and file
+format. Compression only changes physical allocation on disk.
+
+Storage Report also detects existing uncompressed Rithmic market-data files and
+can compress them in place after explicit confirmation. Sierra Chart must be
+closed for that operation. Normal Update reports existing uncompressed files
+but does not recompress them automatically.
+
+GZip archive compression remains separate from Windows file compression.

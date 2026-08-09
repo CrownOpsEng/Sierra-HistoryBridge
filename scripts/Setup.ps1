@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge"
-$Version = "0.0.30"
+$Version = "0.0.31"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey

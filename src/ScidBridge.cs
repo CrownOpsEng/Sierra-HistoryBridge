@@ -97,6 +97,20 @@ namespace SierraHistoryBridge
     {
         public long RestoredBytes;
         public string Sha256;
+        public bool CompressionSupported;
+        public bool CompressionEnabled;
+        public long AllocatedBytes;
+        public double ElapsedSeconds;
+    }
+
+    public sealed class FileCompressionResult
+    {
+        public bool Supported;
+        public bool WasCompressed;
+        public bool IsCompressed;
+        public long LogicalBytes;
+        public long AllocatedBytesBefore;
+        public long AllocatedBytesAfter;
         public double ElapsedSeconds;
     }
 
@@ -113,6 +127,9 @@ namespace SierraHistoryBridge
         public double FlushSeconds;
         public double ValidationSeconds;
         public double ReplaceSeconds;
+        public bool CompressionSupported;
+        public bool CompressionEnabled;
+        public long OutputAllocatedBytes;
 
         public long OutOfOrderRecords;
         public long FirstOutOfOrderIndex;
@@ -287,11 +304,17 @@ namespace SierraHistoryBridge
             }
         }
 
+        private const uint GENERIC_READ = 0x80000000;
+        private const uint GENERIC_WRITE = 0x40000000;
         private const uint FILE_SHARE_READ = 0x00000001;
         private const uint FILE_SHARE_WRITE = 0x00000002;
         private const uint FILE_SHARE_DELETE = 0x00000004;
         private const uint OPEN_EXISTING = 3;
+        private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
         private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        private const uint FILE_FILE_COMPRESSION = 0x00000010;
+        private const uint FSCTL_SET_COMPRESSION = 0x0009C040;
+        private const ushort COMPRESSION_FORMAT_DEFAULT = 0x0001;
         private const int FileStandardInfo = 1;
         private static readonly IntPtr INVALID_HANDLE_VALUE =
             new IntPtr(-1);
@@ -323,9 +346,211 @@ namespace SierraHistoryBridge
             out FILE_STANDARD_INFO lpFileInformation,
             uint dwBufferSize);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool GetVolumeInformationW(
+            string lpRootPathName,
+            StringBuilder lpVolumeNameBuffer,
+            uint nVolumeNameSize,
+            out uint lpVolumeSerialNumber,
+            out uint lpMaximumComponentLength,
+            out uint lpFileSystemFlags,
+            StringBuilder lpFileSystemNameBuffer,
+            uint nFileSystemNameSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(
+            IntPtr hDevice,
+            uint dwIoControlCode,
+            ref ushort lpInBuffer,
+            uint nInBufferSize,
+            IntPtr lpOutBuffer,
+            uint nOutBufferSize,
+            out uint lpBytesReturned,
+            IntPtr lpOverlapped);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(
             IntPtr hObject);
+
+        public static bool VolumeSupportsFileCompression(string path)
+        {
+            string fullPath = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(fullPath);
+
+            if (String.IsNullOrEmpty(root))
+                return false;
+
+            uint serialNumber;
+            uint maximumComponentLength;
+            uint fileSystemFlags;
+
+            var volumeName = new StringBuilder(261);
+            var fileSystemName = new StringBuilder(261);
+
+            bool ok = GetVolumeInformationW(
+                root,
+                volumeName,
+                (uint)volumeName.Capacity,
+                out serialNumber,
+                out maximumComponentLength,
+                out fileSystemFlags,
+                fileSystemName,
+                (uint)fileSystemName.Capacity);
+
+            if (!ok)
+                return false;
+
+            return
+                (fileSystemFlags &
+                    FILE_FILE_COMPRESSION) != 0;
+        }
+
+        public static bool IsFileCompressed(string path)
+        {
+            if (!File.Exists(path))
+                throw new FileNotFoundException(
+                    "File was not found.",
+                    path);
+
+            return
+                (File.GetAttributes(path) &
+                    FileAttributes.Compressed) != 0;
+        }
+
+        private static bool EnableFileCompressionInternal(string path)
+        {
+            if (!VolumeSupportsFileCompression(path))
+                return false;
+
+            if (IsFileCompressed(path))
+                return true;
+
+            IntPtr handle = CreateFileW(
+                path,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ |
+                    FILE_SHARE_WRITE |
+                    FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                IntPtr.Zero);
+
+            if (handle == INVALID_HANDLE_VALUE)
+            {
+                throw new IOException(
+                    "Could not open file for NTFS compression. Win32 error " +
+                    Marshal.GetLastWin32Error().ToString(
+                        CultureInfo.InvariantCulture) +
+                    ".");
+            }
+
+            try
+            {
+                ushort format =
+                    COMPRESSION_FORMAT_DEFAULT;
+
+                uint returned;
+
+                if (!DeviceIoControl(
+                        handle,
+                        FSCTL_SET_COMPRESSION,
+                        ref format,
+                        sizeof(ushort),
+                        IntPtr.Zero,
+                        0,
+                        out returned,
+                        IntPtr.Zero))
+                {
+                    throw new IOException(
+                        "Could not enable NTFS compression. Win32 error " +
+                        Marshal.GetLastWin32Error().ToString(
+                            CultureInfo.InvariantCulture) +
+                        ".");
+                }
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+
+            if (!IsFileCompressed(path))
+            {
+                throw new IOException(
+                    "NTFS compression was requested but the compressed file attribute is not set.");
+            }
+
+            return true;
+        }
+
+        private static bool CreateCompressedOutputFile(string path)
+        {
+            using (var placeholder = new FileStream(
+                path,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4096,
+                FileOptions.None))
+            {
+                placeholder.Flush(true);
+            }
+
+            if (!VolumeSupportsFileCompression(path))
+                return false;
+
+            return EnableFileCompressionInternal(path);
+        }
+
+        public static FileCompressionResult CompressFileVerified(string path)
+        {
+            DateTime started = DateTime.UtcNow;
+
+            if (!File.Exists(path))
+                throw new FileNotFoundException(
+                    "File was not found.",
+                    path);
+
+            var file = new FileInfo(path);
+
+            long logicalBytes =
+                file.Length;
+
+            long allocatedBefore =
+                GetFileAllocatedBytes(path);
+
+            bool supported =
+                VolumeSupportsFileCompression(path);
+
+            bool wasCompressed =
+                supported &&
+                IsFileCompressed(path);
+
+            bool isCompressed =
+                wasCompressed;
+
+            if (supported &&
+                !wasCompressed)
+            {
+                isCompressed =
+                    EnableFileCompressionInternal(path);
+            }
+
+            long allocatedAfter =
+                GetFileAllocatedBytes(path);
+
+            return new FileCompressionResult
+            {
+                Supported = supported,
+                WasCompressed = wasCompressed,
+                IsCompressed = isCompressed,
+                LogicalBytes = logicalBytes,
+                AllocatedBytesBefore = allocatedBefore,
+                AllocatedBytesAfter = allocatedAfter,
+                ElapsedSeconds =
+                    (DateTime.UtcNow - started).TotalSeconds
+            };
+        }
 
         public static long GetFileAllocatedBytes(string path)
         {
@@ -705,6 +930,10 @@ namespace SierraHistoryBridge
                 long restoredBytes = 0;
                 string restoredHash;
 
+                bool compressionSupported =
+                    CreateCompressedOutputFile(
+                        temporaryPath);
+
                 using (var input = new FileStream(
                     archivePath,
                     FileMode.Open,
@@ -715,7 +944,7 @@ namespace SierraHistoryBridge
                 using (var gzip = new GZipStream(input, CompressionMode.Decompress))
                 using (var output = new FileStream(
                     temporaryPath,
-                    FileMode.CreateNew,
+                    FileMode.Open,
                     FileAccess.Write,
                     FileShare.None,
                     8 * 1024 * 1024,
@@ -766,6 +995,33 @@ namespace SierraHistoryBridge
                     File.Move(temporaryPath, destinationPath);
                 }
 
+                bool compressionEnabled = false;
+
+                if (compressionSupported)
+                {
+                    try
+                    {
+                        compressionEnabled =
+                            IsFileCompressed(
+                                destinationPath);
+
+                        if (!compressionEnabled)
+                        {
+                            compressionEnabled =
+                                EnableFileCompressionInternal(
+                                    destinationPath);
+                        }
+                    }
+                    catch
+                    {
+                        compressionEnabled = false;
+                    }
+                }
+
+                long allocatedBytes =
+                    GetFileAllocatedBytes(
+                        destinationPath);
+
                 if (originalWriteTicks > 0)
                 {
                     try
@@ -781,6 +1037,12 @@ namespace SierraHistoryBridge
                 {
                     RestoredBytes = restoredBytes,
                     Sha256 = restoredHash,
+                    CompressionSupported =
+                        compressionSupported,
+                    CompressionEnabled =
+                        compressionEnabled,
+                    AllocatedBytes =
+                        allocatedBytes,
                     ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
                 };
             }
@@ -2894,11 +3156,15 @@ namespace SierraHistoryBridge
 
             try
             {
+                bool compressionSupported =
+                    CreateCompressedOutputFile(
+                        temporaryPath);
+
                 using (var input = new FileStream(
                     sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
                     16 * 1024 * 1024, FileOptions.SequentialScan))
                 using (var output = new FileStream(
-                    temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    temporaryPath, FileMode.Open, FileAccess.Write, FileShare.None,
                     16 * 1024 * 1024, FileOptions.SequentialScan))
                 {
                     byte[] header = new byte[HeaderSize];
@@ -3203,6 +3469,33 @@ namespace SierraHistoryBridge
                     File.Move(temporaryPath, targetPath);
                 }
 
+                bool compressionEnabled = false;
+
+                if (compressionSupported)
+                {
+                    try
+                    {
+                        compressionEnabled =
+                            IsFileCompressed(
+                                targetPath);
+
+                        if (!compressionEnabled)
+                        {
+                            compressionEnabled =
+                                EnableFileCompressionInternal(
+                                    targetPath);
+                        }
+                    }
+                    catch
+                    {
+                        compressionEnabled = false;
+                    }
+                }
+
+                long outputAllocatedBytes =
+                    GetFileAllocatedBytes(
+                        targetPath);
+
                 replaceSeconds =
                     (DateTime.UtcNow - replaceStarted).TotalSeconds;
 
@@ -3222,6 +3515,12 @@ namespace SierraHistoryBridge
                     FlushSeconds = flushSeconds,
                     ValidationSeconds = validationSeconds,
                     ReplaceSeconds = replaceSeconds,
+                    CompressionSupported =
+                        compressionSupported,
+                    CompressionEnabled =
+                        compressionEnabled,
+                    OutputAllocatedBytes =
+                        outputAllocatedBytes,
                     OutOfOrderRecords = outOfOrderRecords,
                     FirstOutOfOrderIndex = firstOutOfOrderIndex,
                     FirstPriorDateTime = firstPriorDateTime,
@@ -3303,6 +3602,9 @@ namespace SierraHistoryBridge
         public bool PreservedLatestSourceDate;
         public long FirstDateTicks;
         public long LastDateTicks;
+        public bool CompressionSupported;
+        public bool CompressionEnabled;
+        public long OutputAllocatedBytes;
         public double ElapsedSeconds;
     }
 
@@ -3684,8 +3986,29 @@ namespace SierraHistoryBridge
 
             try
             {
+                bool compressionSupported =
+                    ScidBridge.VolumeSupportsFileCompression(
+                        temporaryPath);
+
+                using (var placeholder = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    FileOptions.None))
+                {
+                    placeholder.Flush(true);
+                }
+
+                if (compressionSupported)
+                {
+                    ScidBridge.CompressFileVerified(
+                        temporaryPath);
+                }
+
                 using (var stream = new FileStream(
-                    temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    temporaryPath, FileMode.Open, FileAccess.Write, FileShare.None,
                     64 * 1024, FileOptions.SequentialScan))
                 using (var writer = new StreamWriter(
                     stream, Encoding.ASCII, 64 * 1024, true))
@@ -3724,6 +4047,36 @@ namespace SierraHistoryBridge
                     File.Move(temporaryPath, targetPath);
                 }
 
+                bool compressionEnabled = false;
+
+                if (compressionSupported)
+                {
+                    try
+                    {
+                        compressionEnabled =
+                            ScidBridge.IsFileCompressed(
+                                targetPath);
+
+                        if (!compressionEnabled)
+                        {
+                            var compression =
+                                ScidBridge.CompressFileVerified(
+                                    targetPath);
+
+                            compressionEnabled =
+                                compression.IsCompressed;
+                        }
+                    }
+                    catch
+                    {
+                        compressionEnabled = false;
+                    }
+                }
+
+                long outputAllocatedBytes =
+                    ScidBridge.GetFileAllocatedBytes(
+                        targetPath);
+
                 DailyMeta finalMeta = GetMeta(targetPath);
 
                 if (finalMeta.Records != outputMeta.Records ||
@@ -3743,6 +4096,12 @@ namespace SierraHistoryBridge
                     PreservedLatestSourceDate = preserveLatestSourceDate,
                     FirstDateTicks = finalMeta.FirstDateTicks,
                     LastDateTicks = finalMeta.LastDateTicks,
+                    CompressionSupported =
+                        compressionSupported,
+                    CompressionEnabled =
+                        compressionEnabled,
+                    OutputAllocatedBytes =
+                        outputAllocatedBytes,
                     ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
                 };
             }

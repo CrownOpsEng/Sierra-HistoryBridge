@@ -153,3 +153,25 @@ does not authorize deletion of persistent rollback backups; the duplicate
 cleanup prompt requires its own confirmation.
 
 Different rollback content is never grouped as a duplicate.
+
+
+## Windows file compression
+
+SCID files keep the same logical size regardless of file-system compression.
+A large SCID therefore has the same logical byte length even when its allocated
+disk usage is much smaller.
+
+When the Data volume supports per-file compression, the bridge:
+
+- enables compression on new temporary market-data outputs before writing their
+  payload
+- verifies compression on the final SCID/DLY target after publication
+- restores SC Data and Rithmic market-data archives through compressed
+  temporary outputs
+- records logical and allocated sizes in operation logs
+
+Existing uncompressed Rithmic targets are never compressed silently. Storage
+Report identifies them and asks before enabling compression in place.
+
+GZip archives are already compressed containers and are not part of this
+in-place market-data compression workflow.

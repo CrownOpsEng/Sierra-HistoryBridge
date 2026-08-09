@@ -233,3 +233,31 @@ Removal requires explicit confirmation.
 Duplicate groups are materialized as a normal object array before being returned
 to PowerShell. This avoids Windows PowerShell 5.1 binder issues with
 `Generic.List[object]` array-subexpression conversion.
+
+
+## Windows file compression
+
+The engine checks the Data volume with `GetVolumeInformationW` and the
+`FILE_FILE_COMPRESSION` capability flag.
+
+Per-file compression is enabled with `DeviceIoControl` and
+`FSCTL_SET_COMPRESSION` using `COMPRESSION_FORMAT_DEFAULT`.
+
+For SCID conversion, Historical Daily synchronization, and archive restore:
+
+1. create the temporary output file
+2. enable file compression if the volume supports it
+3. write and durably flush the payload
+4. perform normal content validation
+5. publish atomically
+6. verify the final target still has the compressed file attribute
+7. record final allocated bytes
+
+If compression cannot be enabled on the temporary output, the operation stops
+before publication. After content has been published successfully, compression
+is verified again and repaired when possible. A post-publication compression
+problem is reported as a compression warning rather than misreporting a
+successful content replacement as a failed transaction.
+
+If the volume does not support per-file compression, normal data processing can
+continue uncompressed and the condition is recorded in logs.

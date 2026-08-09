@@ -167,6 +167,20 @@ try {
         throw "Expected monotonic source timestamps."
     }
 
+    $compressionSupported =
+        [SierraHistoryBridge.ScidBridge]::VolumeSupportsFileCompression(
+            $temp)
+
+    if ($compressionSupported) {
+        if (-not $result.CompressionSupported -or
+            -not $result.CompressionEnabled -or
+            -not [SierraHistoryBridge.ScidBridge]::IsFileCompressed(
+                $target)) {
+
+            throw "Converted SCID did not retain file compression."
+        }
+    }
+
     $baselineRaw =
         Join-Path `
             $backup `
@@ -346,17 +360,28 @@ try {
         }
     }
 
-    [void][SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
-        $baselineArchive,
-        $restoredBaselineTarget,
-        [long]$baselineMeta["original_bytes"],
-        [string]$baselineMeta["sha256"],
-        [long]$baselineMeta["original_write_ticks"],
-        $true,
-        $false)
+    $restoreResult =
+        [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
+            $baselineArchive,
+            $restoredBaselineTarget,
+            [long]$baselineMeta["original_bytes"],
+            [string]$baselineMeta["sha256"],
+            [long]$baselineMeta["original_write_ticks"],
+            $true,
+            $false)
 
     if (-not (Test-Path -LiteralPath $restoredBaselineTarget)) {
         throw "Compressed SCID restore round-trip failed."
+    }
+
+    if ($compressionSupported) {
+        if (-not $restoreResult.CompressionSupported -or
+            -not $restoreResult.CompressionEnabled -or
+            -not [SierraHistoryBridge.ScidBridge]::IsFileCompressed(
+                $restoredBaselineTarget)) {
+
+            throw "Restored SCID did not retain file compression."
+        }
     }
 
     Write-Host "PASS: compressed SCID restore round-trip"
@@ -599,6 +624,16 @@ try {
         throw "Expected the overlapping latest source date to remain from the Rithmic target."
     }
 
+    if ($compressionSupported) {
+        if (-not $dailyResult.CompressionSupported -or
+            -not $dailyResult.CompressionEnabled -or
+            -not [SierraHistoryBridge.ScidBridge]::IsFileCompressed(
+                $dailyTarget)) {
+
+            throw "Historical Daily target did not retain file compression."
+        }
+    }
+
     $dailyText = Get-Content -LiteralPath $dailyTarget -Raw
 
     if ($dailyText -notmatch
@@ -623,6 +658,34 @@ try {
     if ($historicalMeta.Length -ne
         ([SierraHistoryBridge.ScidBridge]::GetMeta($source)).Length) {
         throw "Historical replacement must have the same byte length as the source."
+    }
+
+    if ($compressionSupported) {
+        $compressionProbe =
+            Join-Path `
+                $temp `
+                "compression-probe.bin"
+
+        [IO.File]::WriteAllBytes(
+            $compressionProbe,
+            (New-Object byte[] (4 * 1024 * 1024)))
+
+        $compressionResult =
+            [SierraHistoryBridge.ScidBridge]::CompressFileVerified(
+                $compressionProbe)
+
+        if (-not $compressionResult.Supported -or
+            -not $compressionResult.IsCompressed -or
+            -not [SierraHistoryBridge.ScidBridge]::IsFileCompressed(
+                $compressionProbe)) {
+
+            throw "Verified existing-file compression failed."
+        }
+
+        Write-Host "PASS: Windows file compression"
+    }
+    else {
+        Write-Host "SKIP: Windows file compression is not supported on the test volume."
     }
 
     Write-Host "PASS: scale inference"

@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.30 - 2026-08-08
+## v0.0.31 - 2026-08-08
 
 Experimental release.
 
@@ -38,6 +38,10 @@ Experimental release.
 - bridge-owned empty-directory cleanup
 
 ### Storage and Windows integration
+
+- generated and restored market-data targets use verified Windows file compression when supported
+- Storage Report detects existing uncompressed Rithmic targets and offers confirmed in-place compression
+- normal Update reports uncompressed existing targets without modifying them automatically
 
 - logical and allocated/on-disk storage reporting
 - configurable Data, Archive, Recovery, and Logs folders

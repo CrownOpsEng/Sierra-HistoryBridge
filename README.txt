@@ -1,4 +1,4 @@
-SIERRA HISTORY BRIDGE v0.0.30
+SIERRA HISTORY BRIDGE v0.0.31
 
 PURPOSE
   Maintains Rithmic-named Sierra Chart SCID and Historical Daily files from

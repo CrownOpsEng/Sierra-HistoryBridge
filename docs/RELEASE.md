@@ -20,7 +20,7 @@ This repository is private.
 Current release:
 
 ```text
-v0.0.30
+v0.0.31
 ```
 
 ## Repository tag
@@ -28,8 +28,8 @@ v0.0.30
 When the release is accepted:
 
 ```bash
-git tag v0.0.30
-git push origin v0.0.30
+git tag v0.0.31
+git push origin v0.0.31
 ```
 
 The repository and release package are private unless the owner explicitly

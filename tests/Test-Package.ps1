@@ -660,6 +660,70 @@ if ($rollbackText -notmatch 'Review-RithmicRollbackDuplicates\s+`\s*\r?\n\s+\$Re
     throw "Duplicate-review regression: Rollback is not reviewing duplicates across all targets."
 }
 
+
+foreach ($compressionEngineToken in @(
+    'FSCTL_SET_COMPRESSION',
+    'VolumeSupportsFileCompression',
+    'IsFileCompressed',
+    'CompressFileVerified',
+    'CreateCompressedOutputFile',
+    'CompressionSupported',
+    'CompressionEnabled',
+    'OutputAllocatedBytes'
+)) {
+    if ($converterText -notlike "*$compressionEngineToken*") {
+        throw "Compression regression: engine is missing $compressionEngineToken"
+    }
+}
+
+foreach ($compressionAppToken in @(
+    'Get-RithmicCompressionReport',
+    'Review-RithmicTargetCompression',
+    'Enable NTFS compression for these Rithmic market-data files? [y/N]',
+    'Rithmic compression:'
+)) {
+    if (-not $appText.Contains($compressionAppToken)) {
+        throw "Compression regression: application is missing $compressionAppToken"
+    }
+}
+
+$updateStart =
+    $appText.IndexOf(
+        'function Invoke-SierraHistoryBridge')
+
+$updateEnd =
+    $appText.IndexOf(
+        'function Invoke-SierraHistoryUtilityMode',
+        $updateStart)
+
+$updateText =
+    $appText.Substring(
+        $updateStart,
+        $updateEnd - $updateStart)
+
+if ($updateText -like '*CompressFileVerified*') {
+    throw "Compression policy regression: normal Update must not recompress existing Rithmic files automatically."
+}
+
+$compressionReviewStart =
+    $appText.IndexOf(
+        'function Review-RithmicTargetCompression')
+
+$compressionReviewEnd =
+    $appText.IndexOf(
+        'function Select-ArchiveSourceFiles',
+        $compressionReviewStart)
+
+$compressionReviewText =
+    $appText.Substring(
+        $compressionReviewStart,
+        $compressionReviewEnd - $compressionReviewStart)
+
+if ($compressionReviewText -notlike '*Read-Host*' -or
+    $compressionReviewText -notlike '*Wait-ForSierraChartClosed*') {
+    throw "Compression policy regression: existing-file compression must be confirmed and require Sierra Chart closed."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

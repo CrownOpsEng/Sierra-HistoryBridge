@@ -161,3 +161,24 @@ without confirmation.
 Update, Storage Report, and Rollback can surface duplicate rollback groups.
 Interactive runs ask whether redundant copies should be removed while keeping
 one verified copy of each exact state.
+
+
+### Rithmic file compression
+
+New SCID and Historical Daily targets are written with Windows file compression
+when the Data volume supports it.
+
+Storage Report scans existing one-digit-year Rithmic `.scid` and `.dly` files.
+If uncompressed files are found, it reports their logical/on-disk usage and
+asks:
+
+```text
+Enable NTFS compression for these Rithmic market-data files? [y/N]
+```
+
+Choosing Yes requires Sierra Chart to be closed. The bridge compresses each
+file in place, verifies the compressed attribute, records before/after
+allocation in the log, and reports reclaimed disk space.
+
+Normal Update only reports existing uncompressed targets and points to Storage
+Report; it does not modify them automatically.

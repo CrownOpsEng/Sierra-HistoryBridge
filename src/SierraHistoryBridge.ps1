@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.30"
+$Version = "0.0.31"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1625,6 +1625,303 @@ function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
         ($SourceFile.Name + ".gz")
 }
 
+function Get-RithmicCompressionReport(
+    [string]$DataFolder) {
+
+    $supported =
+        [SierraHistoryBridge.ScidBridge]::VolumeSupportsFileCompression(
+            $DataFolder)
+
+    $rithmicPattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $files =
+        @(
+            Get-ChildItem `
+                -LiteralPath $DataFolder `
+                -File `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+                $rithmicPattern.IsMatch(
+                    $_.Name)
+            }
+        )
+
+    $uncompressed =
+        @()
+
+    $logicalBytes = 0L
+    $allocatedBytes = 0L
+    $warnings = 0
+
+    if ($supported) {
+        foreach ($file in $files) {
+            try {
+                if (-not (
+                    [SierraHistoryBridge.ScidBridge]::IsFileCompressed(
+                        $file.FullName))) {
+
+                    $allocated =
+                        [long][SierraHistoryBridge.ScidBridge]::GetFileAllocatedBytes(
+                            $file.FullName)
+
+                    $uncompressed +=
+                        [pscustomobject]@{
+                            Name = $file.Name
+                            Path = $file.FullName
+                            LogicalBytes =
+                                [long]$file.Length
+                            AllocatedBytes =
+                                $allocated
+                        }
+
+                    $logicalBytes +=
+                        [long]$file.Length
+
+                    $allocatedBytes +=
+                        $allocated
+                }
+            }
+            catch {
+                $warnings++
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Supported = $supported
+        TotalRithmicFiles = $files.Count
+        UncompressedFiles =
+            [object[]]$uncompressed
+        UncompressedCount =
+            $uncompressed.Count
+        LogicalBytes =
+            $logicalBytes
+        AllocatedBytes =
+            $allocatedBytes
+        Warnings =
+            $warnings
+    }
+}
+
+function Review-RithmicTargetCompression(
+    [string]$DataFolder,
+    [bool]$AskToCompress) {
+
+    $report =
+        Get-RithmicCompressionReport `
+            $DataFolder
+
+    if (-not $report.Supported) {
+        Write-Host
+        Write-Host (
+            "Rithmic compression: file compression is not supported on the Data volume.") `
+            -ForegroundColor Yellow
+
+        Write-UtilityLog `
+            "WARN" `
+            "COMPRESSION" `
+            "supported=false"
+
+        return [pscustomobject]@{
+            Supported = $false
+            Found = $false
+            Compressed = 0
+            Failed = 0
+            ReclaimedBytes = 0L
+        }
+    }
+
+    if ($report.UncompressedCount -eq 0) {
+        Write-UtilityLog `
+            "INFO" `
+            "COMPRESSION" `
+            (
+                "supported=true; rithmic_files={0}; uncompressed=0" -f
+                $report.TotalRithmicFiles)
+
+        return [pscustomobject]@{
+            Supported = $true
+            Found = $false
+            Compressed = 0
+            Failed = 0
+            ReclaimedBytes = 0L
+        }
+    }
+
+    Write-Host
+    Write-Host (
+        "Rithmic compression: {0} uncompressed file(s) | {1} logical / {2} on disk" -f
+        $report.UncompressedCount,
+        (Format-StorageBytes `
+            $report.LogicalBytes),
+        (Format-StorageBytes `
+            $report.AllocatedBytes)) `
+        -ForegroundColor Yellow
+
+    Write-UtilityLog `
+        "WARN" `
+        "COMPRESSION" `
+        (
+            "supported=true; rithmic_files={0}; uncompressed={1}; logical_bytes={2}; allocated_bytes={3}; scan_warnings={4}" -f
+            $report.TotalRithmicFiles,
+            $report.UncompressedCount,
+            $report.LogicalBytes,
+            $report.AllocatedBytes,
+            $report.Warnings)
+
+    if (-not $AskToCompress) {
+        return [pscustomobject]@{
+            Supported = $true
+            Found = $true
+            Compressed = 0
+            Failed = 0
+            ReclaimedBytes = 0L
+        }
+    }
+
+    $answer =
+        Read-Host (
+            "Enable NTFS compression for these Rithmic market-data files? [y/N]")
+
+    if ($answer.Trim().ToLowerInvariant() -notin @(
+        "y",
+        "yes")) {
+
+        Write-Host "  Compression left unchanged."
+
+        return [pscustomobject]@{
+            Supported = $true
+            Found = $true
+            Compressed = 0
+            Failed = 0
+            ReclaimedBytes = 0L
+        }
+    }
+
+    if (-not (Wait-ForSierraChartClosed `
+            "Compressing Rithmic market data" `
+            $true)) {
+
+        return [pscustomobject]@{
+            Supported = $true
+            Found = $true
+            Compressed = 0
+            Failed = 0
+            ReclaimedBytes = 0L
+        }
+    }
+
+    $before =
+        Get-StorageSnapshot `
+            $DataFolder
+
+    $compressed = 0
+    $failed = 0
+    $reclaimed = 0L
+
+    foreach ($item in $report.UncompressedFiles) {
+        $status =
+            "Compress $($item.Name)"
+
+        try {
+            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                $status)
+
+            $result =
+                [SierraHistoryBridge.ScidBridge]::CompressFileVerified(
+                    $item.Path)
+
+            if (-not $result.Supported -or
+                -not $result.IsCompressed) {
+
+                throw (
+                    "NTFS compression was not enabled.")
+            }
+
+            $saved =
+                [Math]::Max(
+                    0L,
+                    (
+                        [long]$result.AllocatedBytesBefore -
+                        [long]$result.AllocatedBytesAfter
+                    ))
+
+            $reclaimed +=
+                $saved
+
+            $compressed++
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | OK")
+
+            Write-UtilityLog `
+                "INFO" `
+                "COMPRESSION" `
+                (
+                    "file={0}; logical_bytes={1}; allocated_before={2}; allocated_after={3}; reclaimed_bytes={4}; elapsed_seconds={5}; status=OK" -f
+                    $item.Name,
+                    $result.LogicalBytes,
+                    $result.AllocatedBytesBefore,
+                    $result.AllocatedBytesAfter,
+                    $saved,
+                    $result.ElapsedSeconds)
+        }
+        catch {
+            $failed++
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | FAILED")
+
+            Write-UtilityLog `
+                "ERROR" `
+                "COMPRESSION" `
+                (
+                    "file={0}; status=FAILED; error={1}" -f
+                    $item.Name,
+                    $_.Exception.Message)
+        }
+    }
+
+    $after =
+        Get-StorageSnapshot `
+            $DataFolder
+
+    Write-Host
+    Write-Host (
+        "Compression: {0} compressed | {1} failed | {2} reclaimed" -f
+        $compressed,
+        $failed,
+        (Format-StorageBytes `
+            $reclaimed))
+
+    Show-StorageDelta `
+        $before `
+        $after
+
+    Write-UtilityLog `
+        $(if ($failed -eq 0) {
+            "INFO"
+        }
+        else {
+            "ERROR"
+        }) `
+        "COMPRESSION" `
+        (
+            "compressed={0}; failed={1}; reclaimed_bytes={2}" -f
+            $compressed,
+            $failed,
+            $reclaimed)
+
+    return [pscustomobject]@{
+        Supported = $true
+        Found = $true
+        Compressed = $compressed
+        Failed = $failed
+        ReclaimedBytes = $reclaimed
+    }
+}
+
 function Select-ArchiveSourceFiles(
     $SourceFiles,
     [datetime]$DefaultBefore,
@@ -2862,18 +3159,31 @@ function Invoke-SourceRestoreManager(
 
             $restored++
 
+            $restoreStatus =
+                "$status | OK"
+
+            if ($result.CompressionSupported -and
+                -not $result.CompressionEnabled) {
+
+                $restoreStatus +=
+                    " | compression warning"
+            }
+
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "$status | OK")
+                $restoreStatus)
 
             Write-UtilityLog `
                 "INFO" `
                 "RESTORE" `
                 (
-                    "file={0}; type={1}; restored_bytes={2}; sha256={3}; archive_removed=true; status=OK" -f
+                    "file={0}; type={1}; restored_bytes={2}; sha256={3}; compression_supported={4}; compressed={5}; allocated_bytes={6}; archive_removed=true; status=OK" -f
                     $item.OriginalName,
                     $item.Extension,
                     $result.RestoredBytes,
-                    $item.Sha256)
+                    $item.Sha256,
+                    $result.CompressionSupported,
+                    $result.CompressionEnabled,
+                    $result.AllocatedBytes)
         }
         catch {
             $failed++
@@ -4108,21 +4418,34 @@ function Invoke-RithmicRollbackManager(
             $selection.TargetPath `
             $selection.Extension)
 
+        $rollbackStatus =
+            "$status | OK"
+
+        if ($result.CompressionSupported -and
+            -not $result.CompressionEnabled) {
+
+            $rollbackStatus +=
+                " | compression warning"
+        }
+
         [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-            "$status | OK")
+            $rollbackStatus)
 
         Write-UtilityLog `
             "INFO" `
             "ROLLBACK" `
             (
-                "target={0}; backup={1}; restored_bytes={2}; sha256={3}; replace_existing={4}; undo_backup={5}; undo_reused={6}; state_invalidated=true; status=OK" -f
+                "target={0}; backup={1}; restored_bytes={2}; sha256={3}; replace_existing={4}; undo_backup={5}; undo_reused={6}; compression_supported={7}; compressed={8}; allocated_bytes={9}; state_invalidated=true; status=OK" -f
                 $selection.TargetName,
                 $selection.ArchivePath,
                 $result.RestoredBytes,
                 $selection.Sha256,
                 $targetExists,
                 $(if ($undoArchive) { $undoArchive } else { "none" }),
-                $undoReused)
+                $undoReused,
+                $result.CompressionSupported,
+                $result.CompressionEnabled,
+                $result.AllocatedBytes)
     }
     catch {
         [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -4700,6 +5023,10 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
         $ResolvedDataFolder `
         $null `
         $null `
+        ([bool]$Interactive))
+
+    [void](Review-RithmicTargetCompression `
+        $ResolvedDataFolder `
         ([bool]$Interactive))
 
     $baselines =
@@ -5748,6 +6075,40 @@ function Invoke-SierraHistoryBridge {
             "      Storage warnings: {0} item(s) left untouched" -f
             $storageCleanup.Warnings) `
             -ForegroundColor Yellow
+    }
+
+    $compressionReport =
+        Get-RithmicCompressionReport `
+            $resolvedDataFolder
+
+    if ($compressionReport.Supported -and
+        $compressionReport.UncompressedCount -gt 0) {
+
+        Write-Host (
+            "      Rithmic compression: {0} uncompressed file(s) | {1} on disk | use Storage Report" -f
+            $compressionReport.UncompressedCount,
+            (Format-StorageBytes `
+                $compressionReport.AllocatedBytes)) `
+            -ForegroundColor Yellow
+
+        $script:EarlyUpdateDiagnostics.Add(
+            (
+                Format-LogRecord `
+                    "WARN" `
+                    "COMPRESSION" `
+                    (
+                        "uncompressed={0}; logical_bytes={1}; allocated_bytes={2}; action=review_with_storage_report" -f
+                        $compressionReport.UncompressedCount,
+                        $compressionReport.LogicalBytes,
+                        $compressionReport.AllocatedBytes)))
+    }
+    elseif (-not $compressionReport.Supported) {
+        $script:EarlyUpdateDiagnostics.Add(
+            (
+                Format-LogRecord `
+                    "WARN" `
+                    "COMPRESSION" `
+                    "supported=false"))
     }
 
     $config = Read-JsonFile $ConfigPath
@@ -8339,6 +8700,42 @@ function Invoke-SierraHistoryBridge {
                     " | warning"
             }
 
+            $compressionWarning =
+                (
+                    $scidResult -and
+                    $scidResult.CompressionSupported -and
+                    -not $scidResult.CompressionEnabled
+                ) -or
+                (
+                    $dailyResult -and
+                    $dailyResult.CompressionSupported -and
+                    -not $dailyResult.CompressionEnabled
+                )
+
+            if ($compressionWarning) {
+                $warningFiles++
+
+                $finalStatus +=
+                    " | compression warning"
+
+                $compressionEntry =
+                    Format-LogRecord `
+                        "WARN" `
+                        "COMPRESSION" `
+                        (
+                            "source={0}; target={1}; status=WARNING; reason=final_target_not_compressed" -f
+                            (Get-CandidateSourceDisplay $candidate),
+                            (Get-CandidateTargetDisplay $candidate))
+
+                $log.Add(
+                    $compressionEntry)
+
+                Add-Content `
+                    -LiteralPath $logPath `
+                    -Value $compressionEntry `
+                    -Encoding UTF8
+            }
+
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
                 $finalStatus)
 
@@ -8369,6 +8766,9 @@ function Invoke-SierraHistoryBridge {
                     "flush_seconds=$($scidResult.FlushSeconds); " +
                     "validation_seconds=$($scidResult.ValidationSeconds); " +
                     "replace_seconds=$($scidResult.ReplaceSeconds); " +
+                    "compression_supported=$($scidResult.CompressionSupported); " +
+                    "compressed=$($scidResult.CompressionEnabled); " +
+                    "allocated_bytes=$($scidResult.OutputAllocatedBytes); " +
                     "elapsed_seconds=$($scidResult.ElapsedSeconds)"
 
                 if ($candidate.ScidValidation) {
@@ -8427,7 +8827,7 @@ function Invoke-SierraHistoryBridge {
                         "INFO" `
                         "DLY" `
                         (
-                            "source={0}; target={1}; scale=x{2}; source_records={3}; source_applied={4}; target_records_preserved={5}; target_records_replaced_or_dropped={6}; latest_source_date_preserved_from_target={7}; output_records={8}; elapsed_seconds={9}" -f
+                            "source={0}; target={1}; scale=x{2}; source_records={3}; source_applied={4}; target_records_preserved={5}; target_records_replaced_or_dropped={6}; latest_source_date_preserved_from_target={7}; output_records={8}; compression_supported={9}; compressed={10}; allocated_bytes={11}; elapsed_seconds={12}" -f
                             $candidate.DailySourceName,
                             $candidate.DailyTargetName,
                             $scales[$candidate.Group],
@@ -8437,6 +8837,9 @@ function Invoke-SierraHistoryBridge {
                             $dailyResult.ReplacedOrDroppedTargetRecords,
                             $dailyResult.PreservedLatestSourceDate,
                             $dailyResult.OutputRecords,
+                            $dailyResult.CompressionSupported,
+                            $dailyResult.CompressionEnabled,
+                            $dailyResult.OutputAllocatedBytes,
                             $dailyResult.ElapsedSeconds)
 
                 $log.Add($dailyEntry)
