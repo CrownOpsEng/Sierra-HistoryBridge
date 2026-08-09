@@ -197,3 +197,15 @@ Archive, Restore and Rollback accept Explorer multi-selection.
 The selection broker collects individual Explorer invocations into one batch
 under `%TEMP%\SierraHistoryBridge\Explorer`, then consumes the manifest and
 cleans empty broker directories.
+
+
+### Header-only files
+
+History Bridge does not archive or create rollback copies of files that contain
+only a valid SCID/DLY header and no market-data records.
+
+If a valid header-only file already occupies a restore/rollback destination, it
+is replaced directly without an undo/conflict backup. The operation log records
+this as `REPLACED-WITHOUT-BACKUP`.
+
+Invalid files are not assumed to be placeholders.

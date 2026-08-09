@@ -21,7 +21,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.34"
+$Version = "0.0.35"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -1987,6 +1987,245 @@ function Convert-OptionalDate([string]$Value, [string]$Label) {
     return $parsed.Date
 }
 
+function Get-MarketDataRecordCount(
+    [string]$Path,
+    [string]$Extension) {
+
+    $normalized =
+        $Extension.TrimStart('.').ToLowerInvariant()
+
+    if ($normalized -eq "scid") {
+        return [long](
+            [SierraHistoryBridge.ScidBridge]::GetMeta(
+                $Path).Records)
+    }
+
+    if ($normalized -eq "dly") {
+        return [long](
+            [SierraHistoryBridge.DailyBridge]::GetMeta(
+                $Path).Records)
+    }
+
+    throw (
+        "Unsupported market-data extension: " +
+        $Extension)
+}
+
+function Get-GzipMarketDataRecordCount(
+    [string]$ArchivePath,
+    $Meta,
+    [string]$Extension) {
+
+    $normalized =
+        $Extension.TrimStart('.').ToLowerInvariant()
+
+    if ($normalized -eq "scid") {
+        return [long](
+            [SierraHistoryBridge.ScidBridge]::GetGzipScidRecordCount(
+                $ArchivePath,
+                [long]$Meta.OriginalBytes))
+    }
+
+    if ($normalized -eq "dly") {
+        return [long](
+            [SierraHistoryBridge.DailyBridge]::GetGzipRecordCount(
+                $ArchivePath))
+    }
+
+    throw (
+        "Unsupported market-data extension: " +
+        $Extension)
+}
+
+function Test-MarketDataHasRecords(
+    [string]$Path,
+    [string]$Extension) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Path `
+            -PathType Leaf)) {
+
+        return $false
+    }
+
+    try {
+        return (
+            (Get-MarketDataRecordCount `
+                $Path `
+                $Extension) -gt 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Remove-HeaderOnlyBridgeArchives(
+    [string]$DataFolder) {
+
+    $bridgePaths =
+        Get-BridgePaths `
+            $DataFolder
+
+    $categories =
+        @(
+            "Archive",
+            "Baselines",
+            "Rollbacks",
+            "RestoreConflicts"
+        )
+
+    $removed =
+        0
+
+    $reclaimed =
+        0L
+
+    $warnings =
+        0
+
+    foreach ($category in $categories) {
+        $directory =
+            Join-Path `
+                $bridgePaths.Storage `
+                $category
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $directory `
+                -PathType Container)) {
+
+            continue
+        }
+
+        foreach ($archive in @(
+            Get-ChildItem `
+                -LiteralPath $directory `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue
+        )) {
+            try {
+                $presence =
+                    [SierraHistoryBridge.ScidBridge]::GetGzipMarketDataPresence(
+                        $archive.FullName)
+
+                if ($presence -eq 0) {
+                    $bytes =
+                        [long]$archive.Length
+
+                    $metadataPath =
+                        $archive.FullName +
+                        ".meta"
+
+                    if (Test-Path `
+                        -LiteralPath $metadataPath `
+                        -PathType Leaf) {
+
+                        $bytes +=
+                            [long](
+                                Get-Item `
+                                    -LiteralPath $metadataPath).Length
+                    }
+
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $archive.FullName `
+                        $DataFolder)
+
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $metadataPath `
+                        $DataFolder `
+                        -IgnoreMissing)
+
+                    $removed++
+                    $reclaimed +=
+                        $bytes
+
+                    Write-UtilityLog `
+                        "INFO" `
+                        "HEADER-ONLY" `
+                        (
+                            "archive={0}; category={1}; records=0; status=REMOVED" -f
+                            $archive.FullName,
+                            $category)
+
+                    continue
+                }
+
+                if ($presence -lt 0) {
+                    continue
+                }
+
+                $meta =
+                    Read-GzipArchiveMeta `
+                        $archive.FullName
+
+                if (-not $meta -or
+                    [string]::IsNullOrWhiteSpace(
+                        [string]$meta.OriginalName)) {
+
+                    continue
+                }
+
+                $extension =
+                    [IO.Path]::GetExtension(
+                        [string]$meta.OriginalName).
+                        TrimStart('.').
+                        ToLowerInvariant()
+
+                if ($extension -notin @(
+                    "scid",
+                    "dly")) {
+
+                    continue
+                }
+
+                $records =
+                    Get-GzipMarketDataRecordCount `
+                        $archive.FullName `
+                        $meta `
+                        $extension
+
+                if ($records -le 0) {
+                    # The fast content probe above already removes proven
+                    # header-only archives. A zero here with non-zero presence
+                    # is inconsistent metadata/content, so leave it untouched.
+                    $warnings++
+
+                    Write-UtilityLog `
+                        "WARN" `
+                        "HEADER-ONLY" `
+                        (
+                            "archive={0}; status=UNVERIFIED; reason=record_count_inconsistent" -f
+                            $archive.FullName)
+                }
+            }
+            catch {
+                $warnings++
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "HEADER-ONLY" `
+                    (
+                        "archive={0}; status=UNVERIFIED; error={1}" -f
+                        $archive.FullName,
+                        $_.Exception.Message)
+            }
+        }
+    }
+
+    if ($removed -gt 0) {
+        [void](Invoke-BridgeDirectoryHousekeeping `
+            $DataFolder)
+    }
+
+    return [pscustomobject]@{
+        Removed = $removed
+        ReclaimedBytes = $reclaimed
+        Warnings = $warnings
+    }
+}
+
 function Get-ScDataSourceFiles([string]$DataFolder) {
     $sourcePattern =
         [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
@@ -2460,6 +2699,60 @@ function Invoke-SourceArchiveManager(
         return 0
     }
 
+    $headerOnly =
+        @(
+            $selection |
+            Where-Object {
+                try {
+                    (Get-MarketDataRecordCount `
+                        $_.Path `
+                        $_.Extension) -le 0
+                }
+                catch {
+                    $false
+                }
+            }
+        )
+
+    if ($headerOnly.Count -gt 0) {
+        foreach ($item in $headerOnly) {
+            Write-Host (
+                "  Skip {0} | header-only; no market data to preserve" -f
+                $item.Name) `
+                -ForegroundColor Yellow
+
+            Write-UtilityLog `
+                "INFO" `
+                "HEADER-ONLY" `
+                (
+                    "file={0}; operation=Archive; records=0; status=SKIPPED" -f
+                    $item.Path)
+        }
+
+        $headerOnlyPaths =
+            @(
+                $headerOnly |
+                ForEach-Object {
+                    $_.Path
+                }
+            )
+
+        $selection =
+            @(
+                $selection |
+                Where-Object {
+                    $headerOnlyPaths -notcontains
+                        $_.Path
+                }
+            )
+    }
+
+    if ($selection.Count -eq 0) {
+        Write-Host
+        Write-Host "No non-empty SC Data source files remain to archive."
+        return 0
+    }
+
     if (-not (Wait-ForSierraChartClosed `
             "Archiving SC Data source files" `
             $AskForFilter)) {
@@ -2621,7 +2914,7 @@ function Invoke-SourceArchiveManager(
             }
             else {
                 $result =
-                    [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
+                    [SierraHistoryBridge.DailyBridge]::ArchiveGzipVerified(
                         $item.Path,
                         $archivePath,
                         $true,
@@ -3191,6 +3484,39 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
             continue
         }
 
+        $extension =
+            $match.Groups["extension"].Value.ToLowerInvariant()
+
+        try {
+            $archiveRecords =
+                Get-GzipMarketDataRecordCount `
+                    $archive.FullName `
+                    $meta `
+                    $extension
+
+            if ($archiveRecords -le 0) {
+                Write-UtilityLog `
+                    "INFO" `
+                    "HEADER-ONLY" `
+                    (
+                        "archive={0}; operation=RestoreInventory; records=0; status=IGNORED" -f
+                        $archive.FullName)
+
+                continue
+            }
+        }
+        catch {
+            Write-UtilityLog `
+                "WARN" `
+                "ARCHIVE" `
+                (
+                    "archive={0}; status=IGNORED; reason=record_count_unverified; error={1}" -f
+                    $archive.FullName,
+                    $_.Exception.Message)
+
+            continue
+        }
+
         $fullYear = Resolve-FullContractYear $match.Groups["year"].Value
         $monthCode = $match.Groups["month"].Value.ToUpperInvariant()
 
@@ -3207,7 +3533,7 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
             FullYear = $fullYear
             MonthCode = $monthCode
             ContractMonth = Get-ContractMonth $fullYear $monthCode
-            Extension = $match.Groups["extension"].Value.ToLowerInvariant()
+            Extension = $extension
             ArchiveBytes = [long]$archive.Length
         }
     }
@@ -3385,10 +3711,26 @@ function Invoke-SourceRestoreManager(
     $conflicts = @()
     $alreadyPresent = @()
     $pending = @()
+    $headerOnlyDestinations = @()
 
     foreach ($item in $selection) {
         if (Test-Path -LiteralPath $item.Destination -PathType Leaf) {
             try {
+                $existingRecords =
+                    Get-MarketDataRecordCount `
+                        $item.Destination `
+                        $item.Extension
+
+                if ($existingRecords -le 0) {
+                    $headerOnlyDestinations +=
+                        $item
+
+                    $pending +=
+                        $item
+
+                    continue
+                }
+
                 $existingHash =
                     [SierraHistoryBridge.ScidBridge]::HashFileSha256(
                         $item.Destination)
@@ -3513,7 +3855,7 @@ function Invoke-SourceRestoreManager(
                     $false) | Out-Null
             }
             else {
-                [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
+                [SierraHistoryBridge.DailyBridge]::ArchiveGzipVerified(
                     $item.Destination,
                     $conflictArchive,
                     $true,
@@ -3552,12 +3894,66 @@ function Invoke-SourceRestoreManager(
         }
     }
 
+    $headerOnlyDestinationPaths =
+        @(
+            $headerOnlyDestinations |
+            ForEach-Object {
+                $_.Destination
+            }
+        )
+
     foreach ($item in $pending) {
         $status = "Restore $($item.OriginalName)"
         try {
+            if ($headerOnlyDestinationPaths -contains
+                $item.Destination) {
+
+                if (Test-Path `
+                    -LiteralPath $item.Destination `
+                    -PathType Leaf) {
+
+                    $recordsNow =
+                        Get-MarketDataRecordCount `
+                            $item.Destination `
+                            $item.Extension
+
+                    if ($recordsNow -le 0) {
+                        Remove-Item `
+                            -LiteralPath $item.Destination `
+                            -Force
+
+                        Write-UtilityLog `
+                            "INFO" `
+                            "HEADER-ONLY" `
+                            (
+                                "file={0}; operation=Restore; records=0; status=REPLACED-WITHOUT-BACKUP" -f
+                                $item.Destination)
+                    }
+                    else {
+                        throw (
+                            "Restore destination changed after planning and now contains data: " +
+                            $item.Destination)
+                    }
+                }
+            }
+
             [SierraHistoryBridge.ScidBridge]::UpdateStatusLine($status)
 
             $isScid = $item.Extension -eq "scid"
+
+            if (-not $isScid) {
+                $restoreRecords =
+                    Get-GzipMarketDataRecordCount `
+                        $item.ArchivePath `
+                        $item `
+                        $item.Extension
+
+                if ($restoreRecords -le 0) {
+                    throw (
+                        "Header-only Historical Daily archives are not restored.")
+                }
+            }
+
             $result =
                 [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
                     $item.ArchivePath,
@@ -4540,6 +4936,36 @@ function Get-RithmicBackupArchives(
             $extension =
                 [IO.Path]::GetExtension(
                     $targetName).TrimStart('.').ToLowerInvariant()
+
+            try {
+                $archiveRecords =
+                    Get-GzipMarketDataRecordCount `
+                        $archive.FullName `
+                        $meta `
+                        $extension
+
+                if ($archiveRecords -le 0) {
+                    Write-UtilityLog `
+                        "INFO" `
+                        "HEADER-ONLY" `
+                        (
+                            "archive={0}; operation=RollbackInventory; records=0; status=IGNORED" -f
+                            $archive.FullName)
+
+                    continue
+                }
+            }
+            catch {
+                Write-UtilityLog `
+                    "WARN" `
+                    "ROLLBACK" `
+                    (
+                        "archive={0}; status=IGNORED; reason=record_count_unverified; error={1}" -f
+                        $archive.FullName,
+                        $_.Exception.Message)
+
+                continue
+            }
 
             $resolvedProvenance =
                 Resolve-RithmicProvenanceFromContent `
@@ -5914,6 +6340,21 @@ function New-RithmicUndoArchive(
         return $null
     }
 
+    if (-not (
+        Test-MarketDataHasRecords `
+            $Backup.TargetPath `
+            $Backup.Extension)) {
+
+        Write-UtilityLog `
+            "INFO" `
+            "HEADER-ONLY" `
+            (
+                "file={0}; operation=Undo; records=0; status=NOT-PRESERVED" -f
+                $Backup.TargetPath)
+
+        return $null
+    }
+
     $bridgePaths =
         Get-BridgePaths $DataFolder
 
@@ -5963,11 +6404,12 @@ function New-RithmicUndoArchive(
         }
     }
     else {
-        [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
-            $Backup.TargetPath,
-            $archivePath,
-            $false,
-            $false) | Out-Null
+        $archiveResult =
+            [SierraHistoryBridge.DailyBridge]::ArchiveGzipVerified(
+                $Backup.TargetPath,
+                $archivePath,
+                $false,
+                $false)
     }
 
     Set-ArchiveProvenance `
@@ -6251,6 +6693,9 @@ function Invoke-RithmicRollbackManager(
         $targetContentClass =
             "Unclassified"
 
+        $targetHasRecords =
+            $false
+
         if ($targetExists) {
             try {
                 if ($selection.Extension -eq "scid") {
@@ -6266,12 +6711,20 @@ function Invoke-RithmicRollbackManager(
 
                     $targetContentClass =
                         [string]$inspection.ContentClass
+
+                    $targetHasRecords =
+                        [long]$inspection.Records -gt 0
                 }
                 else {
+                    $dailyMeta =
+                        [SierraHistoryBridge.DailyBridge]::GetMeta(
+                            $selection.TargetPath)
+
                     $targetLength =
-                        [long](
-                            Get-Item `
-                                -LiteralPath $selection.TargetPath).Length
+                        [long]$dailyMeta.Length
+
+                    $targetHasRecords =
+                        [long]$dailyMeta.Records -gt 0
 
                     $targetHash =
                         [SierraHistoryBridge.ScidBridge]::HashFileSha256(
@@ -6295,7 +6748,9 @@ function Invoke-RithmicRollbackManager(
                     0L
             }
 
-            if ($targetHash) {
+            if ($targetHash -and
+                $targetHasRecords) {
+
                 $existingUndo =
                     Get-ExactRithmicRollbackBackup `
                         $ResolvedDataFolder `
@@ -6313,6 +6768,7 @@ function Invoke-RithmicRollbackManager(
             "none"
 
         if ($targetExists -and
+            $targetHasRecords -and
             $targetHash) {
 
             if ($selection.Extension -eq "scid") {
@@ -6379,6 +6835,8 @@ function Invoke-RithmicRollbackManager(
                     $targetHash
                 TargetLength =
                     $targetLength
+                TargetHasRecords =
+                    $targetHasRecords
                 ExistingUndo =
                     $existingUndo
                 CurrentProvenance =
@@ -6413,6 +6871,9 @@ function Invoke-RithmicRollbackManager(
             elseif (-not $plan.TargetExists) {
                 "target missing; recreate"
             }
+            elseif (-not $plan.TargetHasRecords) {
+                "header-only target; replace without undo"
+            }
             elseif ($plan.ExistingUndo) {
                 "undo already protected"
             }
@@ -6441,7 +6902,7 @@ function Invoke-RithmicRollbackManager(
             "INFO" `
             "PLAN" `
             (
-                "operation=Rollback; index={0}; kind={1}; backup={2}; target={3}; backup_provenance={4}; backup_cutover={5}; current_provenance={6}; current_cutover={7}; current_evidence={8}; original_bytes={9}; target_exists={10}; target_already_matches={11}; existing_undo={12}" -f
+                "operation=Rollback; index={0}; kind={1}; backup={2}; target={3}; backup_provenance={4}; backup_cutover={5}; current_provenance={6}; current_cutover={7}; current_evidence={8}; original_bytes={9}; target_exists={10}; target_has_records={11}; target_already_matches={12}; existing_undo={13}" -f
                 $planIndex,
                 $selection.Kind,
                 $selection.ArchivePath,
@@ -6454,6 +6915,7 @@ function Invoke-RithmicRollbackManager(
                 $plan.CurrentEvidence,
                 $selection.OriginalBytes,
                 $plan.TargetExists,
+                $plan.TargetHasRecords,
                 $plan.AlreadyMatches,
                 $(if ($plan.ExistingUndo) {
                     $plan.ExistingUndo.ArchivePath
@@ -6561,7 +7023,9 @@ function Invoke-RithmicRollbackManager(
                     ".")
             }
 
-            if ($plan.TargetExists) {
+            if ($plan.TargetExists -and
+                $plan.TargetHasRecords) {
+
                 if ($plan.ExistingUndo) {
                     $undoArchive =
                         $plan.ExistingUndo.ArchivePath
@@ -6630,8 +7094,10 @@ function Invoke-RithmicRollbackManager(
                         "Undo backup: $undoArchive")
                 }
 
-                if ($undoArchives -notcontains
-                    $undoArchive) {
+                if (-not [string]::IsNullOrWhiteSpace(
+                        [string]$undoArchive) -and
+                    $undoArchives -notcontains
+                        $undoArchive) {
 
                     $undoArchives +=
                         $undoArchive
@@ -6653,6 +7119,19 @@ function Invoke-RithmicRollbackManager(
             $isScid =
                 $selection.Extension -eq
                 "scid"
+
+            if (-not $isScid) {
+                $rollbackRecords =
+                    Get-GzipMarketDataRecordCount `
+                        $selection.ArchivePath `
+                        $selection `
+                        $selection.Extension
+
+                if ($rollbackRecords -le 0) {
+                    throw (
+                        "Header-only Historical Daily archives are not restored.")
+                }
+            }
 
             $result =
                 [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
@@ -7444,6 +7923,16 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
     $staleTemps = 0
     $warnings = 0
 
+    $headerOnlyCleanup =
+        Remove-HeaderOnlyBridgeArchives `
+            $DataFolder
+
+    $reclaimed +=
+        [long]$headerOnlyCleanup.ReclaimedBytes
+
+    $warnings +=
+        [int]$headerOnlyCleanup.Warnings
+
     $duplicateReport =
         Get-DuplicateRithmicRollbackBackups `
             $DataFolder `
@@ -7544,6 +8033,8 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
     return [pscustomobject]@{
         ReclaimedBytes = $reclaimed
         StaleTemps = $staleTemps
+        HeaderOnlyArchivesRemoved =
+            $headerOnlyCleanup.Removed
         DuplicateRollbackGroups = $duplicateReport.GroupCount
         DuplicateRollbackFiles = $duplicateReport.RedundantCount
         DuplicateRollbackBytes = $duplicateReport.ReclaimableBytes
@@ -7580,35 +8071,57 @@ function Finalize-ScidBackupStorage(
                 -LiteralPath $rawBaseline `
                 -PathType Leaf) {
 
-                $paths =
-                    Get-ScidArchivePaths `
-                        $Candidate `
-                        $DataFolder `
-                        $null
+                $rawBaselineRecords =
+                    Get-MarketDataRecordCount `
+                        $rawBaseline `
+                        "scid"
 
-                [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
-                    (
-                        "Baseline {0}" -f
-                        $Candidate.TargetName))
+                if ($rawBaselineRecords -le 0) {
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $rawBaseline `
+                        $DataFolder)
 
-                $result =
-                    [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
-                        $rawBaseline,
-                        $paths.BaselineArchive,
-                        $true,
-                        $false)
+                    $pruned =
+                        $true
 
-                Set-ArchiveProvenance `
-                    $paths.BaselineArchive `
-                    "Rithmic" `
-                    0 `
-                    $result
+                    Write-UtilityLog `
+                        "INFO" `
+                        "HEADER-ONLY" `
+                        (
+                            "file={0}; operation=Baseline; records=0; status=NOT-PRESERVED" -f
+                            $rawBaseline)
+                }
+                else {
+                    $paths =
+                        Get-ScidArchivePaths `
+                            $Candidate `
+                            $DataFolder `
+                            $null
 
-                $saved =
-                    [long]$result.OriginalBytes -
-                    [long]$result.ArchiveBytes
+                    [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                        (
+                            "Baseline {0}" -f
+                            $Candidate.TargetName))
 
-                $archived = $true
+                    $result =
+                        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+                            $rawBaseline,
+                            $paths.BaselineArchive,
+                            $true,
+                            $false)
+
+                    Set-ArchiveProvenance `
+                        $paths.BaselineArchive `
+                        "Rithmic" `
+                        0 `
+                        $result
+
+                    $saved =
+                        [long]$result.OriginalBytes -
+                        [long]$result.ArchiveBytes
+
+                    $archived = $true
+                }
             }
         }
         else {
@@ -7621,7 +8134,27 @@ function Finalize-ScidBackupStorage(
                 -LiteralPath $rawBackup `
                 -PathType Leaf) {
 
-                if ($Candidate.LiveScidUpdate -or
+                $rawBackupRecords =
+                    Get-MarketDataRecordCount `
+                        $rawBackup `
+                        "scid"
+
+                if ($rawBackupRecords -le 0) {
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $rawBackup `
+                        $DataFolder)
+
+                    $pruned =
+                        $true
+
+                    Write-UtilityLog `
+                        "INFO" `
+                        "HEADER-ONLY" `
+                        (
+                            "file={0}; operation=RollbackBackup; records=0; status=NOT-PRESERVED" -f
+                            $rawBackup)
+                }
+                elseif ($Candidate.LiveScidUpdate -or
                     $Candidate.ScidTemporaryMerge) {
 
                     $priorEvidence =
@@ -9137,7 +9670,7 @@ function Invoke-SierraHistoryBridge {
         $dailyPlaceholderSources.Count -gt 0) {
 
         Write-Host (
-            "      Daily source quality: {0} file(s) with zero-volume rows | {1} header-only file(s) | preserved as supplied" -f
+            "      Daily source quality: {0} file(s) with zero-volume rows | {1} header-only file(s) ignored" -f
             $dailyZeroVolumeSources.Count,
             $dailyPlaceholderSources.Count) `
             -ForegroundColor Yellow
@@ -12400,6 +12933,18 @@ function Invoke-SierraHistoryUtilityMode {
         $Mode `
         $resolvedDataFolder)
 
+    $headerOnlyCleanup =
+        Remove-HeaderOnlyBridgeArchives `
+            $resolvedDataFolder
+
+    if ($headerOnlyCleanup.Removed -gt 0) {
+        Write-Host (
+            "      Header-only cleanup: {0} archive(s) removed | {1} reclaimed" -f
+            $headerOnlyCleanup.Removed,
+            (Format-StorageBytes `
+                $headerOnlyCleanup.ReclaimedBytes)) `
+            -ForegroundColor Yellow
+    }
 
     switch ($Mode) {
         "Archive" {

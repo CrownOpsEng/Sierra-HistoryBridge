@@ -645,6 +645,165 @@ namespace SierraHistoryBridge
                 source.AskVolume == target.AskVolume;
         }
 
+        public static int GetGzipMarketDataPresence(
+            string archivePath)
+        {
+            if (!File.Exists(archivePath))
+                throw new FileNotFoundException(
+                    "Market-data archive was not found.",
+                    archivePath);
+
+            byte[] prefix =
+                new byte[HeaderSize + 1];
+
+            int prefixBytes = 0;
+
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            {
+                while (prefixBytes < prefix.Length)
+                {
+                    int read =
+                        gzip.Read(
+                            prefix,
+                            prefixBytes,
+                            prefix.Length -
+                                prefixBytes);
+
+                    if (read <= 0)
+                        break;
+
+                    prefixBytes +=
+                        read;
+                }
+            }
+
+            if (prefixBytes >= 12 &&
+                prefix[0] == (byte)'S' &&
+                prefix[1] == (byte)'C' &&
+                prefix[2] == (byte)'I' &&
+                prefix[3] == (byte)'D')
+            {
+                int headerSize =
+                    BitConverter.ToInt32(
+                        prefix,
+                        4);
+
+                int recordSize =
+                    BitConverter.ToInt32(
+                        prefix,
+                        8);
+
+                if (headerSize != HeaderSize ||
+                    recordSize != RecordSize ||
+                    prefixBytes < HeaderSize)
+                {
+                    return -1;
+                }
+
+                return
+                    prefixBytes == HeaderSize
+                    ? 0
+                    : 1;
+            }
+
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            using (var reader = new StreamReader(
+                gzip,
+                Encoding.ASCII,
+                true,
+                64 * 1024))
+            {
+                string line;
+                bool headerSeen = false;
+
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (String.IsNullOrWhiteSpace(line))
+                        continue;
+
+                    if (!headerSeen)
+                    {
+                        string header =
+                            line.Trim();
+
+                        if (!header.StartsWith(
+                                "Date",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            return -1;
+                        }
+
+                        headerSeen = true;
+                        continue;
+                    }
+
+                    return 1;
+                }
+
+                return
+                    headerSeen
+                    ? 0
+                    : -1;
+            }
+        }
+
+        public static long GetGzipScidRecordCount(
+            string archivePath,
+            long uncompressedLength)
+        {
+            if (!File.Exists(archivePath))
+                throw new FileNotFoundException(
+                    "SCID archive was not found.",
+                    archivePath);
+
+            if (uncompressedLength < HeaderSize ||
+                (uncompressedLength - HeaderSize) %
+                    RecordSize != 0)
+            {
+                throw new IOException(
+                    "Archived SCID length is invalid.");
+            }
+
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            {
+                ValidateSequentialHeader(
+                    gzip,
+                    uncompressedLength,
+                    archivePath);
+            }
+
+            return
+                (uncompressedLength - HeaderSize) /
+                RecordSize;
+        }
+
         public static ScidSourceRelationship InspectGzipScidRelationshipToSource(
             string sourcePath,
             string archivePath,
@@ -2071,8 +2230,14 @@ namespace SierraHistoryBridge
                 if (validateScid)
                 {
                     ScidMeta meta = GetMeta(temporaryPath);
+
+                    if (meta.Records <= 0)
+                        throw new IOException(
+                            "Header-only SCID archives are not restored.");
+
                     if (meta.Length != expectedBytes)
-                        throw new IOException("Restored SCID length validation failed.");
+                        throw new IOException(
+                            "Restored SCID length validation failed.");
                 }
 
                 if (File.Exists(destinationPath))
@@ -2466,6 +2631,12 @@ namespace SierraHistoryBridge
                 DateTime started = DateTime.UtcNow;
 
                 ScidMeta sourceMeta = GetMeta(sourcePath);
+
+                if (sourceMeta.Records <= 0)
+                    throw new IOException(
+                        Path.GetFileName(sourcePath) +
+                        ": header-only SCID files are not preserved.");
+
                 DateTime originalWriteTime =
                     File.GetLastWriteTimeUtc(sourcePath);
 
@@ -4388,12 +4559,15 @@ namespace SierraHistoryBridge
             ScidMeta targetMetaAtStart = null;
             DateTime targetWriteTime = DateTime.MinValue;
 
-            if (preserveTargetTail &&
-                File.Exists(targetPath))
+            if (File.Exists(targetPath))
             {
-                targetMetaAtStart = GetMeta(targetPath);
-                targetWriteTime =
-                    File.GetLastWriteTimeUtc(targetPath);
+                targetMetaAtStart =
+                    GetMeta(targetPath);
+
+                if (preserveTargetTail)
+                {
+                    targetWriteTime =
+                        File.GetLastWriteTimeUtc(targetPath);
 
                 // Preserve a target tail only when the target is genuinely
                 // newer/more complete at the live edge. Raw microsecond order
@@ -4502,6 +4676,7 @@ namespace SierraHistoryBridge
                                 "No target was changed.");
                         }
                     }
+                }
                 }
             }
 
@@ -4866,6 +5041,8 @@ namespace SierraHistoryBridge
                             ".rithmic-baseline.bak");
 
                     if (createRithmicBaseline &&
+                        targetMetaAtStart != null &&
+                        targetMetaAtStart.Records > 0 &&
                         !File.Exists(baselinePath))
                     {
                         // Preserve the untouched Rithmic file with same-volume
@@ -4896,6 +5073,13 @@ namespace SierraHistoryBridge
                             File.Delete(backupPath);
 
                         File.Replace(temporaryPath, targetPath, backupPath, true);
+
+                        if (targetMetaAtStart != null &&
+                            targetMetaAtStart.Records <= 0 &&
+                            File.Exists(backupPath))
+                        {
+                            File.Delete(backupPath);
+                        }
                     }
                 }
                 else
@@ -5168,6 +5352,91 @@ namespace SierraHistoryBridge
                 record.Close * priceScale,
                 record.Volume,
                 record.OpenInterest);
+        }
+
+        public static long GetGzipRecordCount(
+            string archivePath)
+        {
+            if (!File.Exists(archivePath))
+                throw new FileNotFoundException(
+                    "Historical Daily archive was not found.",
+                    archivePath);
+
+            long records = 0;
+
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            using (var reader = new StreamReader(
+                gzip,
+                Encoding.ASCII,
+                true,
+                64 * 1024))
+            {
+                string line;
+                bool headerSeen = false;
+
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (String.IsNullOrWhiteSpace(line))
+                        continue;
+
+                    if (!headerSeen)
+                    {
+                        string header = line.Trim();
+
+                        if (!header.StartsWith(
+                                "Date",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new IOException(
+                                Path.GetFileName(archivePath) +
+                                ": Historical Daily header was not recognized.");
+                        }
+
+                        headerSeen = true;
+                        continue;
+                    }
+
+                    records++;
+                }
+
+                if (!headerSeen)
+                    throw new IOException(
+                        Path.GetFileName(archivePath) +
+                        ": Historical Daily header was not found.");
+            }
+
+            return records;
+        }
+
+        public static GzipArchiveResult ArchiveGzipVerified(
+            string sourcePath,
+            string archivePath,
+            bool deleteSource,
+            bool replaceExisting)
+        {
+            DailyMeta meta =
+                GetMeta(sourcePath);
+
+            if (meta.Records <= 0)
+                throw new IOException(
+                    Path.GetFileName(sourcePath) +
+                    ": header-only Historical Daily files are not preserved.");
+
+            return
+                ScidBridge.ArchiveFileGzipVerified(
+                    sourcePath,
+                    archivePath,
+                    deleteSource,
+                    replaceExisting);
         }
 
         public static DailyMeta GetMeta(string path)
@@ -5477,6 +5746,12 @@ namespace SierraHistoryBridge
                         File.Delete(backupPath);
 
                     File.Replace(temporaryPath, targetPath, backupPath, true);
+
+                    if (target.Count <= 0 &&
+                        File.Exists(backupPath))
+                    {
+                        File.Delete(backupPath);
+                    }
                 }
                 else
                 {

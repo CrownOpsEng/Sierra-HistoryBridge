@@ -363,3 +363,28 @@ Archive container names are never used directly as restore destinations.
 
 This prevents a composite archive name from becoming an active Sierra data
 filename.
+
+
+## Zero-record preservation invariant
+
+Persistent backup evidence must contain at least one market-data record.
+
+The invariant is enforced at both layers:
+
+1. operation planning refuses to create Archive/Baseline/Rollback/
+   RestoreConflict evidence from a known zero-record file
+2. the C# SCID and Historical Daily archive writers independently reject
+   zero-record input
+
+Compressed archive inventory can establish record count without restoring the
+file. SCID count is derived from validated header/layout and uncompressed
+length. Historical Daily archives are streamed through gzip and counted after
+the recognized header.
+
+Storage cleanup removes bridge-owned zero-record archives automatically because
+they contain no historical market data. Cleanup does not delete malformed or
+unverifiable archives.
+
+Atomic replacement may briefly create a filesystem-level `.bak`; after a
+successful replacement, a zero-record old target is deleted immediately and is
+never promoted into HistoryBridge storage.

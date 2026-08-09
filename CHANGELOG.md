@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.34
+## 0.0.35
 
 - rollback restore destination now resolves only the validated terminal Rithmic target filename
 - Repair canonicalizes recoverable prior composite backup names and target metadata
@@ -76,3 +76,11 @@
 - Repair validates PowerShell/C# before replacing installed code
 - Repair can relocate the immediately preceding configured folder arrangement
   into the current layout without deleting unknown material
+
+
+### Header-only preservation
+
+- header-only SCID/DLY files are never preserved as Archive, Baseline, Rollback or RestoreConflict evidence
+- header-only restore/rollback destinations are replaced without undo preservation
+- existing bridge-owned zero-record archives are removed automatically during storage cleanup
+- malformed/unverifiable files are not treated as header-only and remain untouched

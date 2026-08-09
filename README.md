@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.34**
+**Version 0.0.35**
 
 Sierra History Bridge maintains Rithmic-named Sierra Chart history from Sierra
 Chart SC Data sources while preserving newer Rithmic records when a safe,
@@ -283,3 +283,24 @@ Important protections include:
 - verified GZip byte count and SHA-256
 - explicit conflict/duplicate confirmation
 - lazy temporary storage with recovery preservation
+
+
+## Header-only files
+
+Header-only `.scid` and `.dly` files contain no market-data records and are not
+preserved by History Bridge.
+
+The rule applies to:
+
+- SC Data Archive
+- Rithmic Baselines
+- Rollbacks / undo backups
+- RestoreConflicts
+- temporary replacement backups
+
+If a restore or rollback destination is a valid header-only market-data file,
+it is replaced without first creating a backup. Existing bridge-owned
+header-only archives are removed automatically during storage cleanup.
+
+Malformed or unreadable files are not treated as header-only and are not
+silently deleted.

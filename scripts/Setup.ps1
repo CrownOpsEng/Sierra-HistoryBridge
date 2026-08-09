@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge"
-$Version = "0.0.34"
+$Version = "0.0.35"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -867,6 +867,190 @@ function Read-SetupArchiveMeta(
     }
 
     return $values
+}
+
+function Remove-SetupHeaderOnlyArchives(
+    [string]$StorageFolder) {
+
+    $removed =
+        0
+
+    foreach ($category in @(
+        "Archive",
+        "Baselines",
+        "Rollbacks",
+        "RestoreConflicts"
+    )) {
+        $directory =
+            Join-Path `
+                $StorageFolder `
+                $category
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $directory `
+                -PathType Container)) {
+
+            continue
+        }
+
+        foreach ($archive in @(
+            Get-ChildItem `
+                -LiteralPath $directory `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue
+        )) {
+            try {
+                $presence =
+                    [SierraHistoryBridge.ScidBridge]::GetGzipMarketDataPresence(
+                        $archive.FullName)
+
+                if ($presence -ne 0) {
+                    continue
+                }
+
+                Remove-Item `
+                    -LiteralPath $archive.FullName `
+                    -Force `
+                    -ErrorAction Stop
+
+                Remove-Item `
+                    -LiteralPath ($archive.FullName + ".meta") `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+
+                $removed++
+
+                Write-SetupLog (
+                    "Header-only archive removed: " +
+                    $archive.FullName)
+            }
+            catch {
+                Write-SetupLog (
+                    "Header-only archive check left file untouched: " +
+                    $archive.FullName +
+                    " | " +
+                    $_.Exception.Message) `
+                    "WARN"
+            }
+        }
+
+        try {
+            $remaining =
+                @(
+                    Get-ChildItem `
+                        -LiteralPath $directory `
+                        -Force `
+                        -ErrorAction Stop
+                )
+
+            if ($remaining.Count -eq 0) {
+                Remove-Item `
+                    -LiteralPath $directory `
+                    -Force `
+                    -ErrorAction Stop
+            }
+        }
+        catch { }
+    }
+
+    if ($removed -gt 0) {
+        Write-Host (
+            "  Removed {0} header-only bridge archive(s)." -f
+            $removed) `
+            -ForegroundColor Yellow
+    }
+
+    return $removed
+}
+
+function Remove-SetupHeaderOnlyTempFiles(
+    [string]$TempFolder) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $TempFolder `
+            -PathType Container)) {
+
+        return 0
+    }
+
+    $removed =
+        0
+
+    foreach ($file in @(
+        Get-ChildItem `
+            -LiteralPath $TempFolder `
+            -File `
+            -Filter "*.bak" `
+            -ErrorAction SilentlyContinue
+    )) {
+        $records =
+            -1L
+
+        try {
+            $records =
+                [long](
+                    [SierraHistoryBridge.ScidBridge]::GetMeta(
+                        $file.FullName).Records)
+        }
+        catch {
+            try {
+                $records =
+                    [long](
+                        [SierraHistoryBridge.DailyBridge]::GetMeta(
+                            $file.FullName).Records)
+            }
+            catch {
+                $records =
+                    -1L
+            }
+        }
+
+        if ($records -eq 0) {
+            try {
+                Remove-Item `
+                    -LiteralPath $file.FullName `
+                    -Force `
+                    -ErrorAction Stop
+
+                $removed++
+
+                Write-SetupLog (
+                    "Header-only temp file removed: " +
+                    $file.FullName)
+            }
+            catch {
+                Write-SetupLog (
+                    "Header-only temp file could not be removed: " +
+                    $file.FullName +
+                    " | " +
+                    $_.Exception.Message) `
+                    "WARN"
+            }
+        }
+    }
+
+    try {
+        $remaining =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $TempFolder `
+                    -Force `
+                    -ErrorAction Stop
+            )
+
+        if ($remaining.Count -eq 0) {
+            Remove-Item `
+                -LiteralPath $TempFolder `
+                -Force `
+                -ErrorAction Stop
+        }
+    }
+    catch { }
+
+    return $removed
 }
 
 function Get-SetupBackupTargetName(
@@ -2966,6 +3150,12 @@ function Configure-UserPaths([bool]$IsRepair) {
         $storage `
         $temp `
         $logs
+
+    [void](Remove-SetupHeaderOnlyArchives `
+        $storage)
+
+    [void](Remove-SetupHeaderOnlyTempFiles `
+        $temp)
 
     # Normalize provenance/filename codes for the current storage too. After
     # the first classification, known metadata avoids expensive reinspection.

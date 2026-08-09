@@ -1,4 +1,4 @@
-Sierra History Bridge v0.0.34
+Sierra History Bridge v0.0.35
 
 PURPOSE
   Maintains Rithmic-named Sierra Chart history from Sierra Chart SC Data
@@ -70,3 +70,9 @@ MULTI-SELECT
 LICENSE
   Mozilla Public License 2.0.
   See LICENSE for the complete terms.
+
+
+HEADER-ONLY FILES
+  Valid SCID/DLY files with zero market-data records are not preserved.
+  Existing bridge-owned zero-record archives are removed during cleanup.
+  Header-only restore/rollback destinations are replaced without backup.

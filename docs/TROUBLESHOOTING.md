@@ -147,3 +147,14 @@ safely.
 
 An already-created composite file in the active Data folder is not deleted
 automatically because its contents may be unique. Review it before removing it.
+
+
+## Header-only backup appears
+
+Current builds do not preserve zero-record SCID/DLY files.
+
+Run Update, Storage Report, Archive, Restore or Rollback once. Startup storage
+cleanup removes any bridge-owned header-only archive left by an earlier build.
+
+If the file is malformed rather than a valid zero-record market-data file, it
+is deliberately left untouched and logged for review.

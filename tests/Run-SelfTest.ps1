@@ -82,6 +82,55 @@ try {
         $stream.Dispose()
     }
 
+    $headerOnlyScid =
+        Join-Path `
+            $temp `
+            "header-only.scid"
+
+    $stream =
+        [IO.File]::Open(
+            $headerOnlyScid,
+            [IO.FileMode]::CreateNew)
+
+    $writer =
+        New-Object IO.BinaryWriter(
+            $stream)
+
+    try {
+        Write-ScidHeader $writer
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $headerOnlyScidArchive =
+        $headerOnlyScid +
+        ".gz"
+
+    $headerOnlyRejected =
+        $false
+
+    try {
+        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+            $headerOnlyScid,
+            $headerOnlyScidArchive,
+            $false,
+            $false) |
+            Out-Null
+    }
+    catch {
+        $headerOnlyRejected =
+            $_.Exception.Message -like
+                "*header-only*not preserved*"
+    }
+
+    if (-not $headerOnlyRejected -or
+        (Test-Path -LiteralPath $headerOnlyScidArchive)) {
+
+        throw "Header-only SCID preservation guard failed."
+    }
+
     $stream = [IO.File]::Open($target, [IO.FileMode]::CreateNew)
     $writer = New-Object IO.BinaryWriter($stream)
     try {
@@ -740,6 +789,45 @@ try {
         "2026/01/04, 10300.00000000, 10400.00000000, 10200.00000000, 10350.00000000, 1400, 13"
     ) | Set-Content -LiteralPath $dailyTarget -Encoding ASCII
 
+    $headerOnlyDaily =
+        Join-Path `
+            $temp `
+            "header-only.dly"
+
+    @(
+        "Date, Open, High, Low, Close, Volume, OpenInterest"
+    ) |
+        Set-Content `
+            -LiteralPath $headerOnlyDaily `
+            -Encoding ASCII
+
+    $headerOnlyDailyArchive =
+        $headerOnlyDaily +
+        ".gz"
+
+    $headerOnlyDailyRejected =
+        $false
+
+    try {
+        [SierraHistoryBridge.DailyBridge]::ArchiveGzipVerified(
+            $headerOnlyDaily,
+            $headerOnlyDailyArchive,
+            $false,
+            $false) |
+            Out-Null
+    }
+    catch {
+        $headerOnlyDailyRejected =
+            $_.Exception.Message -like
+                "*header-only*not preserved*"
+    }
+
+    if (-not $headerOnlyDailyRejected -or
+        (Test-Path -LiteralPath $headerOnlyDailyArchive)) {
+
+        throw "Header-only Historical Daily preservation guard failed."
+    }
+
     $zeroVolumeDaily =
         Join-Path $temp "NQU00-CME.dly"
 
@@ -910,6 +998,8 @@ try {
     Write-Host "PASS: non-monotonic source rejection without publication"
     Write-Host "PASS: immutable Rithmic baseline creation"
     Write-Host "PASS: Sierra Open-field marker preservation"
+    Write-Host "PASS: header-only SCID preservation rejection"
+    Write-Host "PASS: header-only Historical Daily preservation rejection"
     Write-Host "PASS: Historical Daily independent scale inference"
     Write-Host "PASS: Historical Daily merge and scale conversion"
     Write-Host "PASS: Historical Daily older target-only rows are not carried forward"

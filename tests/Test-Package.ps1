@@ -1175,6 +1175,84 @@ if ($setupRenameText -like '*Format-SetupScDateTimeCompact*') {
     throw "Restore filename regression: hybrid cutover timestamps are encoded in current backup filenames."
 }
 
+
+foreach ($headerOnlyEngineToken in @(
+    'header-only SCID files are not preserved',
+    'Header-only SCID archives are not restored',
+    'GetGzipScidRecordCount',
+    'GetGzipRecordCount',
+    'header-only Historical Daily files are not preserved',
+    'ArchiveGzipVerified'
+)) {
+    if ($converterText -notlike "*$headerOnlyEngineToken*") {
+        throw "Header-only regression: engine is missing $headerOnlyEngineToken"
+    }
+}
+
+foreach ($headerOnlyAppToken in @(
+    'Remove-HeaderOnlyBridgeArchives',
+    'Test-MarketDataHasRecords',
+    'header-only target; replace without undo',
+    'status=REPLACED-WITHOUT-BACKUP',
+    'status=NOT-PRESERVED',
+    'header-only file(s) ignored'
+)) {
+    if ($appText -notlike "*$headerOnlyAppToken*") {
+        throw "Header-only regression: application is missing $headerOnlyAppToken"
+    }
+}
+
+if ($appText -like '*ScidBridge]::ArchiveFileGzipVerified(*') {
+    throw "Header-only regression: a DLY preservation path still bypasses DailyBridge.ArchiveGzipVerified."
+}
+
+$undoStart =
+    $appText.IndexOf(
+        'function New-RithmicUndoArchive')
+
+$undoEnd =
+    $appText.IndexOf(
+        'function Convert-IndexSelection',
+        $undoStart)
+
+$undoText =
+    $appText.Substring(
+        $undoStart,
+        $undoEnd - $undoStart)
+
+if ($undoText -notlike '*Test-MarketDataHasRecords*') {
+    throw "Header-only regression: undo creation does not reject zero-record targets."
+}
+
+$restoreStart =
+    $appText.IndexOf(
+        'function Invoke-SourceRestoreManager')
+
+$restoreEnd =
+    $appText.IndexOf(
+        'function Get-RithmicTargetNameFromBackupArchive',
+        $restoreStart)
+
+$restoreText =
+    $appText.Substring(
+        $restoreStart,
+        $restoreEnd - $restoreStart)
+
+if ($restoreText -notlike '*REPLACED-WITHOUT-BACKUP*') {
+    throw "Header-only regression: restore conflict handling can still preserve zero-record destinations."
+}
+
+
+foreach ($headerOnlySetupToken in @(
+    'Remove-SetupHeaderOnlyArchives',
+    'Remove-SetupHeaderOnlyTempFiles',
+    'Header-only archive removed'
+)) {
+    if ($setupText -notlike "*$headerOnlySetupToken*") {
+        throw "Header-only regression: Setup/Repair is missing $headerOnlySetupToken"
+    }
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

@@ -228,3 +228,26 @@ Persistent Archive, Baselines, Rollbacks and RestoreConflicts content is not
 silently deleted.
 
 Exact duplicate rollback removal always requires confirmation.
+
+
+## Header-only market-data files
+
+A structurally valid market-data file with zero records is a placeholder, not
+recoverable history. History Bridge never keeps such a file as persistent
+backup evidence.
+
+For SCID this means a valid 56-byte SCID header with zero 40-byte records. For
+Historical Daily it means a recognized Daily header with zero data rows.
+
+Header-only files are therefore:
+
+- rejected by the SCID/DLY archive writers
+- rejected as SCID restore payloads
+- not used as Rithmic undo backups
+- not placed in `RestoreConflicts`
+- discarded from temporary replacement backup staging
+- removed from existing bridge-owned Archive/Baselines/Rollbacks/
+  RestoreConflicts storage during cleanup
+
+Only positively identified zero-record files receive this treatment. Invalid,
+unreadable or ambiguous files remain untouched and are reported.
