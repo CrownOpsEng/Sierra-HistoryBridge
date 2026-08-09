@@ -115,6 +115,101 @@ try {
         $stream.Dispose()
     }
 
+    $sourceInspection =
+        [SierraHistoryBridge.ScidBridge]::InspectScidContent(
+            $source)
+
+    if ($sourceInspection.ContentClass -ne "SCDataLike" -or
+        $sourceInspection.SpecialControlOpenRecords -ne 1 -or
+        $sourceInspection.RegularOpenRecords -ne 0) {
+
+        throw "SC Data-like content classification failed."
+    }
+
+    $foreignProbe =
+        Join-Path `
+            $temp `
+            "foreign-probe.scid"
+
+    $stream =
+        [IO.File]::Open(
+            $foreignProbe,
+            [IO.FileMode]::CreateNew)
+
+    $writer =
+        New-Object IO.BinaryWriter(
+            $stream)
+
+    try {
+        Write-ScidHeader $writer
+
+        for ($i = 0; $i -lt 4; $i++) {
+            Write-Record `
+                $writer `
+                ($baseTime + ($i * 1000000)) `
+                ([single]3000000.0) `
+                ([single]3000025.0) `
+                ([single]3000000.0) `
+                ([single]3000000.0) `
+                1 1 1 0
+        }
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $foreignInspection =
+        [SierraHistoryBridge.ScidBridge]::InspectScidContent(
+            $foreignProbe)
+
+    if ($foreignInspection.ContentClass -ne "ForeignLike") {
+        throw "Foreign-like content classification failed."
+    }
+
+    $mixedProbe =
+        Join-Path `
+            $temp `
+            "mixed-probe.scid"
+
+    [IO.File]::Copy(
+        $source,
+        $mixedProbe)
+
+    $stream =
+        [IO.File]::Open(
+            $mixedProbe,
+            [IO.FileMode]::Append)
+
+    $writer =
+        New-Object IO.BinaryWriter(
+            $stream)
+
+    try {
+        Write-Record `
+            $writer `
+            ($baseTime + (30 * 1000000)) `
+            ([single]3000000.0) `
+            ([single]3000025.0) `
+            ([single]3000000.0) `
+            ([single]3000000.0) `
+            1 1 0 1
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $mixedInspection =
+        [SierraHistoryBridge.ScidBridge]::InspectScidContent(
+            $mixedProbe)
+
+    if ($mixedInspection.ContentClass -ne "Mixed") {
+        throw "Mixed content classification failed."
+    }
+
+    Write-Host "PASS: SCID content provenance classification"
+
     $inference = [SierraHistoryBridge.ScidBridge]::InferScale($source, $target)
 
     if ([math]::Abs($inference.Factor - 100.0) -gt 0.0001) {
@@ -184,7 +279,7 @@ try {
     $baselineRaw =
         Join-Path `
             $backup `
-            "NQU26-CME.scid__NQU6.CME.scid.rithmic-baseline.bak"
+            "NQU26-CME.scid--NQU6.CME.scid.rithmic-baseline.bak"
 
     if (-not (Test-Path -LiteralPath $baselineRaw)) {
         throw "Expected immutable Rithmic baseline backup was not created."
@@ -201,6 +296,26 @@ try {
             $baselineArchive,
             $true,
             $false)
+
+    if ([string]::IsNullOrWhiteSpace(
+            $archiveResult.ContentClass)) {
+
+        throw "SCID archive did not return content evidence."
+    }
+
+    $gzipInspection =
+        [SierraHistoryBridge.ScidBridge]::InspectGzipScidContent(
+            $baselineArchive)
+
+    if ($gzipInspection.Sha256 -ine
+            $archiveResult.Sha256 -or
+        $gzipInspection.Length -ne
+            $archiveResult.OriginalBytes -or
+        $gzipInspection.ContentClass -ne
+            $archiveResult.ContentClass) {
+
+        throw "GZip SCID content inspection did not match archive creation evidence."
+    }
 
     if (Test-Path -LiteralPath $baselineRaw) {
         throw "Compressed baseline should remove the raw baseline after verification."
@@ -228,6 +343,210 @@ try {
     }
 
     Write-Host "PASS: compressed Rithmic baseline round-trip and validation"
+
+    # Live merge provenance coverage uses source/target timestamps that differ
+    # inside the same second and both files end in that same second. The SC
+    # source is partial while the Rithmic target has greater final-second trade
+    # volume, so a clean handoff must move backward to three independently
+    # matching trade seconds.
+    $mergeSource =
+        Join-Path `
+            $temp `
+            "merge-source.scid"
+
+    $mergeTarget =
+        Join-Path `
+            $temp `
+            "merge-target.scid"
+
+    $mergeBackup =
+        Join-Path `
+            $temp `
+            "merge-backups"
+
+    $mergeBase =
+        [long]4010000000000000
+
+    $stream =
+        [IO.File]::Open(
+            $mergeSource,
+            [IO.FileMode]::CreateNew)
+
+    $writer =
+        New-Object IO.BinaryWriter(
+            $stream)
+
+    try {
+        Write-ScidHeader $writer
+
+        for ($second = 0; $second -le 4; $second++) {
+            $price =
+                [single](31000.0 + ($second * 0.25))
+
+            Write-Record `
+                $writer `
+                ($mergeBase + ($second * 1000000) + 123000) `
+                ([single]0.0) `
+                ($price + 0.25) `
+                $price `
+                $price `
+                1 1 1 0
+        }
+
+        # Only the first trade from second 5 is present in the SC source.
+        Write-Record `
+            $writer `
+            ($mergeBase + (5 * 1000000) + 123000) `
+            ([single]0.0) `
+            ([single]31002.0) `
+            ([single]31001.25) `
+            ([single]31001.25) `
+            1 1 1 0
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $stream =
+        [IO.File]::Open(
+            $mergeTarget,
+            [IO.FileMode]::CreateNew)
+
+    $writer =
+        New-Object IO.BinaryWriter(
+            $stream)
+
+    try {
+        Write-ScidHeader $writer
+
+        for ($second = 0; $second -le 4; $second++) {
+            $price =
+                [single](31000.0 + ($second * 0.25))
+
+            Write-Record `
+                $writer `
+                ($mergeBase + ($second * 1000000)) `
+                ([single]($price * 100.0)) `
+                ([single](($price + 0.25) * 100.0)) `
+                ([single]($price * 100.0)) `
+                ([single]($price * 100.0)) `
+                1 1 1 0
+        }
+
+        # Full second 5 contains three Rithmic records, so it must not be
+        # accepted as matching the partial SC second.
+        for ($trade = 0; $trade -lt 3; $trade++) {
+            $price =
+                [single](31001.25 + ($trade * 0.25))
+
+            Write-Record `
+                $writer `
+                ($mergeBase + (5 * 1000000) + $trade) `
+                ([single]($price * 100.0)) `
+                ([single](($price + 0.25) * 100.0)) `
+                ([single]($price * 100.0)) `
+                ([single]($price * 100.0)) `
+                1 1 `
+                ([uint32]$(if ($trade -eq 2) { 0 } else { 1 })) `
+                ([uint32]$(if ($trade -eq 2) { 1 } else { 0 }))
+        }
+
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $mergeResult =
+        [SierraHistoryBridge.ScidBridge]::Convert(
+            $mergeSource,
+            $mergeTarget,
+            100.0,
+            $mergeBackup,
+            $true,
+            $false,
+            "[test] live merge")
+
+    $expectedHandoff =
+        $mergeBase +
+        (4 * 1000000)
+
+    if ($mergeResult.HandoffDateTime -ne
+            $expectedHandoff -or
+        $mergeResult.HandoffVerifiedTradeSeconds -lt 3) {
+
+        throw (
+            "Verified whole-second handoff failed. Expected " +
+            $expectedHandoff +
+            "; got " +
+            $mergeResult.HandoffDateTime)
+    }
+
+    if ($mergeResult.SourceRecordsWritten -ne 4) {
+        throw "Live merge source prefix was not strictly before the handoff second."
+    }
+
+    if ($mergeResult.TailRecords -ne 4 -or
+        $mergeResult.OutputRecords -ne 8) {
+
+        throw "Live merge produced an unexpected prefix/tail record count."
+    }
+
+    $finalMergeHash =
+        [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+            $mergeTarget)
+
+    if ([string]::IsNullOrWhiteSpace(
+            $mergeResult.OutputSha256) -or
+        $mergeResult.OutputSha256 -ine
+            $finalMergeHash) {
+
+        throw "Conversion output SHA-256 does not authenticate the published target."
+    }
+
+    $mergeRelationship =
+        [SierraHistoryBridge.ScidBridge]::InspectScidRelationshipToSource(
+            $mergeSource,
+            $mergeTarget,
+            100.0)
+
+    if ($mergeRelationship.Relationship -ne "Mixed" -or
+        -not $mergeRelationship.WholeSecondCutover -or
+        $mergeRelationship.CutoverDateTime -ne
+            $expectedHandoff -or
+        $mergeRelationship.ExactRecordsAfterMismatch -ne 0) {
+
+        throw "Published live merge does not have a clean SC Data/Rithmic cutover."
+    }
+
+    $mergeArchive =
+        Join-Path `
+            $temp `
+            "merge--MX--merge-target.scid.gz"
+
+    $mergeArchiveResult =
+        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+            $mergeTarget,
+            $mergeArchive,
+            $false,
+            $false)
+
+    $archivedRelationship =
+        [SierraHistoryBridge.ScidBridge]::InspectGzipScidRelationshipToSource(
+            $mergeSource,
+            $mergeArchive,
+            $mergeArchiveResult.OriginalBytes,
+            100.0)
+
+    if ($archivedRelationship.Relationship -ne "Mixed" -or
+        $archivedRelationship.CutoverDateTime -ne
+            $expectedHandoff) {
+
+        throw "Compressed rollback relationship did not preserve the exact mixed cutoff."
+    }
+
+    Write-Host "PASS: whole-second half-open live merge and provenance cutoff"
 
     $genericDaily =
         Join-Path $temp "NQU6.CME.dly.bak"
@@ -268,83 +587,6 @@ try {
         }
     }
 
-    # Live merge coverage uses different intra-second timestamps on each feed.
-    # The Rithmic target contains a more complete final second, while three
-    # earlier seconds provide independent evidence for a safe cutover.
-    $mergeSource = Join-Path $temp "merge-source.scid"
-    $mergeTarget = Join-Path $temp "merge-target.scid"
-    $mergeBackup = Join-Path $temp "merge-backups"
-    $mergeBase = [long]4010000000000000
-
-    $stream = [IO.File]::Open($mergeSource, [IO.FileMode]::CreateNew)
-    $writer = New-Object IO.BinaryWriter($stream)
-    try {
-        Write-ScidHeader $writer
-
-        for ($second = 0; $second -le 4; $second++) {
-            $price = [single](31000.0 + ($second * 0.25))
-
-            Write-Record `
-                $writer `
-                ($mergeBase + ($second * 1000000) + 123000) `
-                ([single]0.0) `
-                ($price + 0.25) `
-                $price `
-                $price `
-                1 1 1 0
-        }
-
-        Write-Record `
-            $writer `
-            ($mergeBase + (5 * 1000000) + 123000) `
-            ([single]0.0) `
-            ([single]31002.0) `
-            ([single]31001.25) `
-            ([single]31001.25) `
-            1 1 1 0
-    }
-    finally {
-        $writer.Dispose()
-        $stream.Dispose()
-    }
-
-    $stream = [IO.File]::Open($mergeTarget, [IO.FileMode]::CreateNew)
-    $writer = New-Object IO.BinaryWriter($stream)
-    try {
-        Write-ScidHeader $writer
-
-        for ($second = 0; $second -le 4; $second++) {
-            $price = [single](31000.0 + ($second * 0.25))
-
-            Write-Record `
-                $writer `
-                ($mergeBase + ($second * 1000000)) `
-                ([single]($price * 100.0)) `
-                ([single](($price + 0.25) * 100.0)) `
-                ([single]($price * 100.0)) `
-                ([single]($price * 100.0)) `
-                1 1 1 0
-        }
-
-        for ($trade = 0; $trade -lt 3; $trade++) {
-            $price = [single](31001.25 + ($trade * 0.25))
-
-            Write-Record `
-                $writer `
-                ($mergeBase + (5 * 1000000) + $trade) `
-                ([single]($price * 100.0)) `
-                ([single](($price + 0.25) * 100.0)) `
-                ([single]($price * 100.0)) `
-                ([single]($price * 100.0)) `
-                1 1 `
-                ([uint32]$(if ($trade -eq 2) { 0 } else { 1 })) `
-                ([uint32]$(if ($trade -eq 2) { 1 } else { 0 }))
-        }
-    }
-    finally {
-        $writer.Dispose()
-        $stream.Dispose()
-    }
     $restoredBaselineTarget =
         Join-Path $temp "NQU6-restored.CME.scid"
 
@@ -418,33 +660,6 @@ try {
     }
 
     Write-Host "PASS: verified archive replacement"
-
-    $mergeResult =
-        [SierraHistoryBridge.ScidBridge]::Convert(
-            $mergeSource,
-            $mergeTarget,
-            100.0,
-            $mergeBackup,
-            $true,
-            $false,
-            "[test] live merge")
-
-    $expectedHandoff =
-        $mergeBase + (4 * 1000000)
-
-    if ($mergeResult.HandoffDateTime -ne $expectedHandoff -or
-        $mergeResult.HandoffVerifiedTradeSeconds -lt 3) {
-        throw "Live merge did not establish the verified whole-second handoff."
-    }
-
-    if ($mergeResult.SourceRecordsWritten -ne 4) {
-        throw "Live merge source prefix was not strictly before the handoff second."
-    }
-
-    if ($mergeResult.TailRecords -ne 4 -or
-        $mergeResult.OutputRecords -ne 8) {
-        throw "Live merge produced an unexpected prefix/tail record count."
-    }
 
     $mergeMeta =
         [SierraHistoryBridge.ScidBridge]::GetMeta($mergeTarget)

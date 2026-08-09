@@ -1,293 +1,347 @@
-# Technical design
+# Technical Design
 
-## Symbol mapping
+## Paths and instance identity
 
-SC Data futures filenames use a two-digit year:
-
-```text
-NQU26-CME.scid
-```
-
-Rithmic filenames use one year digit:
+The bridge separates:
 
 ```text
-NQU6.CME.scid
+SierraPath
+DataPath
+StoragePath
+TempPath
+LogsPath
 ```
 
-The bridge only creates Rithmic aliases inside a rolling window that remains
-within one decade.
-
-## Managed window
-
-The contract window is:
+Defaults:
 
 ```text
-5 years usable history
-+ 3 months rollover buffer
-+ 6 months forward buffer
+StoragePath = <DataPath>\HistoryBridge
+TempPath    = <DataPath>\HistoryBridgeTemp
+LogsPath    = <SierraPath>\Logs\HistoryBridge
 ```
 
-When two SC Data contracts would map to the same one-digit Rithmic filename,
-the newest eligible contract owns that alias.
-
-Unmanaged Rithmic files are never retired.
+`TempPath` is derived from DataPath so transaction staging remains on the target
+volume.
 
 ## SCID format
 
-Sierra Chart SCID files use a 56-byte header and 40-byte records.
+Supported SCID layout:
 
-The conversion preserves:
+```text
+Header: 56 bytes
+Record: 40 bytes
+```
 
-- SCDateTimeMS timestamp
-- trade/high/low/close semantics
-- NumTrades
-- TotalVolume
-- BidVolume
-- AskVolume
-- Sierra special Open/control markers
+Record fields:
 
-Only positive price fields are scaled. Control-marker values are preserved
-bit-for-bit.
+```text
+int64   SCDateTime
+float   Open
+float   High
+float   Low
+float   Close
+uint32  NumTrades
+uint32  TotalVolume
+uint32  BidVolume
+uint32  AskVolume
+```
 
-## Price scale
+Positive price fields are scaled according to the verified feed factor.
 
-The raw-price multiplier is not stored in the SCID header.
+Sierra special Open control markers are preserved exactly and are not treated as
+prices.
 
-The bridge infers and stores a scale for each root/exchange group from
-overlapping SCID or Historical Daily source/target files. A saved scale is used
-only after it has been established from actual overlapping data.
+## Atomic SCID publication
 
-## Historical SCID replacement
+A replacement:
 
-A historical target is rebuilt from the SC Data source.
+1. creates temporary output beside the target
+2. enables Windows file compression when supported
+3. writes converted source records and any verified target tail
+4. calculates the final output SHA-256 during that same write pass
+5. durably flushes with `Flush(true)`
+6. checks source/target snapshots have not changed
+7. validates output structure/count/first/last
+8. publishes atomically
+9. verifies final compression/allocation
+10. finalizes transaction staging
 
-The temporary output is:
+If a pre-publication validation fails, the existing target is not replaced.
 
-1. written separately
-2. durably flushed
-3. structurally validated
-4. checked against expected records
-5. atomically published
+## Cross-feed merge model
 
-The source and target metadata are rechecked around validation/conversion. A
-changing file is deferred.
+Raw SCID timestamps are not cross-feed identity keys.
 
-## Live-sensitive SCID handling
+SC Data and Rithmic can represent the same trade activity with different
+intra-second timestamps and record decomposition. The merge therefore operates
+on two levels:
 
-A current target may contain Rithmic records newer than the SC Data source.
+### Verification level: whole-second aggregates
 
-When required, the bridge verifies at least three consecutive active seconds by
-total volume, bid/ask volume, and scaled last price before selecting a handoff:
+For an active second, source and target must agree on:
 
-- SC Data owns records before the handoff second
-- Rithmic owns the handoff second and everything newer
+```text
+TotalVolume
+BidVolume
+AskVolume
+scaled LastClose
+```
 
-The target is not changed when this strict half-open boundary cannot be proven.
+`FindVerifiedHandoffDateTime` searches trailing overlap windows and requires at
+least three consecutive matching active seconds.
 
-## Historical Daily handling
+A live tail is considered when either:
 
-Historical Daily files are text/CSV.
+```text
+floor(RithmicLast / 1 second) > floor(SCDataLast / 1 second)
+```
 
-For each update:
+or both files end in the same second and the Rithmic aggregate for that second
+contains greater total trade volume than the SC Data aggregate.
 
-- SC Data supplies rows through its latest date
-- the existing Rithmic row for that same latest date may be retained
-- Rithmic dates newer than the source are retained
-- older target-only dates are dropped
+A later microsecond in the same second is never evidence by itself. If the
+same-second aggregates match, no tail is required even if the raw timestamps
+differ.
 
-Daily state uses a SHA-256 source signature and verified target metadata.
+### Publication level: strict half-open boundary
 
-## State
+For selected boundary `B`:
 
-`state.json` uses schema version 1.
+```text
+SC Data records: DateTime < B
+Rithmic records: DateTime >= B
+```
 
-SCID state records:
+The engine verifies:
 
-- source content fingerprint
+```text
+sourceLastWritten < B
+targetFirstTail   >= B
+sourceLastWritten < targetFirstTail
+```
+
+Tail records are checked for monotonic order and no record before `B`.
+
+This means there is no second in which both feeds contribute records to the
+published file.
+
+If a boundary cannot be proved:
+
+```text
+LIVE_MERGE_HANDOFF_UNVERIFIED
+```
+
+If the selected ranges do not form the required half-open relationship:
+
+```text
+LIVE_MERGE_BOUNDARY_INVALID
+```
+
+No target replacement is committed in either case.
+
+## Daily merge model
+
+Historical Daily data is keyed by date.
+
+The output dictionary contains at most one record per date. Source dates are
+applied, the current target's latest source date can be preserved when required,
+and target dates later than the source endpoint are retained.
+
+Daily merge therefore cannot duplicate a date row.
+
+## Provenance model
+
+Codes:
+
+```text
+RT = authenticated Rithmic
+SC = pure SC Data-derived
+MX = mixed/hybrid
+FR = foreign/non-SC form; provider unauthenticated
+UN = unknown
+```
+
+### Evidence hierarchy
+
+1. exact SHA-256 match to authenticated backup
+2. exact SHA-256 match to per-target bridge state
+3. full source relationship to matching SC Data
+4. conservative record morphology
+5. Unknown
+
+A quick signature is used only as a cache invalidator where appropriate. It is
+not accepted as identity proof.
+
+### Exact target state
+
+The target provenance table stores:
+
 - target path
-- minimum target record count
-- first target timestamp
-- minimum target last timestamp
-- whether the SCID target is bridge-managed
+- extension
+- provenance
+- source path where applicable
+- scale
+- exact hybrid cutover where applicable
+- records / first / last
+- quick signature
+- exact SHA-256 when available
 
-Daily state records the corresponding Daily source signature and target
-metadata.
+`ConvertResult.OutputSha256` is calculated while the output is already being
+written, avoiding a second full SCID read.
 
-Unsupported or malformed state is ignored and rebuilt from the current files.
+When a file changes and its exact hash no longer matches state, its previous
+state label is not trusted as current identity.
 
-### SCID dirty check
+## SC Data relationship inspection
 
-The SCID fingerprint contains:
+`InspectScidRelationshipToSource` performs deterministic record comparison
+against the output that conversion of the SC Data source would produce.
 
-- byte length
-- first timestamp
-- last timestamp
-- deterministic sampled SHA-256
+Results:
 
-If saved state is missing, a fast distributed converted-pair check can confirm
-that an existing target already matches the source without forcing a rewrite.
+- `SCData`: target is an exact converted SC prefix
+- `Mixed`: exact converted SC prefix followed by a clean non-SC suffix beginning
+  at a whole-second boundary, with no later exact SC records
+- `Foreign`: no exact SC prefix and no later exact SC records
+- `Unknown`: evidence is inconsistent or could represent modification/corruption
 
-## Preflight validation
+`InspectGzipScidRelationshipToSource` performs the same relationship analysis
+directly against compressed rollback content without restoring it.
 
-When an existing historical Rithmic SCID is available, the bridge compares the
-source and independent reference using one-second aggregation.
+The rule requiring no later exact matches prevents a damaged SC-like file from
+being mislabeled as a clean Foreign or Mixed file.
 
-A STRONG match requires:
+## Content morphology
 
-- common coverage ≥ 99%
-- exact per-second volume ≥ 98%
-- last-price agreement ≥ 99%
-- aggregate volume difference ≤ 0.5%
+The engine records:
 
-The report also records bid/ask volume, source/target richness, ordering, and
-coverage notes.
+- Sierra special negative Open markers
+- regular positive Open values
+- zero Open values
+- other/invalid Open values
 
-A baseline captured from the original Rithmic target remains independent
-cross-feed evidence. A bridge-managed target is labeled as managed consistency,
-not independent cross-feed validation.
-
-## Persistent archives
-
-Market-data archives are flat inside their semantic category.
-
-```text
-SC_Data\
-Rithmic_Baselines\
-Rollbacks\
-Restore_Conflicts\
-```
-
-Rithmic baseline and automatic rollback filenames include both source and
-target identities:
+Classes:
 
 ```text
-NQH22-CME.scid__NQH2.CME.scid.gz
+SCDataLike
+Mixed
+ForeignLike
+Unclassified
 ```
 
-This prevents one-digit-year ambiguity without directory partitioning.
+Morphology never upgrades a file to RT.
 
-Each verified archive has a `.meta` sidecar containing the information required
-for validation or restore.
+## Baselines invariant
 
-## Rithmic rollback
+`HistoryBridge\Baselines` is restricted to authenticated Rithmic states.
 
-A manual rollback:
+Admission requires:
 
-1. requires Sierra Chart to be closed
-2. identifies the target from the verified backup
-3. compares the current target to the selected backup
-4. reuses an exact rollback copy when one already protects the current target,
-   otherwise creates a verified manual undo backup
-5. authorizes atomic replacement only after the existing target is protected
-6. restores and verifies the selected backup
-7. invalidates the corresponding saved state
+- current target was independent/unmanaged
+- STRONG cross-feed validation
+- monotonic target
+- zero Sierra special Open markers
+- one or more regular positive Open records
+- no invalid/other Open forms
 
-The selected backup is retained.
+Existing baseline files are checked by Repair. An item that cannot be
+authenticated is preserved under Rollbacks as UN/other conservative provenance.
+Repair stops if that preservation cannot be completed safely.
 
-## Recovery staging
+Runtime baseline inventory also refuses entries whose metadata is not explicitly
+Rithmic.
 
-Raw `.bak` files are temporary recovery material produced during replacement.
+## Provenance filename format
 
-Successful historical replacements remove their temporary backups after
-verification. Live/temporary merges retain a verified compressed rollback when
-required.
-
-Unexpected files left in Recovery are not silently converted or deleted by
-startup cleanup.
-
-## Logging
-
-Logs use:
+General Rithmic backup format:
 
 ```text
-timestamp | level | event | message
+<prefix>--<code>--<RithmicTarget>.gz
 ```
 
-The console presents operational status and decisions. Detailed validation
-metrics, record counts, hashes, timings, and errors are kept in logs.
+Mixed uses the same compact format:
 
-## Runtime
+```text
+<prefix>--MX--<RithmicTarget>.gz
+```
 
-The application targets stock Windows PowerShell 5.1 and compiles the embedded
-C# engine through plain `Add-Type`.
+Metadata retains the exact SCDateTime cutover value and UTC display. The filename
+does not duplicate that detail.
 
+## Provenance metadata
 
-### Rollback backup identity
+`.meta` can include:
 
-Flat backup filenames encode the actual Rithmic target after the final `__`.
-That explicit filename identity is parsed before archive metadata. This avoids
-mistaking a composite manual/baseline archive name for a Rithmic symbol.
+```text
+provenance=
+cutover_datetime=
+cutover_utc=
+content_class=
+special_control_open_records=
+regular_open_records=
+zero_open_records=
+other_open_records=
+verified_archive_bytes=
+verified_archive_write_ticks=
+verified_content_sha256=
+relationship_source_path=
+relationship_source_bytes=
+relationship_source_write_ticks=
+relationship_source_signature=
+relationship_scale=
+relationship_result=
+relationship_cutover_datetime=
+```
 
-Exact rollback copies are identified by:
-
-- target filename
-- uncompressed byte length
-- SHA-256
-
-Only bit-identical copies for the same target are reported as duplicates.
-Removal requires explicit confirmation.
-
-
-### Duplicate-report collection
-
-Duplicate groups are materialized as a normal object array before being returned
-to PowerShell. This avoids Windows PowerShell 5.1 binder issues with
-`Generic.List[object]` array-subexpression conversion.
-
+Repair caches expensive compressed-content/source-relationship inspection.
+Cache keys include archive identity and source identity/scale. Cached quick
+signatures are used only to decide whether expensive inspection must be repeated.
 
 ## Windows file compression
 
-The engine checks the Data volume with `GetVolumeInformationW` and the
-`FILE_FILE_COMPRESSION` capability flag.
+The engine checks `FILE_FILE_COMPRESSION` and uses
+`DeviceIoControl / FSCTL_SET_COMPRESSION` with
+`COMPRESSION_FORMAT_DEFAULT`.
 
-Per-file compression is enabled with `DeviceIoControl` and
-`FSCTL_SET_COMPRESSION` using `COMPRESSION_FORMAT_DEFAULT`.
+New temporary market-data outputs are marked for compression before payload
+writing when supported.
 
-For SCID conversion, Historical Daily synchronization, and archive restore:
+Existing files are never recompressed silently.
 
-1. create the temporary output file
-2. enable file compression if the volume supports it
-3. write and durably flush the payload
-4. perform normal content validation
-5. publish atomically
-6. verify the final target still has the compressed file attribute
-7. record final allocated bytes
+## Explorer batching
 
-If compression cannot be enabled on the temporary output, the operation stops
-before publication. After content has been published successfully, compression
-is verified again and repaired when possible. A post-publication compression
-problem is reported as a compression warning rather than misreporting a
-successful content replacement as a failed transaction.
+Archive, Restore and Rollback use the Windows Player selection model.
 
-If the volume does not support per-file compression, normal data processing can
-continue uncompressed and the condition is recorded in logs.
+The hidden broker uses:
 
+```text
+%TEMP%\SierraHistoryBridge\Explorer
+```
 
-## Explorer multi-selection
+Individual selection items are unique files. One leader gathers a short quiet
+period of selections, writes a temporary manifest, and starts one visible
+operation.
 
-Static Windows file verbs receive `%1` per invocation. The installer explicitly
-uses `MultiSelectModel=Player` for Archive, Restore, and Rollback file verbs and
-`MultiSelectModel=Single` for folder commands.
+Consumed/stale broker material is removed automatically.
 
-The file verbs invoke the bridge in hidden `Explorer` dispatch mode. Each
-per-file invocation writes a uniquely named selection item. One leader process
-waits for a 500 ms quiet period, consumes the current item set, and launches one
-normal bridge process with a temporary selection manifest.
+## Logging
 
-The broker uses:
+Operational logs use:
 
-- independent item files rather than concurrent writes to one stream
-- an exclusive `FileMode.CreateNew` leader lock
-- a bounded three-second collection window
-- follower retry so a late item can become the leader of a subsequent batch
-- stale-item cleanup after ten seconds
-- manifest deletion when the real operation starts
+```text
+<SierraPath>\Logs\HistoryBridge
+```
 
-This prevents multiple selected files from opening competing utility processes
-or sharing the same log stream.
+Update SCID log entries include:
 
-Archive and Restore resolve every manifest path against the current validated
-inventory before changing files.
+```text
+provenance
+rithmic_tail_records
+handoff_datetime
+handoff_verified_trade_seconds
+output_records
+output_sha256
+```
 
-Rollback additionally requires one selected backup per target and runs each
-target as its own verified undo/restore transaction inside the batch.
+These fields make the exact merge identity and audit trail reproducible from
+recorded evidence.

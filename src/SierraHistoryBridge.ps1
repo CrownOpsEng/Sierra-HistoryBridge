@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$DataFolder,
+    [string]$SierraPath,
     [ValidateSet("Update", "Archive", "Restore", "Rollback", "Storage", "Explorer")]
     [string]$Mode = "Update",
     [ValidateSet("Archive", "Restore", "Rollback")]
@@ -20,7 +21,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.32"
+$Version = "0.0.33"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -79,6 +80,54 @@ function Initialize-OperationSelection {
                 -LiteralPath $manifestPath `
                 -Force `
                 -ErrorAction SilentlyContinue
+
+            $sessionDirectory =
+                Split-Path `
+                    -Parent `
+                    $manifestPath
+
+            try {
+                $remaining =
+                    @(
+                        Get-ChildItem `
+                            -LiteralPath $sessionDirectory `
+                            -Force `
+                            -ErrorAction Stop
+                    )
+
+                if ($remaining.Count -eq 0) {
+                    Remove-Item `
+                        -LiteralPath $sessionDirectory `
+                        -Force `
+                        -ErrorAction Stop
+                }
+
+                $brokerRoot =
+                    Split-Path `
+                        -Parent `
+                        $sessionDirectory
+
+                if (Test-Path `
+                    -LiteralPath $brokerRoot `
+                    -PathType Container) {
+
+                    $brokerRemaining =
+                        @(
+                            Get-ChildItem `
+                                -LiteralPath $brokerRoot `
+                                -Force `
+                                -ErrorAction Stop
+                        )
+
+                    if ($brokerRemaining.Count -eq 0) {
+                        Remove-Item `
+                            -LiteralPath $brokerRoot `
+                            -Force `
+                            -ErrorAction Stop
+                    }
+                }
+            }
+            catch { }
         }
     }
 
@@ -418,12 +467,46 @@ function Get-NormalizedConfiguredPath([string]$Path) {
     }
 }
 
+function Test-SierraInstallationPath(
+    [string]$Path) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $Path) -or
+        -not (
+            Test-Path `
+                -LiteralPath $Path `
+                -PathType Container)) {
+
+        return $false
+    }
+
+    foreach ($name in @(
+        "SierraChart.exe",
+        "SierraChart_64.exe",
+        "SierraChart_32.exe"
+    )) {
+        if (Test-Path `
+            -LiteralPath (
+                Join-Path `
+                    $Path `
+                    $name) `
+            -PathType Leaf) {
+
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-BridgePaths([string]$ResolvedDataFolder) {
     $data =
         [IO.Path]::GetFullPath(
             $ResolvedDataFolder).TrimEnd('\')
 
-    $config = Read-JsonFile $ConfigPath
+    $config =
+        Read-JsonFile `
+            $ConfigPath
 
     $configuredData =
         Get-NormalizedConfiguredPath `
@@ -435,42 +518,90 @@ function Get-BridgePaths([string]$ResolvedDataFolder) {
             $data,
             [StringComparison]::OrdinalIgnoreCase)
 
-    $archive =
-        Join-Path $data "SCID_Bridge_Archive"
+    $sierra =
+        Get-NormalizedConfiguredPath `
+            $SierraPath
 
-    $recovery =
-        Join-Path $data "SCID_Bridge_Backups"
+    if (-not $sierra -and
+        $useConfigured) {
+
+        $sierra =
+            Get-NormalizedConfiguredPath `
+                ([string]$config.sierra_path)
+    }
+
+    if (-not $sierra) {
+        $dataInfo =
+            New-Object IO.DirectoryInfo(
+                $data)
+
+        if ($dataInfo.Name.Equals(
+                "Data",
+                [StringComparison]::OrdinalIgnoreCase) -and
+            $dataInfo.Parent) {
+
+            $sierra =
+                $dataInfo.Parent.FullName.TrimEnd('\')
+        }
+        else {
+            $sierra =
+                Split-Path `
+                    -Parent `
+                    $data
+        }
+    }
+
+    if (-not (
+        Test-SierraInstallationPath `
+            $sierra)) {
+
+        throw (
+            "Sierra Chart installation path could not be validated for this Data folder. " +
+            "Run Repair and confirm the Sierra installation and Data paths.")
+    }
+
+    $storage =
+        Join-Path `
+            $data `
+            "HistoryBridge"
+
+    $temp =
+        Join-Path `
+            $data `
+            "HistoryBridgeTemp"
 
     $logs =
-        Join-Path $data "SCID_Bridge_Logs"
+        Join-Path `
+            (Join-Path `
+                $sierra `
+                "Logs") `
+            "HistoryBridge"
 
     if ($useConfigured) {
         $candidate =
             Get-NormalizedConfiguredPath `
-                ([string]$config.archive_folder)
-        if ($candidate) {
-            $archive = $candidate
-        }
+                ([string]$config.storage_folder)
 
-        $candidate =
-            Get-NormalizedConfiguredPath `
-                ([string]$config.recovery_folder)
         if ($candidate) {
-            $recovery = $candidate
+            $storage =
+                $candidate
         }
 
         $candidate =
             Get-NormalizedConfiguredPath `
                 ([string]$config.log_folder)
+
         if ($candidate) {
-            $logs = $candidate
+            $logs =
+                $candidate
         }
     }
 
     return [pscustomobject]@{
+        Sierra = $sierra
         Data = $data
-        Archive = $archive
-        Recovery = $recovery
+        Storage = $storage
+        Temp = $temp
         Logs = $logs
     }
 }
@@ -555,9 +686,10 @@ function Start-UtilityOperationLog(
             "INFO" `
             "START" `
             (
-                "operation={0}; version={1}; data={2}" -f
+                "operation={0}; version={1}; sierra={2}; data={3}" -f
                 $Operation,
                 $Version,
+                $bridgePaths.Sierra,
                 $ResolvedDataFolder) |
             Set-Content `
                 -LiteralPath $logPath `
@@ -756,6 +888,16 @@ catch { }
 
 Start-Sleep -Milliseconds 250
 
+$protectedRoots =
+    @(
+        $items |
+        ForEach-Object {
+            [IO.Path]::GetFullPath(
+                [string]$_.ProtectedRoot).TrimEnd('\')
+        } |
+        Select-Object -Unique
+    )
+
 foreach ($item in $items) {
     $current =
         [IO.Path]::GetFullPath(
@@ -876,6 +1018,51 @@ foreach ($item in $items) {
     }
 }
 
+foreach ($root in $protectedRoots) {
+    try {
+        if (-not (
+            Test-Path `
+                -LiteralPath $root `
+                -PathType Container)) {
+
+            continue
+        }
+
+        $remaining =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $root `
+                    -Force `
+                    -ErrorAction Stop
+            )
+
+        if ($remaining.Count -eq 0) {
+            Remove-Item `
+                -LiteralPath $root `
+                -Force `
+                -ErrorAction Stop
+
+            $lines +=
+                New-CleanupLogLine `
+                    "INFO" `
+                    "REMOVE" `
+                    (
+                        "path={0}; status=OK; kind=empty_root" -f
+                        $root)
+        }
+    }
+    catch {
+        $lines +=
+            New-CleanupLogLine `
+                "WARN" `
+                "REMOVE" `
+                (
+                    "path={0}; kind=empty_root; error={1}" -f
+                    $root,
+                    $_.Exception.Message)
+    }
+}
+
 $lines +=
     New-CleanupLogLine `
         "INFO" `
@@ -983,7 +1170,7 @@ function Wait-ForSierraChartClosed(
 
         if (Test-SierraChartRunning) {
             Write-Host (
-                "Sierra Chart is still running. Close all Sierra Chart instances first.") `
+                "Sierra Chart is still running. Close the targeted Sierra Chart instance first.") `
                 -ForegroundColor Yellow
         }
     }
@@ -993,11 +1180,61 @@ function Wait-ForSierraChartClosed(
 }
 
 function Test-SierraChartRunning {
-    $process = Get-Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.ProcessName -like "SierraChart*" } |
-        Select-Object -First 1
+    $targetSierra =
+        Get-NormalizedConfiguredPath `
+            $SierraPath
 
-    return $null -ne $process
+    if (-not $targetSierra -and
+        -not [string]::IsNullOrWhiteSpace(
+            $script:CleanupDataFolder)) {
+
+        try {
+            $targetSierra =
+                (Get-BridgePaths `
+                    $script:CleanupDataFolder).Sierra
+        }
+        catch { }
+    }
+
+    $processes =
+        @(
+            Get-Process `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ProcessName -like
+                    "SierraChart*"
+            }
+        )
+
+    foreach ($process in $processes) {
+        if (-not $targetSierra) {
+            return $true
+        }
+
+        try {
+            if (-not $process.Path) {
+                continue
+            }
+
+            $processSierra =
+                [IO.Path]::GetFullPath(
+                    (Split-Path `
+                        -Parent `
+                        $process.Path)).TrimEnd('\')
+
+            if ($processSierra.Equals(
+                    $targetSierra,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                return $true
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    return $false
 }
 
 function Convert-ScDateTimeToUtc([long]$Value) {
@@ -1017,6 +1254,22 @@ function Convert-ScDateTimeToUtc([long]$Value) {
     catch {
         return $null
     }
+}
+
+function Format-ScDateTimeDisplay(
+    [long]$Value) {
+
+    $date =
+        Convert-ScDateTimeToUtc `
+            $Value
+
+    if (-not $date) {
+        return "unknown"
+    }
+
+    return $date.ToString(
+        "yyyy-MM-dd HH:mm:ss 'UTC'",
+        [Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Test-LiveScidCandidate($Candidate) {
@@ -1266,42 +1519,65 @@ function Get-ScidValidationSummary($Candidate) {
 
 function Get-ScidArchivePaths(
     $Candidate,
-    [string]$DataFolder) {
+    [string]$DataFolder,
+    [string]$RollbackProvenance,
+    [long]$RollbackCutoverDateTime = 0) {
 
     $bridgePaths =
-        Get-BridgePaths $DataFolder
+        Get-BridgePaths `
+            $DataFolder
 
     $archiveRoot =
-        $bridgePaths.Archive
+        $bridgePaths.Storage
 
     $baselineDirectory =
         Join-Path `
             $archiveRoot `
-            "Rithmic_Baselines"
+            "Baselines"
 
     $rollbackDirectory =
         Join-Path `
             $archiveRoot `
             "Rollbacks"
 
-    $flatName =
-        $Candidate.SourceName +
-        "__" +
-        $Candidate.TargetName +
-        ".gz"
+    $baselineName =
+        Get-RithmicBackupFileName `
+            $Candidate.SourceName `
+            $Candidate.TargetName `
+            "Rithmic"
+
+    $effectiveRollbackProvenance =
+        if ([string]::IsNullOrWhiteSpace(
+                $RollbackProvenance)) {
+
+            "Unknown"
+        }
+        else {
+            Normalize-RithmicProvenance `
+                $RollbackProvenance
+        }
+
+    $rollbackName =
+        Get-RithmicBackupFileName `
+            $Candidate.SourceName `
+            $Candidate.TargetName `
+            $effectiveRollbackProvenance
 
     return [pscustomobject]@{
-        ArchiveRoot = $archiveRoot
-        BaselineDirectory = $baselineDirectory
+        ArchiveRoot =
+            $archiveRoot
+        BaselineDirectory =
+            $baselineDirectory
         BaselineArchive =
             Join-Path `
                 $baselineDirectory `
-                $flatName
-        RollbackDirectory = $rollbackDirectory
+                $baselineName
+        RollbackDirectory =
+            $rollbackDirectory
         RollbackArchive =
             Join-Path `
                 $rollbackDirectory `
-                $flatName
+                $rollbackName
     }
 }
 
@@ -1371,6 +1647,23 @@ function Read-ScidArchiveMeta([string]$ArchivePath) {
             Sha256 =
                 [string]$values[
                     "sha256"]
+            Provenance =
+                if ($values.ContainsKey(
+                    "provenance")) {
+                    Normalize-RithmicProvenance `
+                        ([string]$values["provenance"])
+                }
+                else {
+                    "Unknown"
+                }
+            CutoverDateTime =
+                if ($values.ContainsKey(
+                    "cutover_datetime")) {
+                    [long]$values["cutover_datetime"]
+                }
+                else {
+                    0L
+                }
         }
     }
     catch {
@@ -1440,11 +1733,11 @@ function Get-StorageSnapshot([string]$DataFolder) {
 
     $archiveRoot =
         [IO.Path]::GetFullPath(
-            $bridgePaths.Archive).TrimEnd('\') + '\'
+            $bridgePaths.Storage).TrimEnd('\') + '\'
 
     $recoveryRoot =
         [IO.Path]::GetFullPath(
-            $bridgePaths.Recovery).TrimEnd('\') + '\'
+            $bridgePaths.Temp).TrimEnd('\') + '\'
 
     $logRoot =
         [IO.Path]::GetFullPath(
@@ -1462,8 +1755,8 @@ function Get-StorageSnapshot([string]$DataFolder) {
     $categories = @{
         Sources = [long[]]@(0L, 0L)
         Rithmic = [long[]]@(0L, 0L)
-        Archive = [long[]]@(0L, 0L)
-        Recovery = [long[]]@(0L, 0L)
+        HistoryBridge = [long[]]@(0L, 0L)
+        Temp = [long[]]@(0L, 0L)
         Logs = [long[]]@(0L, 0L)
         Other = [long[]]@(0L, 0L)
     }
@@ -1537,8 +1830,8 @@ function Get-StorageSnapshot([string]$DataFolder) {
     }
 
     foreach ($pair in @(
-        [pscustomobject]@{ Path = $bridgePaths.Archive; Category = "Archive" },
-        [pscustomobject]@{ Path = $bridgePaths.Recovery; Category = "Recovery" },
+        [pscustomobject]@{ Path = $bridgePaths.Storage; Category = "HistoryBridge" },
+        [pscustomobject]@{ Path = $bridgePaths.Temp; Category = "Temp" },
         [pscustomobject]@{ Path = $bridgePaths.Logs; Category = "Logs" }
     )) {
         if (-not (Test-Path -LiteralPath $pair.Path -PathType Container)) {
@@ -1569,10 +1862,10 @@ function Get-StorageSnapshot([string]$DataFolder) {
         SourcesDisk = $categories.Sources[1]
         RithmicLogical = $categories.Rithmic[0]
         RithmicDisk = $categories.Rithmic[1]
-        ArchiveLogical = $categories.Archive[0]
-        ArchiveDisk = $categories.Archive[1]
-        RecoveryLogical = $categories.Recovery[0]
-        RecoveryDisk = $categories.Recovery[1]
+        HistoryBridgeLogical = $categories.HistoryBridge[0]
+        HistoryBridgeDisk = $categories.HistoryBridge[1]
+        TempLogical = $categories.Temp[0]
+        TempDisk = $categories.Temp[1]
         LogsLogical = $categories.Logs[0]
         LogsDisk = $categories.Logs[1]
         OtherLogical = $categories.Other[0]
@@ -1582,8 +1875,10 @@ function Get-StorageSnapshot([string]$DataFolder) {
         TotalLogical = $logicalTotal
         TotalDisk = $allocatedTotal
         Free = Get-AvailableFreeBytes $DataFolder
-        ArchivePath = $bridgePaths.Archive
-        RecoveryPath = $bridgePaths.Recovery
+        SierraPath = $bridgePaths.Sierra
+        DataPath = $bridgePaths.Data
+        StoragePath = $bridgePaths.Storage
+        TempPath = $bridgePaths.Temp
         LogPath = $bridgePaths.Logs
     }
 }
@@ -1607,8 +1902,8 @@ function Show-StorageDelta($Before, $After) {
     foreach ($row in @(
         [pscustomobject]@{ Name = "SC Data sources"; Before = $Before.SourcesDisk; After = $After.SourcesDisk },
         [pscustomobject]@{ Name = "Rithmic targets"; Before = $Before.RithmicDisk; After = $After.RithmicDisk },
-        [pscustomobject]@{ Name = "Bridge archive"; Before = $Before.ArchiveDisk; After = $After.ArchiveDisk },
-        [pscustomobject]@{ Name = "Recovery staging"; Before = $Before.RecoveryDisk; After = $After.RecoveryDisk },
+        [pscustomobject]@{ Name = "HistoryBridge"; Before = $Before.HistoryBridgeDisk; After = $After.HistoryBridgeDisk },
+        [pscustomobject]@{ Name = "Temp files"; Before = $Before.TempDisk; After = $After.TempDisk },
         [pscustomobject]@{ Name = "Logs"; Before = $Before.LogsDisk; After = $After.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Before = $Before.OtherDisk; After = $After.OtherDisk },
         [pscustomobject]@{ Name = "Sierra Data folder"; Before = $Before.DataDisk; After = $After.DataDisk },
@@ -1736,8 +2031,8 @@ function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
 
     $directory =
         Join-Path `
-            $bridgePaths.Archive `
-            "SC_Data"
+            $bridgePaths.Storage `
+            "Archive"
 
     return Join-Path `
         $directory `
@@ -2333,6 +2628,10 @@ function Invoke-SourceArchiveManager(
                         $false)
             }
 
+            Set-ArchiveProvenance `
+                $archivePath `
+                "SCData"
+
             $rawBytes += [long]$result.OriginalBytes
             $archiveBytes += [long]$result.ArchiveBytes
             $archived++
@@ -2413,13 +2712,13 @@ function Get-BridgeProtectedRootForPath(
     $bridgePaths =
         Get-BridgePaths $DataFolder
 
-    # Choose the most specific configured root. Archive/Recovery/Logs can
+    # Choose the most specific configured root. Storage/Temp/Logs can
     # themselves live under Data, and pruning must stop at the configured
     # sub-root rather than climbing all the way to Data.
     $roots =
         @(
-            $bridgePaths.Archive,
-            $bridgePaths.Recovery,
+            $bridgePaths.Storage,
+            $bridgePaths.Temp,
             $bridgePaths.Logs,
             $bridgePaths.Data
         ) |
@@ -2823,15 +3122,19 @@ function Invoke-BridgeDirectoryHousekeeping(
     $removed = 0
 
     foreach ($root in @(
-        $bridgePaths.Archive,
-        $bridgePaths.Recovery,
-        $bridgePaths.Logs
+        $bridgePaths.Storage,
+        $bridgePaths.Temp
     )) {
         $removed +=
             Remove-EmptyBridgeDirectories `
-                $root `
-                -PreserveRoot
+                $root
     }
+
+    # Logs are operation-owned and may be in use while housekeeping runs.
+    $removed +=
+        Remove-EmptyBridgeDirectories `
+            $bridgePaths.Logs `
+            -PreserveRoot
 
     return $removed
 }
@@ -2843,8 +3146,8 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
 
     $root =
         Join-Path `
-            $bridgePaths.Archive `
-            "SC_Data"
+            $bridgePaths.Storage `
+            "Archive"
 
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
         return @()
@@ -3176,15 +3479,15 @@ function Invoke-SourceRestoreManager(
 
             $conflictDirectory =
                 Join-Path `
-                    $bridgePaths.Archive `
-                    "Restore_Conflicts"
+                    $bridgePaths.Storage `
+                    "RestoreConflicts"
 
             $conflictArchive =
                 Join-Path `
                     $conflictDirectory `
                     (
                         $conflictStamp +
-                        "__" +
+                        "--UN--" +
                         $item.OriginalName +
                         ".gz"
                     )
@@ -3203,6 +3506,10 @@ function Invoke-SourceRestoreManager(
                     $true,
                     $false) | Out-Null
             }
+
+            Set-ArchiveProvenance `
+                $conflictArchive `
+                "Unknown"
 
             $pending += $item
 
@@ -3360,10 +3667,10 @@ function Get-RithmicTargetNameFromBackupArchive(
     }
 
     # Composite flat backup names encode the actual Rithmic target after the
-    # final "__".  Parse that explicit identity before consulting metadata.
+    # final "--". Parse that explicit identity before consulting metadata.
     $separator =
         $name.LastIndexOf(
-            "__",
+            "--",
             [StringComparison]::Ordinal)
 
     if ($separator -ge 0 -and
@@ -3424,7 +3731,7 @@ function Get-ScDataSourceNameFromBaselineArchive(
 
     $separator =
         $name.IndexOf(
-            "__",
+            "--",
             [StringComparison]::Ordinal)
 
     if ($separator -le 0) {
@@ -3434,6 +3741,496 @@ function Get-ScDataSourceNameFromBaselineArchive(
     return $name.Substring(
         0,
         $separator)
+}
+
+function Normalize-RithmicProvenance(
+    [string]$Value) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $Value)) {
+
+        return "Unknown"
+    }
+
+    switch ($Value.Trim().ToLowerInvariant()) {
+        "rithmic" {
+            return "Rithmic"
+        }
+
+        "scdata" {
+            return "SCData"
+        }
+
+        "hybrid" {
+            return "Hybrid"
+        }
+
+        "foreign" {
+            return "Foreign"
+        }
+
+        default {
+            return "Unknown"
+        }
+    }
+}
+
+function Format-RithmicProvenance(
+    [string]$Value) {
+
+    switch (Normalize-RithmicProvenance `
+        $Value) {
+
+        "Rithmic" {
+            return "Rithmic authentic"
+        }
+
+        "SCData" {
+            return "SC Data"
+        }
+
+        "Hybrid" {
+            return "Hybrid"
+        }
+
+        "Foreign" {
+            return "Foreign"
+        }
+
+        default {
+            return "Unknown"
+        }
+    }
+}
+
+function Format-RithmicProvenanceWithCutover(
+    [string]$Value,
+    [long]$CutoverDateTime = 0) {
+
+    $text =
+        Format-RithmicProvenance `
+            $Value
+
+    if ((Normalize-RithmicProvenance `
+            $Value) -eq "Hybrid" -and
+        $CutoverDateTime -gt 0) {
+
+        $text +=
+            " from " +
+            (Format-ScDateTimeDisplay `
+                $CutoverDateTime)
+    }
+
+    return $text
+}
+
+function Get-RithmicProvenanceCode(
+    [string]$Value) {
+
+    switch (Normalize-RithmicProvenance `
+        $Value) {
+
+        "Rithmic" {
+            return "RT"
+        }
+
+        "SCData" {
+            return "SC"
+        }
+
+        "Hybrid" {
+            return "MX"
+        }
+
+        "Foreign" {
+            return "FR"
+        }
+
+        default {
+            return "UN"
+        }
+    }
+}
+
+function Resolve-RithmicProvenanceFromContent(
+    [string]$KnownProvenance,
+    [string]$ContentClass) {
+
+    $known =
+        Normalize-RithmicProvenance `
+            $KnownProvenance
+
+    # Proven provenance wins over morphology. SC Data itself can contain
+    # positive Open values depending on storage/record form, so the content
+    # profile is not allowed to override an exact hash, baseline capture, or
+    # verified bridge state.
+    if ($known -ne "Unknown") {
+        return $known
+    }
+
+    $content =
+        if ([string]::IsNullOrWhiteSpace(
+                $ContentClass)) {
+
+            "Unclassified"
+        }
+        else {
+            $ContentClass.Trim()
+        }
+
+    switch ($content) {
+        "ForeignLike" {
+            return "Foreign"
+        }
+
+        # SCDataLike cannot prove purity because a native live tail can consist
+        # entirely of zero Open values. Mixed morphology can identify that two
+        # record forms exist, but without a clean segment boundary it also does
+        # not prove a valid bridge hybrid. Stronger state/hash/source evidence
+        # is required for SCData and Hybrid.
+        "SCDataLike" {
+            return "Unknown"
+        }
+
+        "Mixed" {
+            return "Unknown"
+        }
+
+        default {
+            return "Unknown"
+        }
+    }
+}
+
+function Get-RithmicBackupFileName(
+    [string]$Prefix,
+    [string]$TargetName,
+    [string]$Provenance) {
+
+    $code =
+        Get-RithmicProvenanceCode `
+            $Provenance
+
+    # The filename carries only the compact content identity code. Exact hybrid
+    # cutover evidence remains in metadata/state and in the rollback plan.
+    return (
+        $Prefix +
+        "--" +
+        $code +
+        "--" +
+        $TargetName +
+        ".gz"
+    )
+}
+
+function Get-RithmicBackupPrefixFromArchive(
+    [string]$ArchivePath,
+    [string]$TargetName) {
+
+    $name =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    if ($name.EndsWith(
+            ".gz",
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        $name =
+            $name.Substring(
+                0,
+                $name.Length - 3)
+    }
+
+    $suffix =
+        "--" +
+        $TargetName
+
+    if (-not $name.EndsWith(
+            $suffix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        return $null
+    }
+
+    $prefix =
+        $name.Substring(
+            0,
+            $name.Length -
+                $suffix.Length)
+
+    $codeMatch =
+        [regex]::Match(
+            $prefix,
+            '--(?:RT|SC|FR|UN|MX(?:-\d{8}T\d{6}Z)?)$',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+    if ($codeMatch.Success) {
+        return $prefix.Substring(
+            0,
+            $codeMatch.Index)
+    }
+
+    return $prefix
+}
+
+function Rename-RithmicBackupForProvenance(
+    [string]$ArchivePath,
+    [string]$TargetName,
+    [string]$Provenance) {
+
+    if (-not (Test-Path `
+        -LiteralPath $ArchivePath `
+        -PathType Leaf)) {
+
+        return $ArchivePath
+    }
+
+    $prefix =
+        Get-RithmicBackupPrefixFromArchive `
+            $ArchivePath `
+            $TargetName
+
+    if ([string]::IsNullOrWhiteSpace(
+            $prefix)) {
+
+        return $ArchivePath
+    }
+
+    $newName =
+        Get-RithmicBackupFileName `
+            $prefix `
+            $TargetName `
+            $Provenance
+
+    $newPath =
+        Join-Path `
+            (Split-Path `
+                -Parent `
+                $ArchivePath) `
+            $newName
+
+    if ($newPath.Equals(
+            $ArchivePath,
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        return $ArchivePath
+    }
+
+    if (Test-Path `
+        -LiteralPath $newPath) {
+
+        Write-UtilityLog `
+            "WARN" `
+            "PROVENANCE" `
+            (
+                "archive={0}; rename={1}; status=SKIPPED; reason=destination_exists" -f
+                $ArchivePath,
+                $newPath)
+
+        return $ArchivePath
+    }
+
+    Move-Item `
+        -LiteralPath $ArchivePath `
+        -Destination $newPath
+
+    $oldMeta =
+        $ArchivePath +
+        ".meta"
+
+    $newMeta =
+        $newPath +
+        ".meta"
+
+    if (Test-Path `
+        -LiteralPath $oldMeta `
+        -PathType Leaf) {
+
+        Move-Item `
+            -LiteralPath $oldMeta `
+            -Destination $newMeta
+    }
+
+    return $newPath
+}
+
+function Set-ArchiveProvenance(
+    [string]$ArchivePath,
+    [string]$Provenance,
+    [long]$CutoverDateTime = 0,
+    $Inspection = $null) {
+
+    try {
+        $metadataPath =
+            $ArchivePath +
+            ".meta"
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $metadataPath `
+                -PathType Leaf)) {
+
+            return $false
+        }
+
+        $normalized =
+            Normalize-RithmicProvenance `
+                $Provenance
+
+        $lines =
+            @(
+                Get-Content `
+                    -LiteralPath $metadataPath `
+                    -ErrorAction Stop
+            )
+
+        $updated =
+            @()
+
+        $found =
+            $false
+
+        foreach ($line in $lines) {
+            if ($line.StartsWith(
+                    "provenance=",
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                $updated +=
+                    (
+                        "provenance=" +
+                        $normalized
+                    )
+
+                $found =
+                    $true
+            }
+            else {
+                $updated +=
+                    $line
+            }
+        }
+
+        if (-not $found) {
+            $updated +=
+                (
+                    "provenance=" +
+                    $normalized
+                )
+        }
+
+        $metadata =
+            @{}
+
+        foreach ($line in $updated) {
+            $separator =
+                $line.IndexOf("=")
+
+            if ($separator -gt 0) {
+                $metadata[$line.Substring(0, $separator)] =
+                    $line.Substring($separator + 1)
+            }
+        }
+
+        if ($CutoverDateTime -gt 0) {
+            $metadata["cutover_datetime"] =
+                [string]$CutoverDateTime
+
+            $metadata["cutover_utc"] =
+                Format-ScDateTimeDisplay `
+                    $CutoverDateTime
+        }
+        else {
+            [void]$metadata.Remove(
+                "cutover_datetime")
+
+            [void]$metadata.Remove(
+                "cutover_utc")
+        }
+
+        if ($Inspection) {
+            $archiveInfo =
+                Get-Item `
+                    -LiteralPath $ArchivePath `
+                    -ErrorAction Stop
+
+            $metadata["verified_archive_bytes"] =
+                [string][long]$archiveInfo.Length
+
+            $metadata["verified_archive_write_ticks"] =
+                [string][long]$archiveInfo.LastWriteTimeUtc.Ticks
+
+            if ($Inspection.PSObject.Properties["Sha256"] -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$Inspection.Sha256)) {
+
+                $metadata["verified_content_sha256"] =
+                    [string]$Inspection.Sha256
+            }
+
+            $metadata["content_class"] =
+                [string]$Inspection.ContentClass
+
+            $metadata["special_control_open_records"] =
+                [string][long]$Inspection.SpecialControlOpenRecords
+
+            $metadata["regular_open_records"] =
+                [string][long]$Inspection.RegularOpenRecords
+
+            $metadata["zero_open_records"] =
+                [string][long]$Inspection.ZeroOpenRecords
+
+            $metadata["other_open_records"] =
+                [string][long]$Inspection.OtherOpenRecords
+
+            if ($Inspection.PSObject.Properties[
+                    "SegmentCutoverDateTime"] -and
+                [long]$Inspection.SegmentCutoverDateTime -gt 0) {
+
+                $metadata["morphology_cutover_datetime"] =
+                    [string][long]$Inspection.SegmentCutoverDateTime
+            }
+        }
+
+        $updated =
+            @()
+
+        foreach ($key in $metadata.Keys | Sort-Object) {
+            $updated +=
+                (
+                    [string]$key +
+                    "=" +
+                    [string]$metadata[$key]
+                )
+        }
+
+        $temporary =
+            $metadataPath +
+            ".tmp"
+
+        $updated |
+            Set-Content `
+                -LiteralPath $temporary `
+                -Encoding UTF8
+
+        Move-Item `
+            -LiteralPath $temporary `
+            -Destination $metadataPath `
+            -Force
+
+        return $true
+    }
+    catch {
+        Write-UtilityLog `
+            "WARN" `
+            "PROVENANCE" `
+            (
+                "archive={0}; provenance={1}; status=WARNING; error={2}" -f
+                $ArchivePath,
+                $Provenance,
+                $_.Exception.Message)
+
+        return $false
+    }
 }
 
 function Read-GzipArchiveMeta(
@@ -3540,6 +4337,87 @@ function Read-GzipArchiveMeta(
                 else {
                     0L
                 }
+            Provenance =
+                if ($values.ContainsKey(
+                    "provenance")) {
+
+                    Normalize-RithmicProvenance `
+                        ([string]$values[
+                            "provenance"])
+                }
+                else {
+                    "Unknown"
+                }
+            ContentClass =
+                if ($values.ContainsKey(
+                    "content_class")) {
+
+                    [string]$values[
+                        "content_class"]
+                }
+                else {
+                    "Unclassified"
+                }
+            SpecialControlOpenRecords =
+                if ($values.ContainsKey(
+                    "special_control_open_records")) {
+
+                    [long]$values[
+                        "special_control_open_records"]
+                }
+                else {
+                    0L
+                }
+            RegularOpenRecords =
+                if ($values.ContainsKey(
+                    "regular_open_records")) {
+
+                    [long]$values[
+                        "regular_open_records"]
+                }
+                else {
+                    0L
+                }
+            ZeroOpenRecords =
+                if ($values.ContainsKey(
+                    "zero_open_records")) {
+
+                    [long]$values[
+                        "zero_open_records"]
+                }
+                else {
+                    0L
+                }
+            OtherOpenRecords =
+                if ($values.ContainsKey(
+                    "other_open_records")) {
+
+                    [long]$values[
+                        "other_open_records"]
+                }
+                else {
+                    0L
+                }
+            CutoverDateTime =
+                if ($values.ContainsKey(
+                    "cutover_datetime")) {
+
+                    [long]$values[
+                        "cutover_datetime"]
+                }
+                else {
+                    0L
+                }
+            CutoverUtc =
+                if ($values.ContainsKey(
+                    "cutover_utc")) {
+
+                    [string]$values[
+                        "cutover_utc"]
+                }
+                else {
+                    $null
+                }
         }
     }
     catch {
@@ -3559,14 +4437,14 @@ function Get-RithmicBackupArchives(
                 Kind = "baseline"
                 Path =
                     Join-Path `
-                        $bridgePaths.Archive `
-                        "Rithmic_Baselines"
+                        $bridgePaths.Storage `
+                        "Baselines"
             },
             [pscustomobject]@{
                 Kind = "rollback"
                 Path =
                     Join-Path `
-                        $bridgePaths.Archive `
+                        $bridgePaths.Storage `
                         "Rollbacks"
             }
         )
@@ -3615,6 +4493,26 @@ function Get-RithmicBackupArchives(
                 [IO.Path]::GetExtension(
                     $targetName).TrimStart('.').ToLowerInvariant()
 
+            $resolvedProvenance =
+                Resolve-RithmicProvenanceFromContent `
+                    $meta.Provenance `
+                    $meta.ContentClass
+
+            if ($root.Kind -eq "baseline" -and
+                (Normalize-RithmicProvenance `
+                    $resolvedProvenance) -ne "Rithmic") {
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "archive={0}; status=IGNORED; reason=baseline_provenance_not_authenticated; provenance={1}" -f
+                        $archive.FullName,
+                        $resolvedProvenance)
+
+                continue
+            }
+
             $items +=
                 [pscustomobject]@{
                     Kind = $root.Kind
@@ -3637,11 +4535,95 @@ function Get-RithmicBackupArchives(
                         [long]$meta.OriginalWriteTicks
                     Sha256 =
                         [string]$meta.Sha256
+                    Provenance =
+                        $resolvedProvenance
+                    CutoverDateTime =
+                        [long]$meta.CutoverDateTime
+                    CutoverUtc =
+                        [string]$meta.CutoverUtc
+                    ContentClass =
+                        [string]$meta.ContentClass
+                    SpecialControlOpenRecords =
+                        [long]$meta.SpecialControlOpenRecords
+                    RegularOpenRecords =
+                        [long]$meta.RegularOpenRecords
                     ArchiveBytes =
                         [long]$archive.Length
                     ArchiveWriteTime =
                         $archive.LastWriteTime
                 }
+        }
+    }
+
+    # Exact byte identity is strong provenance evidence. If one or more
+    # archives represent the exact same target state and all known copies agree
+    # on provenance, surface that provenance for otherwise-unknown copies too.
+    $groups =
+        @{}
+
+    foreach ($item in $items) {
+        $identity =
+            (
+                $item.TargetName.ToUpperInvariant() +
+                "|" +
+                ([string][long]$item.OriginalBytes) +
+                "|" +
+                $item.Sha256.ToUpperInvariant()
+            )
+
+        if (-not $groups.ContainsKey(
+                $identity)) {
+
+            $groups[$identity] =
+                New-Object System.Collections.Generic.List[object]
+        }
+
+        $groups[$identity].Add(
+            $item)
+    }
+
+    foreach ($identity in $groups.Keys) {
+        $group =
+            $groups[$identity].ToArray()
+
+        $authenticatedRithmic =
+            @(
+                $group |
+                Where-Object {
+                    (Normalize-RithmicProvenance `
+                        $_.Provenance) -eq "Rithmic"
+                }
+            ).Count -gt 0
+
+        $known =
+            @(
+                $group |
+                ForEach-Object {
+                    Normalize-RithmicProvenance `
+                        $_.Provenance
+                } |
+                Where-Object {
+                    $_ -ne "Unknown"
+                } |
+                Select-Object -Unique
+            )
+
+        $resolved =
+            if ($authenticatedRithmic) {
+                "Rithmic"
+            }
+            elseif ($known.Count -eq 1) {
+                $known[0]
+            }
+            else {
+                $null
+            }
+
+        if ($resolved) {
+            foreach ($item in $group) {
+                $item.Provenance =
+                    $resolved
+            }
         }
     }
 
@@ -3651,6 +4633,717 @@ function Get-RithmicBackupArchives(
             ArchiveWriteTime `
             -Descending
     )
+}
+
+function Get-KnownRithmicEvidenceByHash(
+    [string]$DataFolder,
+    [string]$TargetName,
+    [long]$OriginalBytes,
+    [string]$Sha256) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $Sha256)) {
+        return $null
+    }
+
+    $matches =
+        @(
+            Get-RithmicBackupArchives `
+                $DataFolder |
+            Where-Object {
+                $_.TargetName -ieq $TargetName -and
+                [long]$_.OriginalBytes -eq $OriginalBytes -and
+                [string]$_.Sha256 -ieq $Sha256
+            } |
+            Sort-Object {
+                if ($_.Kind -eq "baseline") {
+                    0
+                }
+                elseif ((Normalize-RithmicProvenance `
+                    $_.Provenance) -ne "Unknown") {
+                    1
+                }
+                else {
+                    2
+                }
+            }
+        )
+
+    foreach ($match in $matches) {
+        $provenance =
+            Normalize-RithmicProvenance `
+                $match.Provenance
+
+        if ($provenance -ne "Unknown") {
+            return [pscustomobject]@{
+                Provenance = $provenance
+                CutoverDateTime =
+                    [long]$match.CutoverDateTime
+                ArchivePath =
+                    $match.ArchivePath
+                Evidence =
+                    if ($match.Kind -eq "baseline") {
+                        "baseline-hash"
+                    }
+                    else {
+                        "rollback-hash"
+                    }
+            }
+        }
+    }
+
+    return $null
+}
+
+function Get-KnownRithmicProvenanceByHash(
+    [string]$DataFolder,
+    [string]$TargetName,
+    [long]$OriginalBytes,
+    [string]$Sha256) {
+
+    $evidence =
+        Get-KnownRithmicEvidenceByHash `
+            $DataFolder `
+            $TargetName `
+            $OriginalBytes `
+            $Sha256
+
+    if ($evidence) {
+        return [string]$evidence.Provenance
+    }
+
+    return "Unknown"
+}
+
+function Get-StateRithmicProvenance(
+    [string]$TargetPath,
+    [string]$Extension,
+    [string]$CurrentSha256 = $null) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $CurrentSha256) -or
+        -not (
+            Test-Path `
+                -LiteralPath $StatePath `
+                -PathType Leaf)) {
+
+        return "Unknown"
+    }
+
+    $currentHash =
+        $CurrentSha256.ToLowerInvariant()
+
+    $state =
+        Read-JsonFile `
+            $StatePath
+
+    $targetTable =
+        Get-TargetProvenanceTable `
+            $state
+
+    $targetKey =
+        Get-TargetProvenanceStateKey `
+            $TargetPath
+
+    if ($targetTable.ContainsKey(
+            $targetKey)) {
+
+        $entry =
+            $targetTable[$targetKey]
+
+        if ([string]$entry.extension -eq
+                $Extension -and
+            $entry.PSObject.Properties["sha256"] -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$entry.sha256) -and
+            [string]$entry.sha256 -ieq
+                $currentHash) {
+
+            return Normalize-RithmicProvenance `
+                ([string]$entry.provenance)
+        }
+    }
+
+    $sources =
+        Get-StateTable `
+            $state
+
+    foreach ($entry in $sources.Values) {
+        if ($Extension -eq "scid" -and
+            $entry.PSObject.Properties["target_path"] -and
+            ([string]$entry.target_path).Equals(
+                $TargetPath,
+                [StringComparison]::OrdinalIgnoreCase) -and
+            $entry.PSObject.Properties["scid_sha256"] -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$entry.scid_sha256) -and
+            [string]$entry.scid_sha256 -ieq
+                $currentHash -and
+            $entry.PSObject.Properties["scid_provenance"]) {
+
+            return Normalize-RithmicProvenance `
+                ([string]$entry.scid_provenance)
+        }
+
+        if ($Extension -eq "dly" -and
+            $entry.PSObject.Properties["daily_target_path"] -and
+            ([string]$entry.daily_target_path).Equals(
+                $TargetPath,
+                [StringComparison]::OrdinalIgnoreCase) -and
+            $entry.PSObject.Properties["daily_sha256"] -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$entry.daily_sha256) -and
+            [string]$entry.daily_sha256 -ieq
+                $currentHash -and
+            $entry.PSObject.Properties["daily_provenance"]) {
+
+            return Normalize-RithmicProvenance `
+                ([string]$entry.daily_provenance)
+        }
+    }
+
+    return "Unknown"
+}
+
+function Resolve-CurrentRithmicProvenance(
+    [string]$DataFolder,
+    [string]$TargetName,
+    [string]$TargetPath,
+    [string]$Extension,
+    [long]$Length,
+    [string]$Sha256) {
+
+    $known =
+        Get-KnownRithmicProvenanceByHash `
+            $DataFolder `
+            $TargetName `
+            $Length `
+            $Sha256
+
+    if ($known -ne "Unknown") {
+        return $known
+    }
+
+    return Get-StateRithmicProvenance `
+        $TargetPath `
+        $Extension `
+        $Sha256
+}
+
+function Get-StateRithmicCutoverDateTime(
+    [string]$TargetPath,
+    [string]$Extension) {
+
+    if ($Extension -ne "scid") {
+        return 0L
+    }
+
+    try {
+        $state =
+            Read-JsonFile `
+                $StatePath
+
+        $targets =
+            Get-TargetProvenanceTable `
+                $state
+
+        $key =
+            Get-TargetProvenanceStateKey `
+                $TargetPath
+
+        if ($targets.ContainsKey(
+                $key)) {
+
+            $entry =
+                $targets[$key]
+
+            if ((Normalize-RithmicProvenance `
+                    ([string]$entry.provenance)) -eq
+                    "Hybrid" -and
+                $entry.PSObject.Properties[
+                    "cutover_datetime"] -and
+                [long]$entry.cutover_datetime -gt 0) {
+
+                return [long]$entry.cutover_datetime
+            }
+        }
+    }
+    catch { }
+
+    return 0L
+}
+
+function Find-ScDataSourceForRithmicTarget(
+    [string]$DataFolder,
+    [string]$TargetName) {
+
+    try {
+        $state =
+            Read-JsonFile `
+                $StatePath
+
+        $targets =
+            Get-TargetProvenanceTable `
+                $state
+
+        $targetPath =
+            Join-Path `
+                $DataFolder `
+                $TargetName
+
+        $key =
+            Get-TargetProvenanceStateKey `
+                $targetPath
+
+        if ($targets.ContainsKey(
+                $key)) {
+
+            $entry =
+                $targets[$key]
+
+            if ($entry.PSObject.Properties[
+                    "source_path"] -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$entry.source_path) -and
+                (Test-Path `
+                    -LiteralPath ([string]$entry.source_path) `
+                    -PathType Leaf)) {
+
+                return [IO.Path]::GetFullPath(
+                    [string]$entry.source_path)
+            }
+        }
+    }
+    catch { }
+
+    $targetPattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.scid$'
+
+    $sourcePattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.scid$'
+
+    $targetMatch =
+        $targetPattern.Match(
+            $TargetName)
+
+    if (-not $targetMatch.Success) {
+        return $null
+    }
+
+    $matches =
+        @(
+            Get-ChildItem `
+                -LiteralPath $DataFolder `
+                -File `
+                -Filter "*.scid" `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+                $sourceMatch =
+                    $sourcePattern.Match(
+                        $_.Name)
+
+                $sourceMatch.Success -and
+                $sourceMatch.Groups["root"].Value -ieq
+                    $targetMatch.Groups["root"].Value -and
+                $sourceMatch.Groups["month"].Value -ieq
+                    $targetMatch.Groups["month"].Value -and
+                $sourceMatch.Groups["exchange"].Value -ieq
+                    $targetMatch.Groups["exchange"].Value -and
+                $sourceMatch.Groups["year"].Value.Substring(1, 1) -eq
+                    $targetMatch.Groups["year"].Value
+            }
+        )
+
+    if ($matches.Count -eq 1) {
+        return $matches[0].FullName
+    }
+
+    # A one-digit Rithmic year collides every decade. Never guess when more
+    # than one two-digit SC Data contract maps to the same target name.
+    return $null
+}
+
+function Get-ProvenanceScaleForTarget(
+    [string]$TargetName,
+    [string]$SourcePath,
+    [string]$TargetPath) {
+
+    $targetPattern =
+        [regex]'^(?<root>.+?)[FGHJKMNQUVXZ]\d\.(?<exchange>[A-Za-z0-9_]+)\.scid$'
+
+    $match =
+        $targetPattern.Match(
+            $TargetName)
+
+    if ($match.Success) {
+        $group =
+            "{0}|{1}" -f
+            $match.Groups["root"].Value.ToUpperInvariant(),
+            $match.Groups["exchange"].Value.ToUpperInvariant()
+
+        $config =
+            Read-JsonFile `
+                $ConfigPath
+
+        if ($config -and
+            $config.proven_scales -and
+            $config.proven_scales.PSObject.Properties[
+                $group]) {
+
+            try {
+                return [double]$config.proven_scales.$group
+            }
+            catch { }
+        }
+    }
+
+    try {
+        $inference =
+            [SierraHistoryBridge.ScidBridge]::InferScale(
+                $SourcePath,
+                $TargetPath)
+
+        return [double]$inference.Factor
+    }
+    catch {
+        return 0.0
+    }
+}
+
+function Get-ScidCurrentProvenanceEvidence(
+    [string]$DataFolder,
+    [string]$TargetName,
+    [string]$TargetPath,
+    [long]$Length,
+    [string]$Sha256,
+    $Inspection) {
+
+    $exact =
+        Get-KnownRithmicEvidenceByHash `
+            $DataFolder `
+            $TargetName `
+            $Length `
+            $Sha256
+
+    if ($exact) {
+        return [pscustomobject]@{
+            Provenance =
+                [string]$exact.Provenance
+            CutoverDateTime =
+                [long]$exact.CutoverDateTime
+            SourcePath = $null
+            Evidence =
+                [string]$exact.Evidence
+        }
+    }
+
+    $provenance =
+        Get-StateRithmicProvenance `
+            $TargetPath `
+            "scid" `
+            $Sha256
+
+    if ($provenance -ne "Unknown") {
+        return [pscustomobject]@{
+            Provenance = $provenance
+            CutoverDateTime =
+                Get-StateRithmicCutoverDateTime `
+                    $TargetPath `
+                    "scid"
+            SourcePath = $null
+            Evidence = "state-hash"
+        }
+    }
+
+    $sourcePath =
+        Find-ScDataSourceForRithmicTarget `
+            $DataFolder `
+            $TargetName
+
+    if ($sourcePath) {
+        $scale =
+            Get-ProvenanceScaleForTarget `
+                $TargetName `
+                $sourcePath `
+                $TargetPath
+
+        if ($scale -gt 0) {
+            try {
+                $relationship =
+                    [SierraHistoryBridge.ScidBridge]::InspectScidRelationshipToSource(
+                        $sourcePath,
+                        $TargetPath,
+                        $scale)
+
+                switch ([string]$relationship.Relationship) {
+                    "SCData" {
+                        return [pscustomobject]@{
+                            Provenance = "SCData"
+                            CutoverDateTime = 0L
+                            SourcePath = $sourcePath
+                            Evidence = "source-exact"
+                        }
+                    }
+
+                    "Mixed" {
+                        return [pscustomobject]@{
+                            Provenance = "Hybrid"
+                            CutoverDateTime = [long]$relationship.CutoverDateTime
+                            SourcePath = $sourcePath
+                            Evidence = "source-segment"
+                        }
+                    }
+
+                    "Foreign" {
+                        return [pscustomobject]@{
+                            Provenance = "Foreign"
+                            CutoverDateTime = 0L
+                            SourcePath = $sourcePath
+                            Evidence = "source-nonmatch"
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-UtilityLog `
+                    "WARN" `
+                    "PROVENANCE" `
+                    (
+                        "target={0}; source={1}; status=WARNING; relationship_scan={2}" -f
+                        $TargetName,
+                        $sourcePath,
+                        $_.Exception.Message)
+            }
+        }
+    }
+
+    if ($Inspection) {
+        if ([string]$Inspection.ContentClass -eq "Mixed" -and
+            [long]$Inspection.SegmentCutoverDateTime -gt 0) {
+
+            return [pscustomobject]@{
+                Provenance = "Hybrid"
+                CutoverDateTime = [long]$Inspection.SegmentCutoverDateTime
+                SourcePath = $sourcePath
+                Evidence = "content-segment"
+            }
+        }
+
+        if ([string]$Inspection.ContentClass -eq "ForeignLike") {
+            return [pscustomobject]@{
+                Provenance = "Foreign"
+                CutoverDateTime = 0L
+                SourcePath = $sourcePath
+                Evidence = "content-foreign"
+            }
+        }
+    }
+
+    # SCDataLike morphology alone is intentionally not enough to claim a pure
+    # SC Data file: a native live tail can contain zero Open values and hide in
+    # that profile. Pure SC is asserted only by state/hash or exact source
+    # relationship.
+    return [pscustomobject]@{
+        Provenance = "Unknown"
+        CutoverDateTime = 0L
+        SourcePath = $sourcePath
+        Evidence = "insufficient"
+    }
+}
+
+function Get-CandidatePreviousScidEvidence(
+    $Candidate,
+    [string]$RawPath) {
+
+    if ($Candidate.CreateRithmicBaseline) {
+        return [pscustomobject]@{
+            Provenance = "Rithmic"
+            CutoverDateTime = 0L
+            Inspection = $null
+            Evidence = "baseline-capture"
+        }
+    }
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $RawPath `
+            -PathType Leaf)) {
+
+        return [pscustomobject]@{
+            Provenance = "Unknown"
+            CutoverDateTime = 0L
+            Inspection = $null
+            Evidence = "missing"
+        }
+    }
+
+    $inspection =
+        $null
+
+    try {
+        # One full target pass gives exact identity plus content morphology.
+        # State is trusted only when this SHA exactly matches the saved file.
+        $inspection =
+            [SierraHistoryBridge.ScidBridge]::InspectScidContent(
+                $RawPath)
+
+        $dataFolder =
+            Split-Path `
+                -Parent `
+                $Candidate.Target
+
+        $exact =
+            Get-KnownRithmicEvidenceByHash `
+                $dataFolder `
+                $Candidate.TargetName `
+                ([long]$inspection.Length) `
+                ([string]$inspection.Sha256)
+
+        if ($exact) {
+            return [pscustomobject]@{
+                Provenance =
+                    [string]$exact.Provenance
+                CutoverDateTime =
+                    [long]$exact.CutoverDateTime
+                Inspection = $inspection
+                Evidence =
+                    [string]$exact.Evidence
+            }
+        }
+
+        $savedState =
+            Read-JsonFile `
+                $StatePath
+
+        $targetTable =
+            Get-TargetProvenanceTable `
+                $savedState
+
+        $targetKey =
+            Get-TargetProvenanceStateKey `
+                $Candidate.Target
+
+        if ($targetTable.ContainsKey(
+                $targetKey)) {
+
+            $targetEntry =
+                $targetTable[$targetKey]
+
+            if ($targetEntry.PSObject.Properties[
+                    "sha256"] -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$targetEntry.sha256) -and
+                [string]$targetEntry.sha256 -ieq
+                    [string]$inspection.Sha256) {
+
+                return [pscustomobject]@{
+                    Provenance =
+                        Normalize-RithmicProvenance `
+                            ([string]$targetEntry.provenance)
+                    CutoverDateTime =
+                        if ($targetEntry.PSObject.Properties[
+                                "cutover_datetime"]) {
+                            [long]$targetEntry.cutover_datetime
+                        }
+                        else {
+                            0L
+                        }
+                    Inspection = $inspection
+                    Evidence = "state-hash"
+                }
+            }
+        }
+
+        # If exact identity changed, inspect the actual data relationship rather
+        # than assuming an append or trusting sampled signatures.
+        if ($Candidate.Source -and
+            (Test-Path `
+                -LiteralPath $Candidate.Source `
+                -PathType Leaf)) {
+
+            $scale =
+                Get-ProvenanceScaleForTarget `
+                    $Candidate.TargetName `
+                    $Candidate.Source `
+                    $RawPath
+
+            if ($scale -gt 0) {
+                $relationship =
+                    [SierraHistoryBridge.ScidBridge]::InspectScidRelationshipToSource(
+                        $Candidate.Source,
+                        $RawPath,
+                        $scale)
+
+                switch ([string]$relationship.Relationship) {
+                    "SCData" {
+                        return [pscustomobject]@{
+                            Provenance = "SCData"
+                            CutoverDateTime = 0L
+                            Inspection = $inspection
+                            Evidence = "source-exact"
+                        }
+                    }
+
+                    "Mixed" {
+                        return [pscustomobject]@{
+                            Provenance = "Hybrid"
+                            CutoverDateTime =
+                                [long]$relationship.CutoverDateTime
+                            Inspection = $inspection
+                            Evidence = "source-segment"
+                        }
+                    }
+
+                    "Foreign" {
+                        return [pscustomobject]@{
+                            Provenance = "Foreign"
+                            CutoverDateTime = 0L
+                            Inspection = $inspection
+                            Evidence = "source-nonmatch"
+                        }
+                    }
+                }
+            }
+        }
+
+        if ([string]$inspection.ContentClass -eq "Mixed" -and
+            [long]$inspection.SegmentCutoverDateTime -gt 0) {
+
+            return [pscustomobject]@{
+                Provenance = "Hybrid"
+                CutoverDateTime =
+                    [long]$inspection.SegmentCutoverDateTime
+                Inspection = $inspection
+                Evidence = "content-segment"
+            }
+        }
+
+        if ([string]$inspection.ContentClass -eq "ForeignLike") {
+            return [pscustomobject]@{
+                Provenance = "Foreign"
+                CutoverDateTime = 0L
+                Inspection = $inspection
+                Evidence = "content-foreign"
+            }
+        }
+    }
+    catch {
+        Write-UtilityLog `
+            "WARN" `
+            "PROVENANCE" `
+            (
+                "target={0}; raw={1}; status=WARNING; error={2}" -f
+                $Candidate.TargetName,
+                $RawPath,
+                $_.Exception.Message)
+    }
+
+    return [pscustomobject]@{
+        Provenance = "Unknown"
+        CutoverDateTime = 0L
+        Inspection = $inspection
+        Evidence = "insufficient"
+    }
 }
 
 function Get-ExactRithmicRollbackBackup(
@@ -3754,7 +5447,7 @@ function Get-DuplicateRithmicRollbackBackups(
     foreach ($key in $groupTable.Keys) {
         $items =
             @(
-                $groupTable[$key] |
+                $groupTable[$key].ToArray() |
                 Sort-Object `
                     ArchiveWriteTime,
                     ArchivePath
@@ -3816,6 +5509,21 @@ function Get-DuplicateRithmicRollbackBackups(
                 }
             )
 
+        $groupProvenance =
+            "Unknown"
+
+        foreach ($copy in $items) {
+            $copyProvenance =
+                Normalize-RithmicProvenance `
+                    $copy.Provenance
+
+            if ($copyProvenance -ne "Unknown") {
+                $groupProvenance =
+                    $copyProvenance
+                break
+            }
+        }
+
         $groupReclaimable = 0L
 
         foreach ($duplicate in $duplicates) {
@@ -3841,6 +5549,8 @@ function Get-DuplicateRithmicRollbackBackups(
                     [long]$keeper.OriginalBytes
                 Sha256 =
                     [string]$keeper.Sha256
+                Provenance =
+                    $groupProvenance
                 Count =
                     $items.Count
                 Keeper =
@@ -3880,6 +5590,14 @@ function Clear-ConfirmedRithmicRollbackDuplicates(
 
     foreach ($group in @(
         $DuplicateReport.Groups)) {
+
+        if ((Normalize-RithmicProvenance `
+                $group.Provenance) -ne "Unknown") {
+
+            [void](Set-ArchiveProvenance `
+                $group.Keeper.ArchivePath `
+                $group.Provenance)
+        }
 
         foreach ($duplicate in @(
             $group.Duplicates)) {
@@ -3962,8 +5680,10 @@ function Review-RithmicRollbackDuplicates(
 
     foreach ($group in $report.Groups) {
         Write-Host (
-            "  {0} | {1} identical copies | {2} redundant" -f
+            "  {0} | {1} | {2} identical copies | {3} redundant" -f
             $group.TargetName,
+            (Format-RithmicProvenance `
+                $group.Provenance),
             $group.Count,
             (Format-StorageBytes `
                 $group.ReclaimableBytes))
@@ -4068,6 +5788,10 @@ function Invalidate-BridgeStateForRithmicTarget(
         Get-StateTable `
             $state
 
+    $targetTable =
+        Get-TargetProvenanceTable `
+            $state
+
     $changed = $false
 
     foreach ($key in @($table.Keys)) {
@@ -4101,7 +5825,8 @@ function Invalidate-BridgeStateForRithmicTarget(
                 "daily_target_path",
                 "daily_minimum_target_records",
                 "daily_target_first_date_ticks",
-                "daily_minimum_target_last_date_ticks"
+                "daily_minimum_target_last_date_ticks",
+                "daily_provenance"
             )) {
                 if ($entry.PSObject.Properties[
                     $propertyName]) {
@@ -4119,15 +5844,9 @@ function Invalidate-BridgeStateForRithmicTarget(
     }
 
     if ($changed) {
-        Save-JsonFile `
-            $StatePath `
-            ([pscustomobject]@{
-                schema_version =
-                    $StateSchemaVersion
-                sources =
-                    (Convert-HashtableToObject `
-                        $table)
-            })
+        Save-BridgeStateTables `
+            $table `
+            $targetTable
     }
 
     return $changed
@@ -4135,7 +5854,9 @@ function Invalidate-BridgeStateForRithmicTarget(
 
 function New-RithmicUndoArchive(
     $Backup,
-    [string]$DataFolder) {
+    [string]$DataFolder,
+    [string]$Provenance,
+    [long]$CutoverDateTime = 0) {
 
     if (-not (
         Test-Path `
@@ -4154,26 +5875,44 @@ function New-RithmicUndoArchive(
 
     $directory =
         Join-Path `
-            $bridgePaths.Archive `
+            $bridgePaths.Storage `
             "Rollbacks"
 
     $archivePath =
         Join-Path `
             $directory `
             (
-                "manual-" +
-                $stamp +
-                "__" +
-                $Backup.TargetName +
-                ".gz"
+                Get-RithmicBackupFileName `
+                    ("manual-" + $stamp) `
+                    $Backup.TargetName `
+                    $Provenance
             )
 
     if ($Backup.Extension -eq "scid") {
-        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
-            $Backup.TargetPath,
-            $archivePath,
-            $false,
-            $false) | Out-Null
+        $archiveResult =
+            [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+                $Backup.TargetPath,
+                $archivePath,
+                $false,
+                $false)
+
+        $Provenance =
+            Resolve-RithmicProvenanceFromContent `
+                $Provenance `
+                $archiveResult.ContentClass
+
+        if ($Provenance -eq "Unknown" -and
+            [string]$archiveResult.ContentClass -eq "Mixed" -and
+            [long]$archiveResult.SegmentCutoverDateTime -gt 0) {
+
+            $Provenance =
+                "Hybrid"
+
+            if ($CutoverDateTime -le 0) {
+                $CutoverDateTime =
+                    [long]$archiveResult.SegmentCutoverDateTime
+            }
+        }
     }
     else {
         [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
@@ -4182,6 +5921,18 @@ function New-RithmicUndoArchive(
             $false,
             $false) | Out-Null
     }
+
+    Set-ArchiveProvenance `
+        $archivePath `
+        $Provenance `
+        $CutoverDateTime `
+        $archiveResult
+
+    $archivePath =
+        Rename-RithmicBackupForProvenance `
+            $archivePath `
+            $Backup.TargetName `
+            $Provenance
 
     return $archivePath
 }
@@ -4312,10 +6063,13 @@ function Invoke-RithmicRollbackManager(
                 $backups[$index]
 
             Write-Host (
-                "  [{0}] {1,-9} {2,-18} {3,10} | {4}" -f
+                "  [{0}] {1,-9} {2,-18} {3,-18} {4,10} | {5}" -f
                 ($index + 1),
                 $item.Kind,
                 $item.TargetName,
+                (Format-RithmicProvenanceWithCutover `
+                    $item.Provenance `
+                    ([long]$item.CutoverDateTime)),
                 (Format-StorageBytes `
                     $item.ArchiveBytes),
                 $item.ArchiveWriteTime.ToString(
@@ -4446,16 +6200,35 @@ function Invoke-RithmicRollbackManager(
         $existingUndo =
             $null
 
+        $targetContentClass =
+            "Unclassified"
+
         if ($targetExists) {
             try {
-                $targetLength =
-                    [long](
-                        Get-Item `
-                            -LiteralPath $selection.TargetPath).Length
+                if ($selection.Extension -eq "scid") {
+                    $inspection =
+                        [SierraHistoryBridge.ScidBridge]::InspectScidContent(
+                            $selection.TargetPath)
 
-                $targetHash =
-                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
-                        $selection.TargetPath)
+                    $targetLength =
+                        [long]$inspection.Length
+
+                    $targetHash =
+                        [string]$inspection.Sha256
+
+                    $targetContentClass =
+                        [string]$inspection.ContentClass
+                }
+                else {
+                    $targetLength =
+                        [long](
+                            Get-Item `
+                                -LiteralPath $selection.TargetPath).Length
+
+                    $targetHash =
+                        [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                            $selection.TargetPath)
+                }
 
                 $alreadyMatches =
                     $targetLength -eq
@@ -4485,6 +6258,67 @@ function Invoke-RithmicRollbackManager(
             }
         }
 
+        $currentCutover =
+            0L
+
+        $currentEvidence =
+            "none"
+
+        if ($targetExists -and
+            $targetHash) {
+
+            if ($selection.Extension -eq "scid") {
+                $evidence =
+                    Get-ScidCurrentProvenanceEvidence `
+                        $ResolvedDataFolder `
+                        $selection.TargetName `
+                        $selection.TargetPath `
+                        $targetLength `
+                        $targetHash `
+                        $inspection
+
+                $currentProvenance =
+                    [string]$evidence.Provenance
+
+                $currentCutover =
+                    [long]$evidence.CutoverDateTime
+
+                $currentEvidence =
+                    [string]$evidence.Evidence
+            }
+            else {
+                $currentProvenance =
+                    Resolve-CurrentRithmicProvenance `
+                        $ResolvedDataFolder `
+                        $selection.TargetName `
+                        $selection.TargetPath `
+                        $selection.Extension `
+                        $targetLength `
+                        $targetHash
+
+                $currentEvidence =
+                    "hash/state"
+            }
+        }
+        else {
+            $currentProvenance =
+                "Unknown"
+        }
+
+        if ($currentProvenance -eq "Unknown" -and
+            $existingUndo) {
+
+            $currentProvenance =
+                Normalize-RithmicProvenance `
+                    $existingUndo.Provenance
+
+            $currentCutover =
+                [long]$existingUndo.CutoverDateTime
+
+            $currentEvidence =
+                "exact-rollback"
+        }
+
         $plans +=
             [pscustomobject]@{
                 Backup =
@@ -4499,6 +6333,14 @@ function Invoke-RithmicRollbackManager(
                     $targetLength
                 ExistingUndo =
                     $existingUndo
+                CurrentProvenance =
+                    $currentProvenance
+                CurrentCutoverDateTime =
+                    $currentCutover
+                CurrentEvidence =
+                    $currentEvidence
+                CurrentContentClass =
+                    $targetContentClass
             }
     }
 
@@ -4531,12 +6373,18 @@ function Invoke-RithmicRollbackManager(
             }
 
         Write-Host (
-            "  [{0}] {1} <- {2} | {3} | {4} | {5}" -f
+            "  [{0}] {1} <- {2} | {3} | backup={4} | current={5} | {6} | {7}" -f
             $planIndex,
             $selection.TargetName,
             ([IO.Path]::GetFileName(
                 $selection.ArchivePath)),
             $selection.Kind,
+            (Format-RithmicProvenanceWithCutover `
+                $selection.Provenance `
+                ([long]$selection.CutoverDateTime)),
+            (Format-RithmicProvenanceWithCutover `
+                $plan.CurrentProvenance `
+                ([long]$plan.CurrentCutoverDateTime)),
             (Format-StorageBytes `
                 $selection.OriginalBytes),
             $state)
@@ -4545,11 +6393,17 @@ function Invoke-RithmicRollbackManager(
             "INFO" `
             "PLAN" `
             (
-                "operation=Rollback; index={0}; kind={1}; backup={2}; target={3}; original_bytes={4}; target_exists={5}; target_already_matches={6}; existing_undo={7}" -f
+                "operation=Rollback; index={0}; kind={1}; backup={2}; target={3}; backup_provenance={4}; backup_cutover={5}; current_provenance={6}; current_cutover={7}; current_evidence={8}; original_bytes={9}; target_exists={10}; target_already_matches={11}; existing_undo={12}" -f
                 $planIndex,
                 $selection.Kind,
                 $selection.ArchivePath,
                 $selection.TargetPath,
+                (Normalize-RithmicProvenance `
+                    $selection.Provenance),
+                ([long]$selection.CutoverDateTime),
+                $plan.CurrentProvenance,
+                ([long]$plan.CurrentCutoverDateTime),
+                $plan.CurrentEvidence,
                 $selection.OriginalBytes,
                 $plan.TargetExists,
                 $plan.AlreadyMatches,
@@ -4678,7 +6532,9 @@ function Invoke-RithmicRollbackManager(
                     $undoArchive =
                         New-RithmicUndoArchive `
                             $selection `
-                            $ResolvedDataFolder
+                            $ResolvedDataFolder `
+                            $plan.CurrentProvenance `
+                            ([long]$plan.CurrentCutoverDateTime)
 
                     if ($plan.TargetHash) {
                         $duplicateUndo =
@@ -4764,6 +6620,15 @@ function Invoke-RithmicRollbackManager(
                 $selection.TargetPath `
                 $selection.Extension)
 
+            Update-TargetProvenanceStateFile `
+                $selection.TargetPath `
+                $selection.Extension `
+                $selection.Provenance `
+                $null `
+                0 `
+                ([long]$selection.CutoverDateTime) `
+                ([string]$selection.Sha256)
+
             $rollbackStatus =
                 "$status | OK"
 
@@ -4783,9 +6648,11 @@ function Invoke-RithmicRollbackManager(
                 "INFO" `
                 "ROLLBACK" `
                 (
-                    "target={0}; backup={1}; restored_bytes={2}; sha256={3}; replace_existing={4}; undo_backup={5}; undo_reused={6}; compression_supported={7}; compressed={8}; allocated_bytes={9}; state_invalidated=true; status=OK" -f
+                    "target={0}; backup={1}; provenance={2}; restored_bytes={3}; sha256={4}; replace_existing={5}; undo_backup={6}; undo_reused={7}; compression_supported={8}; compressed={9}; allocated_bytes={10}; state_invalidated=true; status=OK" -f
                     $selection.TargetName,
                     $selection.ArchivePath,
+                    (Normalize-RithmicProvenance `
+                        $selection.Provenance),
                     $result.RestoredBytes,
                     $selection.Sha256,
                     $plan.TargetExists,
@@ -4887,8 +6754,8 @@ function Get-RithmicBaselineArchives(
 
     $root =
         Join-Path `
-            $bridgePaths.Archive `
-            "Rithmic_Baselines"
+            $bridgePaths.Storage `
+            "Baselines"
 
     if (-not (
         Test-Path `
@@ -4911,7 +6778,17 @@ function Get-RithmicBaselineArchives(
             Read-ScidArchiveMeta `
                 $archive.FullName
 
-        if (-not $meta) {
+        if (-not $meta -or
+            (Normalize-RithmicProvenance `
+                $meta.Provenance) -ne "Rithmic") {
+
+            Write-UtilityLog `
+                "WARN" `
+                "BASELINE" `
+                (
+                    "archive={0}; status=IGNORED; reason=baseline_provenance_not_authenticated" -f
+                    $archive.FullName)
+
             continue
         }
 
@@ -5311,8 +7188,8 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
     foreach ($row in @(
         [pscustomobject]@{ Name = "SC Data sources"; Logical = $snapshot.SourcesLogical; Disk = $snapshot.SourcesDisk },
         [pscustomobject]@{ Name = "Rithmic targets"; Logical = $snapshot.RithmicLogical; Disk = $snapshot.RithmicDisk },
-        [pscustomobject]@{ Name = "Bridge archive"; Logical = $snapshot.ArchiveLogical; Disk = $snapshot.ArchiveDisk },
-        [pscustomobject]@{ Name = "Recovery staging"; Logical = $snapshot.RecoveryLogical; Disk = $snapshot.RecoveryDisk },
+        [pscustomobject]@{ Name = "HistoryBridge"; Logical = $snapshot.HistoryBridgeLogical; Disk = $snapshot.HistoryBridgeDisk },
+        [pscustomobject]@{ Name = "Temp files"; Logical = $snapshot.TempLogical; Disk = $snapshot.TempDisk },
         [pscustomobject]@{ Name = "Logs"; Logical = $snapshot.LogsLogical; Disk = $snapshot.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Logical = $snapshot.OtherLogical; Disk = $snapshot.OtherDisk },
         [pscustomobject]@{ Name = "Sierra Data folder"; Logical = $snapshot.DataLogical; Disk = $snapshot.DataDisk },
@@ -5331,24 +7208,26 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
         (Format-StorageBytes $snapshot.Free))
 
     Write-Host
-    Write-Host "Configured storage:"
-    Write-Host "  Archive:  $($snapshot.ArchivePath)"
-    Write-Host "  Recovery staging: $($snapshot.RecoveryPath)"
+    Write-Host "Configured paths:"
+    Write-Host "  Sierra:   $($snapshot.SierraPath)"
+    Write-Host "  Data:     $($snapshot.DataPath)"
+    Write-Host "  Storage:  $($snapshot.StoragePath)"
+    Write-Host "  Temp:     $($snapshot.TempPath)"
     Write-Host "  Logs:     $($snapshot.LogPath)"
 
     Write-UtilityLog `
         "INFO" `
         "SNAPSHOT" `
         (
-            "sources_logical={0}; sources_disk={1}; rithmic_logical={2}; rithmic_disk={3}; archive_logical={4}; archive_disk={5}; recovery_logical={6}; recovery_disk={7}; logs_logical={8}; logs_disk={9}; other_logical={10}; other_disk={11}; data_logical={12}; data_disk={13}; tracked_logical={14}; tracked_disk={15}; free_bytes={16}" -f
+            "sources_logical={0}; sources_disk={1}; rithmic_logical={2}; rithmic_disk={3}; historybridge_logical={4}; historybridge_disk={5}; temp_logical={6}; temp_disk={7}; logs_logical={8}; logs_disk={9}; other_logical={10}; other_disk={11}; data_logical={12}; data_disk={13}; tracked_logical={14}; tracked_disk={15}; free_bytes={16}" -f
             $snapshot.SourcesLogical,
             $snapshot.SourcesDisk,
             $snapshot.RithmicLogical,
             $snapshot.RithmicDisk,
-            $snapshot.ArchiveLogical,
-            $snapshot.ArchiveDisk,
-            $snapshot.RecoveryLogical,
-            $snapshot.RecoveryDisk,
+            $snapshot.HistoryBridgeLogical,
+            $snapshot.HistoryBridgeDisk,
+            $snapshot.TempLogical,
+            $snapshot.TempDisk,
             $snapshot.LogsLogical,
             $snapshot.LogsDisk,
             $snapshot.OtherLogical,
@@ -5395,6 +7274,68 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
             $rollbackBackupCount,
             (Format-StorageBytes `
                 $rithmicBackupBytes))
+
+        $rithmicCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    (Normalize-RithmicProvenance `
+                        $_.Provenance) -eq "Rithmic"
+                }
+            ).Count
+
+        $scDataCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    (Normalize-RithmicProvenance `
+                        $_.Provenance) -eq "SCData"
+                }
+            ).Count
+
+        $hybridCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    (Normalize-RithmicProvenance `
+                        $_.Provenance) -eq "Hybrid"
+                }
+            ).Count
+
+        $foreignCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    (Normalize-RithmicProvenance `
+                        $_.Provenance) -eq "Foreign"
+                }
+            ).Count
+
+        $unknownCount =
+            $rithmicBackups.Count -
+            $rithmicCount -
+            $scDataCount -
+            $hybridCount -
+            $foreignCount
+
+        Write-Host (
+            "  Provenance: {0} Rithmic authentic | {1} SC Data | {2} Hybrid | {3} Foreign | {4} Unknown" -f
+            $rithmicCount,
+            $scDataCount,
+            $hybridCount,
+            $foreignCount,
+            $unknownCount)
+
+        Write-UtilityLog `
+            "INFO" `
+            "PROVENANCE" `
+            (
+                "rithmic={0}; scdata={1}; hybrid={2}; foreign={3}; unknown={4}" -f
+                $rithmicCount,
+                $scDataCount,
+                $hybridCount,
+                $foreignCount,
+                $unknownCount)
     }
 
     [void](Review-RithmicRollbackDuplicates `
@@ -5446,10 +7387,10 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
         Get-BridgePaths $DataFolder
 
     $backupDirectory =
-        $bridgePaths.Recovery
+        $bridgePaths.Temp
 
     $archiveRoot =
-        $bridgePaths.Archive
+        $bridgePaths.Storage
 
     $reclaimed = 0L
     $staleTemps = 0
@@ -5558,7 +7499,7 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
         DuplicateRollbackGroups = $duplicateReport.GroupCount
         DuplicateRollbackFiles = $duplicateReport.RedundantCount
         DuplicateRollbackBytes = $duplicateReport.ReclaimableBytes
-        RecoveryFiles = $recoveryFiles
+        TempFiles = $recoveryFiles
         EmptyDirectories = $emptyDirectories
         Warnings = $warnings
     }
@@ -5583,7 +7524,7 @@ function Finalize-ScidBackupStorage(
                     $BackupDirectory `
                     (
                         $Candidate.SourceName +
-                        "__" +
+                        "--" +
                         $Candidate.TargetName +
                         ".rithmic-baseline.bak")
 
@@ -5594,7 +7535,8 @@ function Finalize-ScidBackupStorage(
                 $paths =
                     Get-ScidArchivePaths `
                         $Candidate `
-                        $DataFolder
+                        $DataFolder `
+                        $null
 
                 [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
                     (
@@ -5607,6 +7549,12 @@ function Finalize-ScidBackupStorage(
                         $paths.BaselineArchive,
                         $true,
                         $false)
+
+                Set-ArchiveProvenance `
+                    $paths.BaselineArchive `
+                    "Rithmic" `
+                    0 `
+                    $result
 
                 $saved =
                     [long]$result.OriginalBytes -
@@ -5628,10 +7576,23 @@ function Finalize-ScidBackupStorage(
                 if ($Candidate.LiveScidUpdate -or
                     $Candidate.ScidTemporaryMerge) {
 
+                    $priorEvidence =
+                        Get-CandidatePreviousScidEvidence `
+                            $Candidate `
+                            $rawBackup
+
+                    $priorProvenance =
+                        [string]$priorEvidence.Provenance
+
+                    $priorCutover =
+                        [long]$priorEvidence.CutoverDateTime
+
                     $paths =
                         Get-ScidArchivePaths `
                             $Candidate `
-                            $DataFolder
+                            $DataFolder `
+                            $priorProvenance `
+                            $priorCutover
 
                     [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
                         (
@@ -5644,6 +7605,35 @@ function Finalize-ScidBackupStorage(
                             $paths.RollbackArchive,
                             $true,
                             $true)
+
+                    $resolvedProvenance =
+                        Resolve-RithmicProvenanceFromContent `
+                            $priorProvenance `
+                            $result.ContentClass
+
+                    if ($resolvedProvenance -eq "Unknown" -and
+                        [string]$result.ContentClass -eq "Mixed" -and
+                        [long]$result.SegmentCutoverDateTime -gt 0) {
+
+                        $resolvedProvenance =
+                            "Hybrid"
+
+                        if ($priorCutover -le 0) {
+                            $priorCutover =
+                                [long]$result.SegmentCutoverDateTime
+                        }
+                    }
+
+                    Set-ArchiveProvenance `
+                        $paths.RollbackArchive `
+                        $resolvedProvenance `
+                        $priorCutover `
+                        $result
+
+                    [void](Rename-RithmicBackupForProvenance `
+                        $paths.RollbackArchive `
+                        $Candidate.TargetName `
+                        $resolvedProvenance)
 
                     $saved =
                         [long]$result.OriginalBytes -
@@ -5709,6 +7699,98 @@ function Finalize-DailyBackupStorage(
     return $bytes
 }
 
+function Test-RithmicBaselineAuthenticity($Candidate) {
+    if (-not $Candidate.CreateRithmicBaseline -or
+        -not $Candidate.ScidValidation -or
+        $Candidate.ScidPairGrade -ne "STRONG" -or
+        $Candidate.ScidValidation.TargetOutOfOrderRecords -ne 0) {
+
+        return $false
+    }
+
+    $validation =
+        $Candidate.ScidValidation
+
+    # Bridge-generated SC Data preserves Sierra's negative FIRST_SUB/LAST_SUB
+    # Open markers. Native Rithmic history does not. Positive regular Open
+    # values plus no Sierra special markers are required before admitting a
+    # new target to Baselines.
+    return (
+        [long]$validation.TargetSpecialControlOpenRecords -eq 0 -and
+        [long]$validation.TargetRegularOpenRecords -gt 0 -and
+        [long]$validation.TargetOtherOpenRecords -eq 0
+    )
+}
+
+function Enforce-RithmicBaselineAuthenticity($Candidate) {
+    if (-not $Candidate.CreateRithmicBaseline) {
+        return
+    }
+
+    if (Test-RithmicBaselineAuthenticity `
+        $Candidate) {
+
+        return
+    }
+
+    $Candidate.CreateRithmicBaseline =
+        $false
+
+    if ($Candidate.ScidValidationReference) {
+        $referencePath =
+            [string]$Candidate.ScidValidationReference.Path
+
+        $Candidate.ScidValidationReference.CreateBaseline =
+            $false
+
+        if (-not [string]::IsNullOrWhiteSpace(
+                $referencePath) -and
+            $referencePath.EndsWith(
+                ".rithmic-baseline.bak",
+                [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path `
+                -LiteralPath $referencePath `
+                -PathType Leaf)) {
+
+            $rollbackRaw =
+                Join-Path `
+                    (Split-Path `
+                        -Parent `
+                        $referencePath) `
+                    ($Candidate.TargetName + ".bak")
+
+            if (-not (Test-Path `
+                -LiteralPath $rollbackRaw)) {
+
+                Move-Item `
+                    -LiteralPath $referencePath `
+                    -Destination $rollbackRaw
+
+                $Candidate.ScidValidationReference.Path =
+                    $rollbackRaw
+            }
+        }
+    }
+
+    $script:EarlyUpdateDiagnostics.Add(
+        (
+            Format-LogRecord `
+                "WARN" `
+                "BASELINE" `
+                (
+                    "target={0}; status=NOT-CAPTURED; reason=authentic_rithmic_provenance_not_proven; special_open={1}; regular_open={2}; grade={3}" -f
+                    $Candidate.TargetName,
+                    $(if ($Candidate.ScidValidation) {
+                        [long]$Candidate.ScidValidation.TargetSpecialControlOpenRecords
+                    }
+                    else { 0 }),
+                    $(if ($Candidate.ScidValidation) {
+                        [long]$Candidate.ScidValidation.TargetRegularOpenRecords
+                    }
+                    else { 0 }),
+                    $Candidate.ScidPairGrade)))
+}
+
 function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
     if (-not $Candidate.TargetStatus.Exists -or
         $Candidate.TargetStatus.Kind -ne "data") {
@@ -5727,18 +7809,22 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
         Get-BridgePaths $DataFolder
 
     $backupDirectory =
-        $bridgePaths.Recovery
+        $bridgePaths.Temp
 
     $paths =
         Get-ScidArchivePaths `
             $Candidate `
-            $DataFolder
+            $DataFolder `
+            $null
 
     $archiveMeta =
         Read-ScidArchiveMeta `
             $paths.BaselineArchive
 
-    if ($archiveMeta) {
+    if ($archiveMeta -and
+        (Normalize-RithmicProvenance `
+            $archiveMeta.Provenance) -eq "Rithmic") {
+
         return [pscustomobject]@{
             Path = $paths.BaselineArchive
             Kind = "archived Rithmic baseline"
@@ -5749,9 +7835,21 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
         }
     }
 
+    if ($archiveMeta) {
+        $script:EarlyUpdateDiagnostics.Add(
+            (
+                Format-LogRecord `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "target={0}; status=IGNORED; reason=baseline_provenance_not_rithmic; provenance={1}" -f
+                        $Candidate.TargetName,
+                        $archiveMeta.Provenance)))
+    }
+
     $baselineName =
         $Candidate.SourceName +
-        "__" +
+        "--" +
         $Candidate.TargetName +
         ".rithmic-baseline.bak"
 
@@ -5772,78 +7870,17 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
         }
 
     if ($rawBaselinePath) {
-        try {
-            $status =
-                "Baseline {0}" -f
-                $Candidate.TargetName
-
-            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
-                $status)
-
-            $archiveResult =
-                [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
-                    $rawBaselinePath,
-                    $paths.BaselineArchive,
-                    $true,
-                    $false)
-
-            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "$status | OK")
-
-            $script:EarlyUpdateDiagnostics.Add(
-                (
-                    Format-LogRecord `
-                        "INFO" `
-                        "BASELINE" `
-                        (
-                            "target={0}; original_bytes={1}; archive_bytes={2}; sha256={3}; status=OK" -f
-                            $Candidate.TargetName,
-                            $archiveResult.OriginalBytes,
-                            $archiveResult.ArchiveBytes,
-                            $archiveResult.Sha256)))
-
-            $archiveMeta =
-                Read-ScidArchiveMeta `
-                    $paths.BaselineArchive
-
-            if ($archiveMeta) {
-                return [pscustomobject]@{
-                    Path = $paths.BaselineArchive
-                    Kind = "archived Rithmic baseline"
-                    Independent = $true
-                    CreateBaseline = $false
-                    Compressed = $true
-                    ArchiveMeta = $archiveMeta
-                }
-            }
-        }
-        catch {
-            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "Baseline $($Candidate.TargetName) | WARNING")
-
-            $script:EarlyUpdateDiagnostics.Add(
-                (
-                    Format-LogRecord `
-                        "WARN" `
-                        "BASELINE" `
-                        (
-                            "target={0}; status=WARNING; error={1}" -f
-                            $Candidate.TargetName,
-                            $_.Exception.Message)))
-        }
-
-        if (Test-Path `
-            -LiteralPath $rawBaselinePath `
-            -PathType Leaf) {
-
-            return [pscustomobject]@{
-                Path = $rawBaselinePath
-                Kind = "Rithmic baseline"
-                Independent = $true
-                CreateBaseline = $false
-                Compressed = $false
-                ArchiveMeta = $null
-            }
+        # An interrupted operation may leave the original target in Temp.
+        # Do not bless it into Baselines merely because of its filename.
+        # Use it as an independent preflight reference first; only a STRONG
+        # pair plus native Rithmic morphology can authenticate it.
+        return [pscustomobject]@{
+            Path = $rawBaselinePath
+            Kind = "pending Rithmic baseline"
+            Independent = $true
+            CreateBaseline = $true
+            Compressed = $false
+            ArchiveMeta = $null
         }
     }
 
@@ -6056,6 +8093,216 @@ function Get-StateTable($State) {
     return $table
 }
 
+function Get-TargetProvenanceTable($State) {
+    $table =
+        @{}
+
+    if ($null -eq $State -or
+        -not $State.PSObject.Properties[
+            "schema_version"] -or
+        [int]$State.schema_version -ne
+            $StateSchemaVersion -or
+        -not $State.PSObject.Properties[
+            "targets"] -or
+        -not $State.targets) {
+
+        return $table
+    }
+
+    foreach ($property in
+        $State.targets.PSObject.Properties) {
+
+        if ($property.Value -is
+            [pscustomobject]) {
+
+            $table[$property.Name] =
+                $property.Value
+        }
+    }
+
+    return $table
+}
+
+function Get-TargetProvenanceStateKey(
+    [string]$TargetPath) {
+
+    $normalized =
+        [IO.Path]::GetFullPath(
+            $TargetPath).TrimEnd('\').ToUpperInvariant()
+
+    $sha =
+        [Security.Cryptography.SHA256]::Create()
+
+    try {
+        return (
+            [BitConverter]::ToString(
+                $sha.ComputeHash(
+                    [Text.Encoding]::UTF8.GetBytes(
+                        $normalized))).Replace(
+                            "-",
+                            "").ToLowerInvariant()
+        )
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Set-TargetProvenanceEntry(
+    $Table,
+    [string]$TargetPath,
+    [string]$Extension,
+    [string]$Provenance,
+    [string]$SourcePath = $null,
+    [double]$Scale = 0,
+    [long]$CutoverDateTime = 0,
+    [string]$Sha256 = $null) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $TargetPath `
+            -PathType Leaf)) {
+
+        return
+    }
+
+    $key =
+        Get-TargetProvenanceStateKey `
+            $TargetPath
+
+    $normalized =
+        Normalize-RithmicProvenance `
+            $Provenance
+
+    if ($Extension -eq "scid") {
+        $meta =
+            [SierraHistoryBridge.ScidBridge]::GetMeta(
+                $TargetPath)
+
+        $signature =
+            [SierraHistoryBridge.ScidBridge]::GetQuickSignature(
+                $TargetPath)
+
+        $Table[$key] =
+            [pscustomobject]@{
+                target_path =
+                    $TargetPath
+                extension =
+                    "scid"
+                provenance =
+                    $normalized
+                source_path =
+                    $SourcePath
+                scale =
+                    $Scale
+                cutover_datetime =
+                    $CutoverDateTime
+                records =
+                    [long]$meta.Records
+                first =
+                    [long]$meta.FirstDateTime
+                last =
+                    [long]$meta.LastDateTime
+                signature =
+                    $signature
+                sha256 =
+                    if ([string]::IsNullOrWhiteSpace(
+                            $Sha256)) {
+                        $null
+                    }
+                    else {
+                        $Sha256.ToLowerInvariant()
+                    }
+            }
+    }
+    elseif ($Extension -eq "dly") {
+        $meta =
+            [SierraHistoryBridge.DailyBridge]::GetMeta(
+                $TargetPath)
+
+        $signature =
+            (
+                Get-FileHash `
+                    -LiteralPath $TargetPath `
+                    -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+
+        $Table[$key] =
+            [pscustomobject]@{
+                target_path =
+                    $TargetPath
+                extension =
+                    "dly"
+                provenance =
+                    $normalized
+                records =
+                    [long]$meta.Records
+                first =
+                    [long]$meta.FirstDateTicks
+                last =
+                    [long]$meta.LastDateTicks
+                signature =
+                    $signature
+                sha256 =
+                    $signature
+            }
+    }
+}
+
+function Save-BridgeStateTables(
+    $SourceTable,
+    $TargetTable) {
+
+    Save-JsonFile `
+        $StatePath `
+        ([pscustomobject]@{
+            schema_version =
+                $StateSchemaVersion
+            sources =
+                (Convert-HashtableToObject `
+                    $SourceTable)
+            targets =
+                (Convert-HashtableToObject `
+                    $TargetTable)
+        })
+}
+
+function Update-TargetProvenanceStateFile(
+    [string]$TargetPath,
+    [string]$Extension,
+    [string]$Provenance,
+    [string]$SourcePath = $null,
+    [double]$Scale = 0,
+    [long]$CutoverDateTime = 0,
+    [string]$Sha256 = $null) {
+
+    $state =
+        Read-JsonFile `
+            $StatePath
+
+    $sources =
+        Get-StateTable `
+            $state
+
+    $targets =
+        Get-TargetProvenanceTable `
+            $state
+
+    Set-TargetProvenanceEntry `
+        $targets `
+        $TargetPath `
+        $Extension `
+        $Provenance `
+        $SourcePath `
+        $Scale `
+        $CutoverDateTime `
+        $Sha256
+
+    Save-BridgeStateTables `
+        $sources `
+        $targets
+}
+
 function Get-TargetStatus([string]$TargetPath) {
     if (-not (Test-Path -LiteralPath $TargetPath -PathType Leaf)) {
         return [pscustomobject]@{
@@ -6096,7 +8343,8 @@ function Update-ScidStateMetadata(
     $StateEntry,
     $Candidate,
     [string]$SourceSignature,
-    $TargetStatus) {
+    $TargetStatus,
+    [string]$Provenance) {
 
     if ($null -eq $StateEntry -or
         $StateEntry -isnot [pscustomobject]) {
@@ -6138,6 +8386,29 @@ function Update-ScidStateMetadata(
         Add-Member `
             -NotePropertyName scid_managed_by_bridge `
             -NotePropertyValue $true `
+            -Force
+
+    $effectiveProvenance =
+        if (-not [string]::IsNullOrWhiteSpace(
+                $Provenance)) {
+
+            Normalize-RithmicProvenance `
+                $Provenance
+        }
+        elseif ($StateEntry.PSObject.Properties[
+            "scid_provenance"]) {
+
+            Normalize-RithmicProvenance `
+                ([string]$StateEntry.scid_provenance)
+        }
+        else {
+            "Unknown"
+        }
+
+    $StateEntry |
+        Add-Member `
+            -NotePropertyName scid_provenance `
+            -NotePropertyValue $effectiveProvenance `
             -Force
 
     return $StateEntry
@@ -6360,8 +8631,16 @@ function Invoke-SierraHistoryBridge {
     Add-Type -Path $ConverterSource
     Write-Host "OK"
 
-    $resolvedDataFolder = Get-SierraDataFolder $DataFolder
-    Write-Host "[2/4] Data       $resolvedDataFolder"
+    $resolvedDataFolder =
+        Get-SierraDataFolder `
+            $DataFolder
+
+    $resolvedPaths =
+        Get-BridgePaths `
+            $resolvedDataFolder
+
+    Write-Host "[2/4] Sierra     $($resolvedPaths.Sierra)"
+    Write-Host "      Data       $resolvedDataFolder"
 
     $storageBeforeRun =
         Get-StorageSnapshot `
@@ -6441,10 +8720,10 @@ function Invoke-SierraHistoryBridge {
                 $storageCleanup.ReclaimedBytes))
     }
 
-    if ($storageCleanup.RecoveryFiles -gt 0) {
+    if ($storageCleanup.TempFiles -gt 0) {
         Write-Host (
-            "      Recovery staging: {0} file(s)" -f
-            $storageCleanup.RecoveryFiles) `
+            "      Temp files: {0} file(s)" -f
+            $storageCleanup.TempFiles) `
             -ForegroundColor Yellow
     }
 
@@ -6932,6 +9211,9 @@ function Invoke-SierraHistoryBridge {
 
     $state = Read-JsonFile $StatePath
     $stateTable = Get-StateTable $state
+    $targetProvenanceTable =
+        Get-TargetProvenanceTable `
+            $state
     $stateDirty = $false
 
     # Surface a source disappearance recorded by saved state.
@@ -7198,10 +9480,33 @@ function Invoke-SierraHistoryBridge {
                         $stateEntry `
                         $candidate `
                         $signature `
-                        $targetStatus
+                        $targetStatus `
+                        $null
 
                 $stateTable[$candidate.StateKey] =
                     $stateEntry
+
+                Set-TargetProvenanceEntry `
+                    $targetProvenanceTable `
+                    $candidate.Target `
+                    "scid" `
+                    ([string]$stateEntry.scid_provenance) `
+                    $candidate.Source `
+                    ([double]$scales[$candidate.Group]) `
+                    $(if ($stateEntry.PSObject.Properties[
+                            "scid_handoff_datetime"]) {
+                        [long]$stateEntry.scid_handoff_datetime
+                    }
+                    else {
+                        0L
+                    }) `
+                    $(if ($stateEntry.PSObject.Properties[
+                            "scid_sha256"]) {
+                        [string]$stateEntry.scid_sha256
+                    }
+                    else {
+                        $null
+                    })
 
                 $stateDirty = $true
                 $scidStateRefreshed = $true
@@ -7224,10 +9529,33 @@ function Invoke-SierraHistoryBridge {
                                 $stateEntry `
                                 $candidate `
                                 $signature `
-                                $targetStatus
+                                $targetStatus `
+                                "SCData"
 
                         $stateTable[$candidate.StateKey] =
                             $stateEntry
+
+                        Set-TargetProvenanceEntry `
+                            $targetProvenanceTable `
+                            $candidate.Target `
+                            "scid" `
+                            ([string]$stateEntry.scid_provenance) `
+                            $candidate.Source `
+                            ([double]$scales[$candidate.Group]) `
+                            $(if ($stateEntry.PSObject.Properties[
+                                    "scid_handoff_datetime"]) {
+                                [long]$stateEntry.scid_handoff_datetime
+                            }
+                            else {
+                                0L
+                            }) `
+                            $(if ($stateEntry.PSObject.Properties[
+                                    "scid_sha256"]) {
+                                [string]$stateEntry.scid_sha256
+                            }
+                            else {
+                                $null
+                            })
 
                         $stateDirty = $true
                         $scidStateRefreshed = $true
@@ -7286,6 +9614,16 @@ function Invoke-SierraHistoryBridge {
 
                         $stateTable[$candidate.StateKey] =
                             $stateEntry
+
+                        if ($stateEntry.PSObject.Properties[
+                            "daily_provenance"]) {
+
+                            Set-TargetProvenanceEntry `
+                                $targetProvenanceTable `
+                                $candidate.DailyTarget `
+                                "dly" `
+                                ([string]$stateEntry.daily_provenance)
+                        }
 
                         $stateDirty = $true
                         $dailyStateRefreshed = $true
@@ -7519,6 +9857,9 @@ function Invoke-SierraHistoryBridge {
                     $candidate.ScidPairGrade =
                         Get-ScidPairGrade `
                             $candidate.ScidValidation
+
+                    Enforce-RithmicBaselineAuthenticity `
+                        $candidate
 
                     $candidate.Records =
                         [long]$candidate.ScidValidation.SourceRecords
@@ -8063,15 +10404,9 @@ function Invoke-SierraHistoryBridge {
 
     if ($ready.Count -eq 0 -and $retire.Count -eq 0) {
         if ($stateDirty) {
-            Save-JsonFile `
-                $StatePath `
-                ([pscustomobject]@{
-                    schema_version =
-                        $StateSchemaVersion
-                    sources =
-                        (Convert-HashtableToObject `
-                            $stateTable)
-                })
+            Save-BridgeStateTables `
+                $stateTable `
+                $targetProvenanceTable
         }
 
         Write-Host
@@ -8363,6 +10698,9 @@ function Invoke-SierraHistoryBridge {
                     Get-ScidPairGrade `
                         $candidate.ScidValidation
 
+                Enforce-RithmicBaselineAuthenticity `
+                    $candidate
+
                 $liveValidationLogEntries.Add(
                     (
                         Format-LogRecord `
@@ -8528,6 +10866,30 @@ function Invoke-SierraHistoryBridge {
                     $retiredState++
                 }
 
+                $targetKey =
+                    Get-TargetProvenanceStateKey `
+                        $item.Target
+
+                if ($targetProvenanceTable.ContainsKey(
+                        $targetKey)) {
+
+                    $targetProvenanceTable.Remove(
+                        $targetKey)
+                }
+
+                if ($item.RemoveDailyTarget) {
+                    $dailyTargetKey =
+                        Get-TargetProvenanceStateKey `
+                            $item.DailyTarget
+
+                    if ($targetProvenanceTable.ContainsKey(
+                            $dailyTargetKey)) {
+
+                        $targetProvenanceTable.Remove(
+                            $dailyTargetKey)
+                    }
+                }
+
                 $retiredTypes =
                     if ($item.RemoveDailyTarget) {
                         "SCID + DLY"
@@ -8601,13 +10963,13 @@ function Invoke-SierraHistoryBridge {
     $bridgePaths =
         Get-BridgePaths $resolvedDataFolder
 
-    $backupDirectory = $bridgePaths.Recovery
+    $backupDirectory = $bridgePaths.Temp
     $logDirectory = $bridgePaths.Logs
 
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 
-    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $logPath = Join-Path $logDirectory "bridge-$timestamp.log"
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $logPath = Join-Path $logDirectory "update-$timestamp.log"
     $log = New-Object System.Collections.Generic.List[string]
 
     $log.Add(
@@ -8616,8 +10978,9 @@ function Invoke-SierraHistoryBridge {
                 "INFO" `
                 "START" `
                 (
-                    "operation=Update; version={0}; data={1}; ready={2}; deferred={3}; unchanged={4}; retire={5}" -f
+                    "operation=Update; version={0}; sierra={1}; data={2}; ready={3}; deferred={4}; unchanged={5}; retire={6}" -f
                     $Version,
+                    $bridgePaths.Sierra,
                     $resolvedDataFolder,
                     $ready.Count,
                     $deferredScid.Count,
@@ -8639,7 +11002,7 @@ function Invoke-SierraHistoryBridge {
                     $storageCleanup.DuplicateRollbackFiles,
                     $storageCleanup.DuplicateRollbackBytes,
                     $storageCleanup.EmptyDirectories,
-                    $storageCleanup.RecoveryFiles,
+                    $storageCleanup.TempFiles,
                     $storageCleanup.ReclaimedBytes)))
 
     if ($preflightLogPath) {
@@ -8968,6 +11331,67 @@ function Invoke-SierraHistoryBridge {
                     else {
                         $false
                     }
+                scid_provenance =
+                    if ($candidate.ScidSkipped) {
+                        if ($previousState -and
+                            $previousState.PSObject.Properties["scid_provenance"]) {
+
+                            Normalize-RithmicProvenance `
+                                ([string]$previousState.scid_provenance)
+                        }
+                        else {
+                            "Unknown"
+                        }
+                    }
+                    elseif ($scidResult) {
+                        if ($candidate.ScidTemporaryMerge -or
+                            $scidResult.TailRecords -gt 0) {
+
+                            "Hybrid"
+                        }
+                        else {
+                            "SCData"
+                        }
+                    }
+                    elseif ($previousState -and
+                        $previousState.PSObject.Properties["scid_provenance"]) {
+
+                        Normalize-RithmicProvenance `
+                            ([string]$previousState.scid_provenance)
+                    }
+                    else {
+                        "Unknown"
+                    }
+                scid_sha256 =
+                    if ($scidResult -and
+                        -not [string]::IsNullOrWhiteSpace(
+                            [string]$scidResult.OutputSha256)) {
+
+                        [string]$scidResult.OutputSha256
+                    }
+                    elseif ($previousState -and
+                        $previousState.PSObject.Properties["scid_sha256"]) {
+
+                        [string]$previousState.scid_sha256
+                    }
+                    else {
+                        $null
+                    }
+                scid_handoff_datetime =
+                    if ($scidResult -and
+                        [long]$scidResult.HandoffDateTime -gt 0) {
+
+                        [long]$scidResult.HandoffDateTime
+                    }
+                    elseif ($candidate.ScidSkipped -and
+                        $previousState -and
+                        $previousState.PSObject.Properties["scid_handoff_datetime"]) {
+
+                        [long]$previousState.scid_handoff_datetime
+                    }
+                    else {
+                        0L
+                    }
                 daily_source_signature =
                     if ($candidate.DailyAvailable) {
                         $candidate.DailySignature
@@ -9003,6 +11427,58 @@ function Invoke-SierraHistoryBridge {
                     else {
                         0
                     }
+                daily_sha256 =
+                    if ($dailyTargetMeta) {
+                        (
+                            Get-FileHash `
+                                -LiteralPath $candidate.DailyTarget `
+                                -Algorithm SHA256
+                        ).Hash.ToLowerInvariant()
+                    }
+                    else {
+                        $null
+                    }
+                daily_provenance =
+                    if ($dailyResult) {
+                        if ($dailyResult.PreservedTargetRecords -gt 0) {
+                            "Hybrid"
+                        }
+                        else {
+                            "SCData"
+                        }
+                    }
+                    elseif ($previousState -and
+                        $previousState.PSObject.Properties["daily_provenance"]) {
+
+                        Normalize-RithmicProvenance `
+                            ([string]$previousState.daily_provenance)
+                    }
+                    else {
+                        "Unknown"
+                    }
+            }
+
+            $currentStateEntry =
+                $stateTable[$candidate.StateKey]
+
+            if ($targetMeta) {
+                Set-TargetProvenanceEntry `
+                    $targetProvenanceTable `
+                    $candidate.Target `
+                    "scid" `
+                    ([string]$currentStateEntry.scid_provenance) `
+                    $candidate.Source `
+                    ([double]$scales[$candidate.Group]) `
+                    ([long]$currentStateEntry.scid_handoff_datetime) `
+                    ([string]$currentStateEntry.scid_sha256)
+            }
+
+            if ($dailyTargetMeta) {
+                Set-TargetProvenanceEntry `
+                    $targetProvenanceTable `
+                    $candidate.DailyTarget `
+                    "dly" `
+                    ([string]$currentStateEntry.daily_provenance)
             }
 
             $stateDirty = $true
@@ -9132,6 +11608,14 @@ function Invoke-SierraHistoryBridge {
                 $entryMessage =
                     "source=$($candidate.SourceName); target=$($candidate.TargetName); " +
                     "mode=$scidMode; " +
+                    "provenance=$(
+                        if ($candidate.ScidTemporaryMerge -or
+                            $scidResult.TailRecords -gt 0) {
+                            'Hybrid'
+                        }
+                        else {
+                            'SCData'
+                        }); " +
                     "scale=x$($scales[$candidate.Group]); " +
                     "source_records=$($scidResult.SourceRecords); " +
                     "source_records_written=$($scidResult.SourceRecordsWritten); " +
@@ -9139,6 +11623,7 @@ function Invoke-SierraHistoryBridge {
                     "handoff_datetime=$($scidResult.HandoffDateTime); " +
                     "handoff_verified_trade_seconds=$($scidResult.HandoffVerifiedTradeSeconds); " +
                     "output_records=$($scidResult.OutputRecords); " +
+                    "output_sha256=$($scidResult.OutputSha256); " +
                     "target_bytes=$($targetMeta.Length); " +
                     "conversion_seconds=$($scidResult.ConversionSeconds); " +
                     "flush_seconds=$($scidResult.FlushSeconds); " +
@@ -9205,10 +11690,16 @@ function Invoke-SierraHistoryBridge {
                         "INFO" `
                         "DLY" `
                         (
-                            "source={0}; target={1}; scale=x{2}; source_records={3}; source_applied={4}; target_records_preserved={5}; target_records_replaced_or_dropped={6}; latest_source_date_preserved_from_target={7}; output_records={8}; compression_supported={9}; compressed={10}; allocated_bytes={11}; elapsed_seconds={12}" -f
+                            "source={0}; target={1}; scale=x{2}; provenance={3}; source_records={4}; source_applied={5}; target_records_preserved={6}; target_records_replaced_or_dropped={7}; latest_source_date_preserved_from_target={8}; output_records={9}; compression_supported={10}; compressed={11}; allocated_bytes={12}; elapsed_seconds={13}" -f
                             $candidate.DailySourceName,
                             $candidate.DailyTargetName,
                             $scales[$candidate.Group],
+                            $(if ($dailyResult.PreservedTargetRecords -gt 0) {
+                                "Hybrid"
+                            }
+                            else {
+                                "SCData"
+                            }),
                             $dailyResult.SourceRecords,
                             $dailyResult.SourceAppliedRecords,
                             $dailyResult.PreservedTargetRecords,
@@ -9342,10 +11833,9 @@ function Invoke-SierraHistoryBridge {
         }
     }
 
-    Save-JsonFile $StatePath ([pscustomobject]@{
-        schema_version = $StateSchemaVersion
-        sources = (Convert-HashtableToObject $stateTable)
-    })
+    Save-BridgeStateTables `
+        $stateTable `
+        $targetProvenanceTable
 
     $updateStopwatch.Stop()
 
@@ -9382,8 +11872,11 @@ function Invoke-SierraHistoryBridge {
     $bridgePaths =
         Get-BridgePaths $resolvedDataFolder
 
-    $archiveDirectory =
-        $bridgePaths.Archive
+    $storageDirectory =
+        $bridgePaths.Storage
+
+    [void](Invoke-BridgeDirectoryHousekeeping `
+        $resolvedDataFolder)
 
     $storageAtEnd =
         Get-StorageSnapshot `
@@ -9395,8 +11888,8 @@ function Invoke-SierraHistoryBridge {
 
     Write-Host
     Write-Host "Log:      $logPath"
-    Write-Host "Archive:  $archiveDirectory"
-    Write-Host "Recovery staging: $backupDirectory"
+    Write-Host "Storage:  $storageDirectory"
+    Write-Host "Temp files: $backupDirectory"
     Write-Host (
         "Free:     {0}" -f
         (Format-StorageBytes $freeAtEnd))
@@ -9492,6 +11985,19 @@ function Invoke-ExplorerSelectionDispatch {
         [IO.Path]::GetFullPath(
             $DataFolder.Trim().Trim('"'))
 
+    $resolvedSierraPath =
+        Get-NormalizedConfiguredPath `
+            $SierraPath
+
+    if (-not $resolvedSierraPath) {
+        $dispatchPaths =
+            Get-BridgePaths `
+                $resolvedDataFolder
+
+        $resolvedSierraPath =
+            $dispatchPaths.Sierra
+    }
+
     $selectedPath =
         [IO.Path]::GetFullPath(
             $SelectedFile.Trim().Trim('"'))
@@ -9499,6 +12005,8 @@ function Invoke-ExplorerSelectionDispatch {
     $identity =
         (
             $DispatchMode.ToUpperInvariant() +
+            "|" +
+            $resolvedSierraPath.ToUpperInvariant() +
             "|" +
             $resolvedDataFolder.ToUpperInvariant()
         )
@@ -9521,8 +12029,10 @@ function Invoke-ExplorerSelectionDispatch {
 
     $queueRoot =
         Join-Path `
-            $AppDataDirectory `
-            "ExplorerQueue"
+            (Join-Path `
+                $env:TEMP `
+                "SierraHistoryBridge") `
+            "Explorer"
 
     $sessionDirectory =
         Join-Path `
@@ -9657,7 +12167,7 @@ function Invoke-ExplorerSelectionDispatch {
         $null
 
     try {
-        # Explorer invokes a legacy Player verb once per selected item. Wait
+        # Explorer invokes a Windows Player verb once per selected item. Wait
         # for a short quiet period so one visible bridge process receives the
         # complete selection.
         $lastCount =
@@ -9794,6 +12304,9 @@ function Invoke-ExplorerSelectionDispatch {
         ' -DataFolder "' +
         $resolvedDataFolder +
         '"' +
+        ' -SierraPath "' +
+        $resolvedSierraPath +
+        '"' +
         ' -Mode ' +
         $DispatchMode +
         ' -SelectionFile "' +
@@ -9822,9 +12335,15 @@ function Invoke-SierraHistoryUtilityMode {
     Write-Host "OK"
 
     $resolvedDataFolder =
-        Get-SierraDataFolder $DataFolder
+        Get-SierraDataFolder `
+            $DataFolder
 
-    Write-Host "[2/2] Data       $resolvedDataFolder"
+    $resolvedPaths =
+        Get-BridgePaths `
+            $resolvedDataFolder
+
+    Write-Host "[2/2] Sierra     $($resolvedPaths.Sierra)"
+    Write-Host "      Data       $resolvedDataFolder"
 
     $script:CleanupDataFolder =
         $resolvedDataFolder
@@ -9893,6 +12412,16 @@ catch {
     $exitCode = 1
 }
 finally {
+    if (-not [string]::IsNullOrWhiteSpace(
+            $script:CleanupDataFolder)) {
+
+        try {
+            [void](Invoke-BridgeDirectoryHousekeeping `
+                $script:CleanupDataFolder)
+        }
+        catch { }
+    }
+
     Stop-UtilityOperationLog `
         $exitCode
 

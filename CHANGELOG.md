@@ -1,56 +1,74 @@
 # Changelog
 
-## v0.0.32 - 2026-08-08
+## 0.0.33
 
-Experimental release.
+### History update
 
-### History
+- converts Sierra Chart SC Data history into Rithmic-named SCID targets
+- synchronizes Historical Daily data
+- verifies price scaling
+- uses conservative preflight classification
+- protects active/changing files
+- retains durable `Flush(true)` publication
+- uses Windows file compression for generated/restored market data when
+  supported
 
-- maps two-digit SC Data futures files to one-digit Rithmic target filenames
-- supports SCID and Historical Daily files independently
-- verifies price scaling from overlapping source/target data
-- replaces historical SCIDs from SC Data
-- preserves a genuinely newer or more complete Rithmic tail only after a
-  verified whole-second handoff
-- maintains a five-year history window with rollover and forward buffers
-- never retires unmanaged Rithmic files
+### Cross-feed merge safety
 
-### Validation
+- does not deduplicate Sierra/Rithmic records by raw timestamp
+- considers live-tail merge only from whole-second/aggregate evidence: a later Rithmic second or greater Rithmic trade volume in the shared final second
+- requires at least three matching active seconds using total/bid/ask volume and
+  scaled last price
+- publishes a strict half-open boundary: SC Data `< boundary`, Rithmic
+  `>= boundary`
+- validates no tail record is before the handoff
+- records the verified handoff and output SHA-256
 
-- stable sampled SCID source fingerprints
-- Historical Daily SHA-256 source signatures
-- optional full SCID preflight validation
-- independent Rithmic baseline validation
-- explicit distinction between cross-feed and managed consistency
-- source/target rechecks around conversion and publication
+### Provenance and identity
 
-### Archive and recovery
+- adds RT/SC/MX/FR/UN backup identity codes
+- keeps backup filenames compact while retaining exact MX cutoff evidence in metadata/state
+- stores exact provenance/cutover evidence in metadata/state
+- reclassifies changed files rather than trusting stale state
+- supports full source relationship inspection for live and compressed SCID
+  content
+- keeps `FR` distinct from authenticated `RT`
 
-- flat SC Data archive
-- flat Rithmic baseline and rollback categories
-- verified GZip archive/restore
-- Rithmic rollback with verified undo protection and atomic target replacement
-- exact duplicate Rithmic rollback backups are reported and can be cleared with explicit confirmation
-- duplicate rollback review is compatible with Windows PowerShell 5.1 collection binding
-- Rollback reports duplicate groups across all Rithmic rollback targets before proceeding
-- restore conflict preservation
-- temporary recovery staging
-- bridge-owned empty-directory cleanup
+### Storage layout
 
-### Storage and Windows integration
+- persistent storage: `<DataPath>\HistoryBridge`
+- same-volume temp: `<DataPath>\HistoryBridgeTemp`
+- logs: `<SierraPath>\Logs\HistoryBridge`
+- application state: `%LOCALAPPDATA%\SierraHistoryBridge`
+- Program Files folder remains `Sierra History Bridge`
+- persistent category names: Archive, Baselines, Rollbacks, RestoreConflicts
+- composite backup separator is `--`
+- lazy directory creation and empty-directory cleanup
 
-- generated and restored market-data targets use verified Windows file compression when supported
-- Storage Report detects existing uncompressed Rithmic targets and offers confirmed in-place compression
-- normal Update reports uncompressed existing targets without modifying them automatically
+### Baselines
 
-- logical and allocated/on-disk storage reporting
-- configurable Data, Archive, Recovery, and Logs folders
-- scoped Explorer commands
-- Explorer file commands support multi-select batches through one selection broker
-- Archive, Restore, and Rollback process Explorer multi-selections in one visible operation
-- Rollback manual selection accepts comma-separated indexes and ranges
-- optional Start Menu shortcuts
-- Windows Installed apps registration
-- repair and uninstall
-- structured update, preflight, utility, cleanup, and setup logs
-- Windows PowerShell 5.1 runtime
+- Baselines is restricted to authenticated RT states
+- new baseline admission requires STRONG pair consistency and native target
+  morphology
+- questionable/unverifiable baseline candidates are preserved in Rollbacks
+  rather than left in Baselines
+- Repair caches expensive archive/source relationship inspection
+
+### Archive / restore / rollback
+
+- Archive is restricted to recognized SC Data source inventory
+- RestoreConflict backups carry UN identity
+- Rollback supports multi-select batches
+- one selected backup per target is enforced
+- current target is protected by verified undo backup before replacement
+- exact duplicate rollback removal remains explicitly confirmed
+
+### Explorer and setup
+
+- Archive/Restore/Rollback support Explorer multi-select through one temporary
+  selection broker
+- broker lives under `%TEMP%\SierraHistoryBridge\Explorer`
+- SierraPath and DataPath are resolved independently
+- Repair validates PowerShell/C# before replacing installed code
+- Repair can relocate the immediately preceding configured folder arrangement
+  into the current layout without deleting unknown material

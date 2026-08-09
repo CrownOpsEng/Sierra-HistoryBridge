@@ -1,61 +1,72 @@
-SIERRA HISTORY BRIDGE v0.0.32
+Sierra History Bridge v0.0.33
 
 PURPOSE
-  Maintains Rithmic-named Sierra Chart SCID and Historical Daily files from
-  matching SC Data history.
+  Maintains Rithmic-named Sierra Chart history from Sierra Chart SC Data
+  sources while preserving newer Rithmic records only when a verified
+  whole-second handoff is available.
 
-RUN
-  run.cmd
+DEFAULT PATHS
+  Program:
+    C:\Program Files\Sierra History Bridge
 
-START MENU / EXPLORER
-  Update History
-  Archive SC Data
-  Restore SC Data
-  Rollback Rithmic
-  Storage Report
+  Settings/state:
+    %LOCALAPPDATA%\SierraHistoryBridge
 
-DEFAULT STORAGE
-  Archive:
-    SierraChart\Data\SCID_Bridge_Archive
+  Persistent history:
+    <DataPath>\HistoryBridge
 
-  Recovery staging:
-    SierraChart\Data\SCID_Bridge_Backups
+  Temporary transaction files:
+    <DataPath>\HistoryBridgeTemp
 
   Logs:
-    SierraChart\Data\SCID_Bridge_Logs
+    <SierraPath>\Logs\HistoryBridge
 
-ARCHIVE CATEGORIES
-  SC_Data
-  Rithmic_Baselines
-  Rollbacks
-  Restore_Conflicts
+PERSISTENT CATEGORIES
+  Archive          SC Data archives only
+  Baselines        authenticated Rithmic baseline states only
+  Rollbacks        undo/recovery states
+  RestoreConflicts preserved conflicting restore destinations
 
-COMMANDS
-  archive.cmd
-  restore.cmd
-  rollback.cmd
-  storage.cmd
-  repair.cmd
-  uninstall.cmd
+ROLLBACK IDENTITY CODES
+  RT  authenticated Rithmic
+  SC  pure SC Data-derived
+  MX  mixed/hybrid
+  FR  non-SC/foreign form, not provider-authenticated
+  UN  unknown
 
-SAFETY
-  Output is validated before replacement.
-  Normal Update never archives SC Data source files automatically.
-  Archive, restore, and rollback require Sierra Chart to be closed.
-  Live-sensitive SCID updates use explicit safety choices.
+  Example:
+    manual-20260808-220000-123--MX--NQH6.CME.scid.gz
+
+MERGE SAFETY
+  Cross-feed records are not deduplicated by raw timestamp.
+  SC Data and Rithmic can timestamp the same trades differently.
+
+  A live SCID merge requires at least three matching active seconds using:
+    total volume
+    bid volume
+    ask volume
+    scaled last price
+
+  The chosen whole second is a half-open boundary:
+    SC Data records < boundary
+    Rithmic records >= boundary
+
+  If the boundary cannot be proved, the target is not changed.
+
+PROVENANCE
+  Saved state is not blindly trusted after a file changes.
+
+  Identity priority:
+    exact authenticated backup hash
+    exact state hash
+    full SC Data source relationship
+    conservative record morphology
+    Unknown
+
+MULTI-SELECT
+  Archive SC Data, Restore SC Data and Rollback Rithmic support Explorer
+  multi-selection and execute as one visible batch.
 
 LICENSE
   Mozilla Public License 2.0.
   See LICENSE for the complete terms.
-
-Full documentation is installed in the docs folder.
-
-
-MULTI-SELECT
-  Explorer file commands batch selected files into one operation:
-    Archive SC Data
-    Restore SC Data
-    Rollback Rithmic
-
-  Rollback accepts one selected backup per Rithmic target.
-  Interactive rollback also accepts comma/range selections such as 1,3-5.

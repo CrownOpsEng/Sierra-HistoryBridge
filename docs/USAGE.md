@@ -8,45 +8,45 @@ Run:
 run.cmd
 ```
 
-or right-click the configured Sierra Data folder and choose **Update History**.
+or choose **Update History** from the configured Sierra Data folder.
 
-A normal run:
+The plan is built before target changes begin.
 
-1. loads the conversion engine
-2. resolves configured storage
-3. removes stale bridge temporary files
-4. scans the managed contract window
-5. verifies price scaling
-6. checks saved state and source/target integrity
-7. performs preflight validation when required
-8. shows the update plan
-9. applies confirmed changes
-10. verifies each published file and writes the operation log
+SCID processing distinguishes:
 
-### Full SCID validation
+- historical replacement
+- live-sensitive merge
+- deferred/unsafe replacement
+- already-current target
 
-When changed or unknown historical SCIDs require full-file validation, the
-interactive run asks once before beginning the long scan.
+Historical Daily processing is independent.
 
-Choosing No defers those SCID updates. It never treats them as validated.
+### Live SCID handoff
 
-A live-sensitive merge preserves a Rithmic tail only after matching trade
-aggregates prove a whole-second handoff. SC Data contributes records before the
-boundary and Rithmic contributes records at or after it.
+The bridge does not use raw cross-feed timestamps as duplicate keys.
 
-### Sierra Chart running
+A live-sensitive target is merged only when Rithmic is demonstrably newer or
+more complete at the endpoint and a verified handoff can be found. Evidence is
+either a later whole Rithmic second, or greater Rithmic trade volume when both
+files end in the same second. Raw microsecond order is never used as evidence.
 
-Historical updates can run while Sierra Chart remains open.
+The handoff requires at least three matching active seconds. Matching uses:
 
-If a live-sensitive SCID requires replacement, the bridge offers explicit
-options to disconnect/close affected charts, close Sierra Chart, skip the live
-SCID, or cancel.
+- total volume
+- bid volume
+- ask volume
+- scaled last price
 
-Reload open charts after an update with:
+The boundary is half-open:
 
 ```text
-Chart > Reload and Recalculate
+SC Data:  timestamp < boundary
+Rithmic:  timestamp >= boundary
 ```
+
+A partial latest SC second therefore cannot cause duplicate records from both
+feeds. If the newest overlap is incomplete, the bridge searches backward for a
+clean verified run. If none exists, no merge is committed.
 
 ## Archive SC Data
 
@@ -56,28 +56,19 @@ Run:
 archive.cmd
 ```
 
-or select one or more two-digit-year SC Data `.scid` / `.dly` files and
-choose **Archive SC Data**. Explorer selections are processed as one batch with
-one archive plan and one confirmation.
+or select one or more recognized two-digit-year SC Data `.scid` / `.dly` files
+and choose **Archive SC Data**.
 
-Selections can be made by:
-
-- default: outside the managed Rithmic window
-- contract date range
-- contract age in days
-- all SC Data source files
-
-The source file is removed only after the GZip archive is decompressed and
-verified against the original byte count and SHA-256 hash.
-
-Archives are stored flat under:
+Destination:
 
 ```text
-SCID_Bridge_Archive\SC_Data
+<DataPath>\HistoryBridge\Archive
 ```
 
-Sierra Chart must be closed because the source file is removed from its active
-Data folder.
+Archive is restricted to SC Data source inventory. It is not a generic file
+archiver.
+
+A source is deleted only after verified GZip creation.
 
 ## Restore SC Data
 
@@ -87,19 +78,21 @@ Run:
 restore.cmd
 ```
 
-or select one or more archives in `SC_Data` and choose **Restore SC Data**.
-The selected archives are restored as one batch.
+or select one or more GZip files under `HistoryBridge\Archive` and choose
+**Restore SC Data**.
 
-Restore can select:
+Archive content is verified before publication.
 
-- most recent archived contract
-- contract date range
-- recent contract months
-- all archives
+If a different destination exists, the bridge asks before preserving it under:
 
-A successful restore removes the archive copy. If a different destination file
-already exists, the bridge can preserve that file as a verified conflict backup
-before replacement.
+```text
+HistoryBridge\RestoreConflicts
+```
+
+and replacing it.
+
+Conflict copies carry `--UN--` in their filenames because their origin is not
+assumed.
 
 ## Rollback Rithmic
 
@@ -109,23 +102,55 @@ Run:
 rollback.cmd
 ```
 
-or select one or more verified backups in `Rithmic_Baselines` or `Rollbacks`
-and choose **Rollback Rithmic**.
+or select one or more backup files under:
 
-Explorer selections are combined into one rollback plan and one confirmation.
-A batch may contain only one backup for each Rithmic target. Selecting two
-different backups that map to the same target is rejected rather than applying
-an order-dependent rollback.
+```text
+HistoryBridge\Baselines
+HistoryBridge\Rollbacks
+```
 
-Interactive rollback also accepts comma-separated numbers and ranges, for
-example `1,3-5`.
+Interactive selection accepts comma-separated indexes/ranges such as:
 
-If the current target differs from the selected backup, the bridge first
-ensures an exact verified undo backup exists in `Rollbacks`. An existing exact
-rollback copy is reused; otherwise a timestamped manual undo backup is created.
+```text
+1,3-5
+```
 
-The selected backup is retained. The corresponding saved bridge state is
-invalidated so the next Update evaluates the restored target normally.
+A rollback batch permits only one backup per target.
+
+The plan displays provenance for the selected backup and, when resolvable, the
+current target.
+
+### Provenance codes
+
+```text
+RT  authenticated Rithmic
+SC  pure SC Data-derived
+MX  mixed/hybrid
+FR  foreign/non-SC form, provider not authenticated
+UN  unknown
+```
+
+A mixed backup uses the compact `MX` code:
+
+```text
+manual-20260808-220000-123--MX--NQH6.CME.scid.gz
+```
+
+The exact cutover timestamp is stored in metadata and shown in rollback details when
+available.
+
+### Current-target classification
+
+Before preserving a current target as an undo backup, the bridge resolves its
+identity from actual evidence:
+
+1. exact SHA-256 match to a known backup
+2. exact SHA-256 match to bridge state
+3. full relationship to the matching SC Data source
+4. conservative record morphology
+5. Unknown
+
+If the file has changed, old state alone does not preserve its old label.
 
 ## Storage Report
 
@@ -135,73 +160,40 @@ Run:
 storage.cmd
 ```
 
-or right-click the configured Data folder and choose **Storage Report**.
+Storage Report shows logical/on-disk usage and configured paths.
 
-The report shows logical and allocated/on-disk usage for:
-
-- SC Data sources
-- Rithmic targets
-- archive
-- recovery staging
-- logs
-- other Data-folder files
-- Sierra Data folder total
-- total tracked storage
-- free space on the Data drive
-
-When independent Rithmic baselines are present, Storage Report can perform a
-final validation and remove baselines that are no longer needed.
-
-## Logs
-
-Detailed operation logs are written to the configured Logs folder.
-
-Use the console for current progress and decisions; use logs for validation
-metrics, record counts, timings, hashes, warnings, and error details.
-
-
-### Duplicate rollback review
-
-Rollback backup identity is based on the Rithmic target, uncompressed byte
-length, and SHA-256. Exact duplicates are reported; they are never removed
-without confirmation.
-
-Update, Storage Report, and Rollback can surface duplicate rollback groups.
-Interactive runs ask whether redundant copies should be removed while keeping
-one verified copy of each exact state.
-
+It also summarizes rollback provenance.
 
 ### Rithmic file compression
 
-New SCID and Historical Daily targets are written with Windows file compression
-when the Data volume supports it.
+Existing uncompressed one-digit-year `.scid`/`.dly` files are reported.
 
-Storage Report scans existing one-digit-year Rithmic `.scid` and `.dly` files.
-If uncompressed files are found, it reports their logical/on-disk usage and
-asks:
+With explicit confirmation and Sierra Chart closed, Storage Report can enable
+Windows per-file compression and report reclaimed disk space.
 
-```text
-Enable NTFS compression for these Rithmic market-data files? [y/N]
-```
+Normal Update never silently recompresses existing files.
 
-Choosing Yes requires Sierra Chart to be closed. The bridge compresses each
-file in place, verifies the compressed attribute, records before/after
-allocation in the log, and reports reclaimed disk space.
+### Duplicate rollback copies
 
-Normal Update only reports existing uncompressed targets and points to Storage
-Report; it does not modify them automatically.
+Exact rollback duplicates are grouped by:
 
+- target
+- original byte length
+- SHA-256
 
-### Explorer selection batching
+They are reported only. Removal requires a dedicated confirmation.
 
-Windows legacy file verbs are invoked once per selected item. Sierra History
-Bridge uses an internal hidden broker to collect those invocations for a short
-quiet period, writes the complete selection to a temporary manifest, and opens
-one visible operation.
+## Temp files
 
-The manifest is consumed and removed when the operation starts. Interrupted
-selection fragments older than ten seconds are discarded so a later Explorer
-action cannot inherit an old selection.
+`HistoryBridgeTemp` normally does not exist.
 
-The Windows legacy `Player` multi-select model supports up to 100 selected
-items. Use Archive/Restore date or All filters for larger batches.
+If it remains after an error, inspect the operation log before deleting
+anything. It may contain the only current transaction recovery material.
+
+## Multi-select
+
+Archive, Restore and Rollback accept Explorer multi-selection.
+
+The selection broker collects individual Explorer invocations into one batch
+under `%TEMP%\SierraHistoryBridge\Explorer`, then consumes the manifest and
+cleans empty broker directories.

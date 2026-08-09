@@ -216,8 +216,8 @@ foreach ($storageToken in @(
     'ArchiveScidGzipVerified',
     'ArchiveFileGzipVerified',
     'ValidatePairGzipTarget',
-    'SCID_Bridge_Archive',
-    'Rithmic_Baselines',
+    'HistoryBridge',
+    'Baselines',
     'Rollbacks',
     'INSUFFICIENT_DISK_SPACE',
     'Finalize-ScidBackupStorage',
@@ -268,7 +268,7 @@ if ($appText -notmatch 'Group-Object\s+TargetName') {
     throw "Rithmic alias regression: eligible contracts are not grouped by target filename."
 }
 
-if ($converterText -notmatch 'Path\.GetFileName\(sourcePath\)\s*\+\s*"__"\s*\+\s*Path\.GetFileName\(targetPath\)') {
+if ($converterText -notmatch 'Path\.GetFileName\(sourcePath\)\s*\+\s*"--"\s*\+\s*Path\.GetFileName\(targetPath\)') {
     throw "Baseline naming regression: raw baseline does not include both source and target names."
 }
 
@@ -373,9 +373,9 @@ foreach ($flatArchiveToken in @(
     'Get-SourceArchivePath',
     'Get-RithmicTargetNameFromBackupArchive',
     'Get-ScDataSourceNameFromBaselineArchive',
-    'Rithmic_Baselines',
+    'Baselines',
     'Rollbacks',
-    'Restore_Conflicts'
+    'RestoreConflicts'
 )) {
     if ($appText -notlike "*$flatArchiveToken*") {
         throw "Flat archive regression: missing $flatArchiveToken"
@@ -833,6 +833,278 @@ if ($lineEndedBooleanCommandMatch.Success) {
     throw (
         "PowerShell 5.1 syntax regression: a bare command follows a line-ended boolean operator: " +
         $lineEndedBooleanCommandMatch.Groups[2].Value)
+}
+
+
+foreach ($layoutToken in @(
+    'HistoryBridge',
+    'HistoryBridgeTemp',
+    'storage_folder',
+    'sierra_path',
+    'StoragePath',
+    'TempPath',
+    'Logs'
+)) {
+    if ($appText -notlike "*$layoutToken*" -and
+        $setupText -notlike "*$layoutToken*") {
+
+        throw "Layout regression: missing $layoutToken"
+    }
+}
+
+foreach ($folderToken in @(
+    '"Archive"',
+    '"Baselines"',
+    '"Rollbacks"',
+    '"RestoreConflicts"'
+)) {
+    if ($appText -notlike "*$folderToken*") {
+        throw "Layout regression: missing persistent category $folderToken"
+    }
+}
+
+if ($appText -match '"SCID_Bridge_' -or
+    $appText -match '"SC_Data"' -or
+    $appText -match '"Rithmic_Baselines"' -or
+    $appText -match '"Restore_Conflicts"') {
+
+    throw "Layout regression: previous folder identifiers returned to the application runtime."
+}
+
+if ($converterText -notmatch 'Path\.GetFileName\(sourcePath\)\s*\+\s*"--"\s*\+\s*Path\.GetFileName\(targetPath\)') {
+    throw "Layout regression: raw baseline separator is not --."
+}
+
+foreach ($provenanceToken in @(
+    'Normalize-RithmicProvenance',
+    'Format-RithmicProvenance',
+    'Set-ArchiveProvenance',
+    'Get-KnownRithmicProvenanceByHash',
+    'Get-StateRithmicProvenance',
+    'Resolve-CurrentRithmicProvenance',
+    'Resolve-RithmicProvenanceFromContent',
+    'Get-RithmicProvenanceCode',
+    'Rithmic authentic',
+    'Foreign',
+    'scid_provenance',
+    'daily_provenance'
+)) {
+    if ($appText -notlike "*$provenanceToken*") {
+        throw "Provenance regression: missing $provenanceToken"
+    }
+}
+
+$pathFunctionStart =
+    $appText.IndexOf(
+        'function Get-BridgePaths')
+
+$pathFunctionEnd =
+    $appText.IndexOf(
+        'function Format-LogRecord',
+        $pathFunctionStart)
+
+$pathFunctionText =
+    $appText.Substring(
+        $pathFunctionStart,
+        $pathFunctionEnd - $pathFunctionStart)
+
+foreach ($pathToken in @(
+    '"HistoryBridge"',
+    '"HistoryBridgeTemp"',
+    '"Logs"',
+    'sierra_path',
+    'storage_folder'
+)) {
+    if ($pathFunctionText -notlike "*$pathToken*") {
+        throw "Path-model regression: Get-BridgePaths is missing $pathToken"
+    }
+}
+
+if ($pathFunctionText -like '*archive_folder*' -or
+    $pathFunctionText -like '*recovery_folder*') {
+
+    throw "Path-model regression: runtime still depends on previous archive/recovery config fields."
+}
+
+if ($appText -notlike '*%TEMP%*' -and
+    $appText -notlike '*$env:TEMP*') {
+    throw "Explorer broker regression: transient broker is not rooted in TEMP."
+}
+
+
+if ($converterText -notmatch
+    'public\s+bool\s+TryReadRaw\s*\(') {
+
+    throw "C# relationship inspector requires SequentialRecordReader.TryReadRaw."
+}
+
+$backupNameStart =
+    $appText.IndexOf(
+        "function Get-RithmicBackupFileName(",
+        [StringComparison]::Ordinal)
+
+$backupNameEnd =
+    $appText.IndexOf(
+        "function Get-RithmicBackupPrefixFromArchive(",
+        $backupNameStart,
+        [StringComparison]::Ordinal)
+
+if ($backupNameStart -lt 0 -or
+    $backupNameEnd -le $backupNameStart) {
+
+    throw "Provenance filename regression: backup filename function could not be isolated."
+}
+
+$backupNameFunctionText =
+    $appText.Substring(
+        $backupNameStart,
+        $backupNameEnd - $backupNameStart)
+
+if ($backupNameFunctionText -match
+    'CutoverDateTime|Format-ScDateTimeCompact') {
+
+    throw "Provenance filename regression: backup filenames must contain only the compact identity code, not cutover detail."
+}
+
+foreach ($contentEvidenceToken in @(
+    'ScidContentInspection',
+    'InspectScidContent',
+    'InspectGzipScidContent',
+    'SCDataLike',
+    'ForeignLike',
+    'SpecialControlOpenRecords',
+    'RegularOpenRecords',
+    'content_class',
+    'special_control_open_records',
+    'regular_open_records'
+)) {
+    if ($converterText -notlike "*$contentEvidenceToken*") {
+        throw "Content-provenance regression: engine is missing $contentEvidenceToken"
+    }
+}
+
+foreach ($provenanceCodeToken in @(
+    'Get-RithmicProvenanceCode',
+    'Resolve-RithmicProvenanceFromContent',
+    'Get-RithmicBackupFileName',
+    '"RT"',
+    '"SC"',
+    '"MX"',
+    '"FR"',
+    '"UN"',
+    '"Foreign"'
+)) {
+    if ($appText -notlike "*$provenanceCodeToken*") {
+        throw "Provenance-code regression: application is missing $provenanceCodeToken"
+    }
+}
+
+foreach ($layoutRelocationToken in @(
+    'Normalize-RithmicBackupProvenance',
+    'Convert-LayoutCompositeBackupName',
+    'Rename-SetupBackupForProvenance',
+    'InspectGzipScidContent',
+    'HistoryBridgeTemp'
+)) {
+    if ($setupText -notlike "*$layoutRelocationToken*") {
+        throw "Layout-relocation regression: Setup is missing $layoutRelocationToken"
+    }
+}
+
+if ($setupText -notlike '*Sierra History Bridge*') {
+    throw "Install-path regression: spaced Windows application name is missing."
+}
+
+if ($appText -notlike '*$AppName = "SierraHistoryBridge"*') {
+    throw "LocalAppData regression: compact SierraHistoryBridge application identifier is missing."
+}
+
+
+foreach ($identityToken in @(
+    'Get-KnownRithmicEvidenceByHash',
+    'InspectScidRelationshipToSource',
+    'InspectGzipScidRelationshipToSource',
+    'scid_sha256',
+    'OutputSha256',
+    'cutover_datetime'
+)) {
+    if ($appText -notlike "*$identityToken*" -and
+        $converterText -notlike "*$identityToken*") {
+
+        throw "Identity regression: missing $identityToken"
+    }
+}
+
+foreach ($mergeSafetyToken in @(
+    'FindVerifiedHandoffDateTime',
+    'HandoffVerifiedTradeSeconds',
+    'LIVE_MERGE_HANDOFF_UNVERIFIED',
+    'LIVE_MERGE_BOUNDARY_INVALID',
+    'CopyScidRangeVerified',
+    'ShouldPreserveTargetTail',
+    'targetSecond.Volume >',
+    'sourceSecond.Volume'
+)) {
+    if ($converterText -notlike "*$mergeSafetyToken*") {
+        throw "Merge-safety regression: engine is missing $mergeSafetyToken"
+    }
+}
+
+if ($converterText -notmatch
+    'ShouldPreserveTargetTail\(' -or
+    $converterText -notmatch
+    'targetSecond\.Volume\s*>\s*sourceSecond\.Volume') {
+
+    throw "Merge-safety regression: live-tail preservation is not based on whole-second/aggregate endpoint evidence."
+}
+
+if ($converterText -notmatch
+    'sourcePrefixRecords\s*==\s*0\s*&&\s*exactAfterMismatch\s*==\s*0') {
+
+    throw "Provenance regression: a corrupted SC-like file can be mislabeled Foreign."
+}
+
+foreach ($baselineInvariantToken in @(
+    'Test-RithmicBaselineAuthenticity',
+    'authentic_rithmic_provenance_not_proven',
+    'baseline_provenance_not_authenticated'
+)) {
+    if ($appText -notlike "*$baselineInvariantToken*") {
+        throw "Baseline invariant regression: application is missing $baselineInvariantToken"
+    }
+}
+
+foreach ($setupIdentityToken in @(
+    'Normalize-RithmicBackupProvenance',
+    'InspectGzipScidRelationshipToSource',
+    'Move-SetupBaselineToRollbacks',
+    'Move-SetupUnidentifiedBaselineToRollbacks',
+    'verified_archive_bytes',
+    'verified_archive_write_ticks',
+    'HistoryBridgeTemp'
+)) {
+    if ($setupText -notlike "*$setupIdentityToken*") {
+        throw "Setup identity regression: missing $setupIdentityToken"
+    }
+}
+
+if ($setupText -notmatch
+    '(?s)\$filenameCode\s*=.*?"Baselines"\s*\{\s*"UN"') {
+
+    throw "Baseline invariant regression: previous-layout relocation does not mark old Baselines UN before verification."
+}
+
+if ($setupText -notmatch
+    '(?s)\$provenance\s*=.*?"Baselines"\s*\{\s*"Unknown"') {
+
+    throw "Baseline invariant regression: previous-layout relocation pre-authenticates old Baselines."
+}
+
+if ($appText -notlike '*$env:TEMP*' -or
+    $appText -notlike '*"SierraHistoryBridge"*' -or
+    $appText -notlike '*"Explorer"*') {
+
+    throw "Explorer broker regression: transient selection state is not under TEMP\\SierraHistoryBridge\\Explorer."
 }
 
 $required = @(

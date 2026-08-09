@@ -59,6 +59,14 @@ namespace SierraHistoryBridge
         public long TargetRichRecords;
         public long SourceControlOpenRecords;
         public long TargetControlOpenRecords;
+        public long SourceSpecialControlOpenRecords;
+        public long TargetSpecialControlOpenRecords;
+        public long SourceRegularOpenRecords;
+        public long TargetRegularOpenRecords;
+        public long SourceZeroOpenRecords;
+        public long TargetZeroOpenRecords;
+        public long SourceOtherOpenRecords;
+        public long TargetOtherOpenRecords;
         public long SourceUnclassifiedVolumeRecords;
         public long TargetUnclassifiedVolumeRecords;
 
@@ -85,11 +93,48 @@ namespace SierraHistoryBridge
         public double ElapsedSeconds;
     }
 
+    public sealed class ScidContentInspection
+    {
+        public long Length;
+        public long Records;
+        public string Sha256;
+        public string ContentClass;
+        public long SpecialControlOpenRecords;
+        public long RegularOpenRecords;
+        public long ZeroOpenRecords;
+        public long OtherOpenRecords;
+        public long FirstRegularOpenDateTime;
+        public long LastSpecialControlOpenDateTime;
+        public long SegmentCutoverDateTime;
+        public double ElapsedSeconds;
+    }
+
+    public sealed class ScidSourceRelationship
+    {
+        public string Relationship;
+        public long SourceRecords;
+        public long TargetRecords;
+        public long SourcePrefixRecords;
+        public long FirstMismatchIndex;
+        public long CutoverDateTime;
+        public long ExactRecordsAfterMismatch;
+        public bool WholeSecondCutover;
+        public double ElapsedSeconds;
+    }
+
     public sealed class GzipArchiveResult
     {
         public long OriginalBytes;
         public long ArchiveBytes;
         public string Sha256;
+        public string ContentClass;
+        public long SpecialControlOpenRecords;
+        public long RegularOpenRecords;
+        public long ZeroOpenRecords;
+        public long OtherOpenRecords;
+        public long FirstRegularOpenDateTime;
+        public long LastSpecialControlOpenDateTime;
+        public long SegmentCutoverDateTime;
         public double ElapsedSeconds;
     }
 
@@ -130,6 +175,7 @@ namespace SierraHistoryBridge
         public bool CompressionSupported;
         public bool CompressionEnabled;
         public long OutputAllocatedBytes;
+        public string OutputSha256;
 
         public long OutOfOrderRecords;
         public long FirstOutOfOrderIndex;
@@ -250,6 +296,1058 @@ namespace SierraHistoryBridge
                 throw new IOException(
                     Path.GetFileName(label) +
                     ": unsupported archived SCID layout.");
+        }
+
+        private sealed class ScidContentCounter
+        {
+            private readonly byte[] carry =
+                new byte[RecordSize];
+
+            private int carryBytes;
+            private long streamBytes;
+
+            public long SpecialControlOpenRecords;
+            public long RegularOpenRecords;
+            public long ZeroOpenRecords;
+            public long OtherOpenRecords;
+            public long FirstRegularOpenDateTime;
+            public long LastSpecialControlOpenDateTime;
+
+            private void CountRecord(
+                byte[] buffer,
+                int offset)
+            {
+                long dateTime =
+                    BitConverter.ToInt64(
+                        buffer,
+                        offset);
+
+                float open =
+                    BitConverter.ToSingle(
+                        buffer,
+                        offset + 8);
+
+                if (Single.IsNaN(open) ||
+                    Single.IsInfinity(open))
+                {
+                    OtherOpenRecords++;
+                }
+                else if (open < -1.0e30f)
+                {
+                    SpecialControlOpenRecords++;
+                    LastSpecialControlOpenDateTime =
+                        dateTime;
+                }
+                else if (open > 0.0f)
+                {
+                    RegularOpenRecords++;
+
+                    if (FirstRegularOpenDateTime == 0)
+                        FirstRegularOpenDateTime =
+                            dateTime;
+                }
+                else if (open == 0.0f)
+                {
+                    ZeroOpenRecords++;
+                }
+                else
+                {
+                    OtherOpenRecords++;
+                }
+            }
+
+            public void Add(
+                byte[] buffer,
+                int count)
+            {
+                int offset = 0;
+
+                if (streamBytes < HeaderSize)
+                {
+                    long headerRemaining =
+                        HeaderSize -
+                        streamBytes;
+
+                    int skip =
+                        (int)Math.Min(
+                            (long)count,
+                            headerRemaining);
+
+                    offset +=
+                        skip;
+
+                    streamBytes +=
+                        skip;
+
+                    if (offset >= count)
+                        return;
+                }
+
+                int remaining =
+                    count -
+                    offset;
+
+                if (carryBytes > 0)
+                {
+                    int needed =
+                        RecordSize -
+                        carryBytes;
+
+                    int take =
+                        Math.Min(
+                            needed,
+                            remaining);
+
+                    Buffer.BlockCopy(
+                        buffer,
+                        offset,
+                        carry,
+                        carryBytes,
+                        take);
+
+                    carryBytes +=
+                        take;
+
+                    offset +=
+                        take;
+
+                    remaining -=
+                        take;
+
+                    streamBytes +=
+                        take;
+
+                    if (carryBytes ==
+                        RecordSize)
+                    {
+                        CountRecord(
+                            carry,
+                            0);
+
+                        carryBytes =
+                            0;
+                    }
+                }
+
+                int fullRecordBytes =
+                    (remaining /
+                        RecordSize) *
+                    RecordSize;
+
+                int end =
+                    offset +
+                    fullRecordBytes;
+
+                while (offset < end)
+                {
+                    CountRecord(
+                        buffer,
+                        offset);
+
+                    offset +=
+                        RecordSize;
+                }
+
+                streamBytes +=
+                    fullRecordBytes;
+
+                remaining =
+                    count -
+                    offset;
+
+                if (remaining > 0)
+                {
+                    Buffer.BlockCopy(
+                        buffer,
+                        offset,
+                        carry,
+                        0,
+                        remaining);
+
+                    carryBytes =
+                        remaining;
+
+                    streamBytes +=
+                        remaining;
+                }
+            }
+
+            public void ValidateComplete()
+            {
+                if (carryBytes != 0)
+                    throw new IOException(
+                        "SCID content classification ended on a partial record.");
+            }
+
+            public string GetContentClass()
+            {
+                if (SpecialControlOpenRecords > 0 &&
+                    RegularOpenRecords == 0)
+                    return "SCDataLike";
+
+                if (SpecialControlOpenRecords > 0 &&
+                    RegularOpenRecords > 0)
+                    return "Mixed";
+
+                if (SpecialControlOpenRecords == 0 &&
+                    RegularOpenRecords > 0)
+                    return "ForeignLike";
+
+                return "Unclassified";
+            }
+
+            public long GetSegmentCutoverDateTime()
+            {
+                // A clean SC Data -> foreign transition has all Sierra special
+                // control markers before the first positive Open record. This
+                // is strong structural evidence for a segmented hybrid. A zero-
+                // only live tail cannot be proven from morphology alone and is
+                // therefore left to bridge state / source comparison.
+                if (SpecialControlOpenRecords > 0 &&
+                    RegularOpenRecords > 0 &&
+                    FirstRegularOpenDateTime > 0 &&
+                    LastSpecialControlOpenDateTime > 0 &&
+                    LastSpecialControlOpenDateTime <
+                        FirstRegularOpenDateTime)
+                {
+                    return FirstRegularOpenDateTime;
+                }
+
+                return 0;
+            }
+        }
+
+        private static bool SameSingleBits(
+            float left,
+            float right)
+        {
+            var leftBits =
+                new FloatIntBits
+                {
+                    FloatValue = left
+                };
+
+            var rightBits =
+                new FloatIntBits
+                {
+                    FloatValue = right
+                };
+
+            return leftBits.IntValue ==
+                rightBits.IntValue;
+        }
+
+        private static bool ConvertedRecordMatches(
+            byte[] source,
+            int sourceOffset,
+            byte[] target,
+            int targetOffset,
+            double scale)
+        {
+            if (BitConverter.ToInt64(
+                    source,
+                    sourceOffset) !=
+                BitConverter.ToInt64(
+                    target,
+                    targetOffset))
+                return false;
+
+            float sourceOpen =
+                BitConverter.ToSingle(
+                    source,
+                    sourceOffset + 8);
+
+            float expectedOpen =
+                sourceOpen > 0
+                ? (float)(sourceOpen * scale)
+                : sourceOpen;
+
+            if (!SameSingleBits(
+                    expectedOpen,
+                    BitConverter.ToSingle(
+                        target,
+                        targetOffset + 8)))
+                return false;
+
+            int[] priceOffsets =
+                new int[] { 12, 16, 20 };
+
+            for (int i = 0;
+                i < priceOffsets.Length;
+                i++)
+            {
+                int fieldOffset =
+                    priceOffsets[i];
+
+                float expected =
+                    (float)(
+                        BitConverter.ToSingle(
+                            source,
+                            sourceOffset + fieldOffset) *
+                        scale);
+
+                if (!SameSingleBits(
+                        expected,
+                        BitConverter.ToSingle(
+                            target,
+                            targetOffset + fieldOffset)))
+                    return false;
+            }
+
+            for (int fieldOffset = 24;
+                fieldOffset <= 36;
+                fieldOffset += 4)
+            {
+                if (BitConverter.ToUInt32(
+                        source,
+                        sourceOffset + fieldOffset) !=
+                    BitConverter.ToUInt32(
+                        target,
+                        targetOffset + fieldOffset))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool ConvertedRecordMatches(
+            RawScidRecord source,
+            RawScidRecord target,
+            double scale)
+        {
+            if (source.DateTime != target.DateTime)
+                return false;
+
+            float expectedOpen =
+                source.Open > 0
+                ? (float)(source.Open * scale)
+                : source.Open;
+
+            if (!SameSingleBits(
+                    expectedOpen,
+                    target.Open))
+                return false;
+
+            if (!SameSingleBits(
+                    (float)(source.High * scale),
+                    target.High) ||
+                !SameSingleBits(
+                    (float)(source.Low * scale),
+                    target.Low) ||
+                !SameSingleBits(
+                    (float)(source.Close * scale),
+                    target.Close))
+                return false;
+
+            return source.NumTrades == target.NumTrades &&
+                source.TotalVolume == target.TotalVolume &&
+                source.BidVolume == target.BidVolume &&
+                source.AskVolume == target.AskVolume;
+        }
+
+        public static ScidSourceRelationship InspectGzipScidRelationshipToSource(
+            string sourcePath,
+            string archivePath,
+            long uncompressedLength,
+            double scale)
+        {
+            DateTime started =
+                DateTime.UtcNow;
+
+            ScidMeta sourceBefore =
+                GetMeta(
+                    sourcePath);
+
+            DateTime sourceWriteBefore =
+                File.GetLastWriteTimeUtc(
+                    sourcePath);
+
+            var archiveBefore =
+                new FileInfo(
+                    archivePath);
+
+            long archiveLengthBefore =
+                archiveBefore.Length;
+
+            DateTime archiveWriteBefore =
+                archiveBefore.LastWriteTimeUtc;
+
+            if (uncompressedLength < HeaderSize ||
+                (uncompressedLength - HeaderSize) %
+                    RecordSize != 0)
+            {
+                throw new IOException(
+                    "Archived SCID length is not aligned to records.");
+            }
+
+            long targetRecords =
+                (uncompressedLength - HeaderSize) /
+                RecordSize;
+
+            long comparableRecords =
+                Math.Min(
+                    sourceBefore.Records,
+                    targetRecords);
+
+            long sourcePrefixRecords = 0;
+            long firstMismatchIndex = -1;
+            long exactAfterMismatch = 0;
+            long firstMismatchTargetDateTime = 0;
+            long firstMismatchSourceDateTime = 0;
+            long lastPrefixDateTime = 0;
+
+            using (var source =
+                new SequentialRecordReader(
+                    sourcePath))
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            using (var target =
+                new SequentialRecordReader(
+                    gzip,
+                    uncompressedLength,
+                    archivePath))
+            {
+                for (long index = 0;
+                    index < comparableRecords;
+                    index++)
+                {
+                    RawScidRecord sourceRecord;
+                    RawScidRecord targetRecord;
+
+                    if (!source.TryReadRaw(
+                            out sourceRecord) ||
+                        !target.TryReadRaw(
+                            out targetRecord))
+                    {
+                        throw new IOException(
+                            "Archived SCID relationship scan ended before the expected record count.");
+                    }
+
+                    bool matches =
+                        ConvertedRecordMatches(
+                            sourceRecord,
+                            targetRecord,
+                            scale);
+
+                    if (firstMismatchIndex < 0)
+                    {
+                        if (matches)
+                        {
+                            sourcePrefixRecords++;
+                            lastPrefixDateTime =
+                                targetRecord.DateTime;
+                        }
+                        else
+                        {
+                            firstMismatchIndex =
+                                index;
+
+                            firstMismatchSourceDateTime =
+                                sourceRecord.DateTime;
+
+                            firstMismatchTargetDateTime =
+                                targetRecord.DateTime;
+                        }
+                    }
+                    else if (matches)
+                    {
+                        exactAfterMismatch++;
+                    }
+                }
+            }
+
+            ScidMeta sourceAfter =
+                GetMeta(
+                    sourcePath);
+
+            DateTime sourceWriteAfter =
+                File.GetLastWriteTimeUtc(
+                    sourcePath);
+
+            var archiveAfter =
+                new FileInfo(
+                    archivePath);
+
+            if (sourceAfter.Length != sourceBefore.Length ||
+                sourceAfter.Records != sourceBefore.Records ||
+                sourceAfter.FirstDateTime != sourceBefore.FirstDateTime ||
+                sourceAfter.LastDateTime != sourceBefore.LastDateTime ||
+                sourceWriteAfter != sourceWriteBefore)
+            {
+                throw new IOException(
+                    "SC Data source changed while archived provenance was inspected.");
+            }
+
+            if (archiveAfter.Length != archiveLengthBefore ||
+                archiveAfter.LastWriteTimeUtc != archiveWriteBefore)
+            {
+                throw new IOException(
+                    "Archive changed while provenance was inspected.");
+            }
+
+            string relationship =
+                "Unknown";
+
+            long cutoverDateTime = 0;
+            bool wholeSecondCutover = false;
+
+            if (targetRecords > 0 &&
+                targetRecords <= sourceBefore.Records &&
+                sourcePrefixRecords == targetRecords)
+            {
+                relationship =
+                    "SCData";
+            }
+            else if (sourcePrefixRecords == 0 &&
+                exactAfterMismatch == 0)
+            {
+                relationship =
+                    "Foreign";
+            }
+            else if (firstMismatchIndex >= 0 &&
+                exactAfterMismatch == 0 &&
+                firstMismatchTargetDateTime > 0 &&
+                firstMismatchSourceDateTime > 0)
+            {
+                long targetSecond =
+                    firstMismatchTargetDateTime /
+                    1000000L;
+
+                long sourceSecond =
+                    firstMismatchSourceDateTime /
+                    1000000L;
+
+                long boundary =
+                    targetSecond *
+                    1000000L;
+
+                wholeSecondCutover =
+                    targetSecond == sourceSecond &&
+                    lastPrefixDateTime > 0 &&
+                    lastPrefixDateTime < boundary;
+
+                if (wholeSecondCutover)
+                {
+                    relationship =
+                        "Mixed";
+
+                    cutoverDateTime =
+                        boundary;
+                }
+            }
+
+            return new ScidSourceRelationship
+            {
+                Relationship =
+                    relationship,
+                SourceRecords =
+                    sourceBefore.Records,
+                TargetRecords =
+                    targetRecords,
+                SourcePrefixRecords =
+                    sourcePrefixRecords,
+                FirstMismatchIndex =
+                    firstMismatchIndex,
+                CutoverDateTime =
+                    cutoverDateTime,
+                ExactRecordsAfterMismatch =
+                    exactAfterMismatch,
+                WholeSecondCutover =
+                    wholeSecondCutover,
+                ElapsedSeconds =
+                    (DateTime.UtcNow - started).TotalSeconds
+            };
+        }
+
+        public static ScidSourceRelationship InspectScidRelationshipToSource(
+            string sourcePath,
+            string targetPath,
+            double scale)
+        {
+            DateTime started =
+                DateTime.UtcNow;
+
+            ScidMeta sourceBefore =
+                GetMeta(sourcePath);
+
+            ScidMeta targetBefore =
+                GetMeta(targetPath);
+
+            DateTime sourceWriteBefore =
+                File.GetLastWriteTimeUtc(
+                    sourcePath);
+
+            DateTime targetWriteBefore =
+                File.GetLastWriteTimeUtc(
+                    targetPath);
+
+            long comparableRecords =
+                Math.Min(
+                    sourceBefore.Records,
+                    targetBefore.Records);
+
+            long sourcePrefixRecords = 0;
+            long firstMismatchIndex = -1;
+            long exactAfterMismatch = 0;
+            long firstMismatchTargetDateTime = 0;
+            long firstMismatchSourceDateTime = 0;
+            long lastPrefixDateTime = 0;
+
+            const int RecordsPerChunk = 100000;
+            byte[] sourceBuffer =
+                new byte[RecordsPerChunk * RecordSize];
+            byte[] targetBuffer =
+                new byte[RecordsPerChunk * RecordSize];
+
+            using (var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var target = new FileStream(
+                targetPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            {
+                ValidateHeader(
+                    source,
+                    sourcePath);
+
+                ValidateHeader(
+                    target,
+                    targetPath);
+
+                source.Position = HeaderSize;
+                target.Position = HeaderSize;
+
+                long index = 0;
+
+                while (index < comparableRecords)
+                {
+                    int recordsThisChunk =
+                        (int)Math.Min(
+                            (long)RecordsPerChunk,
+                            comparableRecords - index);
+
+                    int bytesThisChunk =
+                        recordsThisChunk * RecordSize;
+
+                    ReadExact(
+                        source,
+                        sourceBuffer,
+                        bytesThisChunk);
+
+                    ReadExact(
+                        target,
+                        targetBuffer,
+                        bytesThisChunk);
+
+                    for (int record = 0, offset = 0;
+                        record < recordsThisChunk;
+                        record++, offset += RecordSize, index++)
+                    {
+                        bool matches =
+                            ConvertedRecordMatches(
+                                sourceBuffer,
+                                offset,
+                                targetBuffer,
+                                offset,
+                                scale);
+
+                        if (firstMismatchIndex < 0)
+                        {
+                            if (matches)
+                            {
+                                sourcePrefixRecords++;
+                                lastPrefixDateTime =
+                                    BitConverter.ToInt64(
+                                        targetBuffer,
+                                        offset);
+                            }
+                            else
+                            {
+                                firstMismatchIndex =
+                                    index;
+
+                                firstMismatchSourceDateTime =
+                                    BitConverter.ToInt64(
+                                        sourceBuffer,
+                                        offset);
+
+                                firstMismatchTargetDateTime =
+                                    BitConverter.ToInt64(
+                                        targetBuffer,
+                                        offset);
+                            }
+                        }
+                        else if (matches)
+                        {
+                            exactAfterMismatch++;
+                        }
+                    }
+                }
+            }
+
+            ScidMeta sourceAfter =
+                GetMeta(sourcePath);
+
+            ScidMeta targetAfter =
+                GetMeta(targetPath);
+
+            DateTime sourceWriteAfter =
+                File.GetLastWriteTimeUtc(
+                    sourcePath);
+
+            DateTime targetWriteAfter =
+                File.GetLastWriteTimeUtc(
+                    targetPath);
+
+            if (sourceAfter.Length != sourceBefore.Length ||
+                sourceAfter.Records != sourceBefore.Records ||
+                sourceAfter.FirstDateTime != sourceBefore.FirstDateTime ||
+                sourceAfter.LastDateTime != sourceBefore.LastDateTime ||
+                sourceWriteAfter != sourceWriteBefore)
+            {
+                throw new IOException(
+                    "SOURCE_CHANGED_DURING_PROVENANCE_SCAN: SC Data changed " +
+                    "while source relationship was inspected.");
+            }
+
+            if (targetAfter.Length != targetBefore.Length ||
+                targetAfter.Records != targetBefore.Records ||
+                targetAfter.FirstDateTime != targetBefore.FirstDateTime ||
+                targetAfter.LastDateTime != targetBefore.LastDateTime ||
+                targetWriteAfter != targetWriteBefore)
+            {
+                throw new IOException(
+                    "TARGET_CHANGED_DURING_PROVENANCE_SCAN: target changed " +
+                    "while source relationship was inspected.");
+            }
+
+            string relationship =
+                "Unknown";
+
+            long cutoverDateTime = 0;
+            bool wholeSecondCutover = false;
+
+            if (targetBefore.Records > 0 &&
+                targetBefore.Records <= sourceBefore.Records &&
+                sourcePrefixRecords == targetBefore.Records)
+            {
+                relationship =
+                    "SCData";
+            }
+            else if (sourcePrefixRecords == 0 &&
+                exactAfterMismatch == 0)
+            {
+                relationship =
+                    "Foreign";
+            }
+            else if (firstMismatchIndex >= 0 &&
+                exactAfterMismatch == 0 &&
+                firstMismatchTargetDateTime > 0 &&
+                firstMismatchSourceDateTime > 0)
+            {
+                long targetSecond =
+                    firstMismatchTargetDateTime /
+                    1000000L;
+
+                long sourceSecond =
+                    firstMismatchSourceDateTime /
+                    1000000L;
+
+                long boundary =
+                    targetSecond *
+                    1000000L;
+
+                wholeSecondCutover =
+                    targetSecond == sourceSecond &&
+                    lastPrefixDateTime > 0 &&
+                    lastPrefixDateTime < boundary;
+
+                if (wholeSecondCutover)
+                {
+                    relationship =
+                        "Mixed";
+
+                    cutoverDateTime =
+                        boundary;
+                }
+            }
+
+            return new ScidSourceRelationship
+            {
+                Relationship = relationship,
+                SourceRecords = sourceBefore.Records,
+                TargetRecords = targetBefore.Records,
+                SourcePrefixRecords = sourcePrefixRecords,
+                FirstMismatchIndex = firstMismatchIndex,
+                CutoverDateTime = cutoverDateTime,
+                ExactRecordsAfterMismatch = exactAfterMismatch,
+                WholeSecondCutover = wholeSecondCutover,
+                ElapsedSeconds =
+                    (DateTime.UtcNow - started).TotalSeconds
+            };
+        }
+
+        public static ScidContentInspection InspectScidContent(
+            string path)
+        {
+            DateTime started =
+                DateTime.UtcNow;
+
+            ScidMeta before =
+                GetMeta(path);
+
+            DateTime writeBefore =
+                File.GetLastWriteTimeUtc(path);
+
+            var content =
+                new ScidContentCounter();
+
+            byte[] buffer =
+                new byte[8 * 1024 * 1024];
+
+            string hash;
+
+            using (var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var sha = SHA256.Create())
+            {
+                int read;
+
+                while ((read = stream.Read(
+                    buffer,
+                    0,
+                    buffer.Length)) > 0)
+                {
+                    sha.TransformBlock(
+                        buffer,
+                        0,
+                        read,
+                        buffer,
+                        0);
+
+                    content.Add(
+                        buffer,
+                        read);
+                }
+
+                sha.TransformFinalBlock(
+                    new byte[0],
+                    0,
+                    0);
+
+                hash =
+                    BytesToHex(
+                        sha.Hash);
+            }
+
+            content.ValidateComplete();
+
+            ScidMeta after =
+                GetMeta(path);
+
+            DateTime writeAfter =
+                File.GetLastWriteTimeUtc(path);
+
+            if (after.Length != before.Length ||
+                after.Records != before.Records ||
+                after.FirstDateTime != before.FirstDateTime ||
+                after.LastDateTime != before.LastDateTime ||
+                writeAfter != writeBefore)
+            {
+                throw new IOException(
+                    "SCID file changed while content provenance was inspected.");
+            }
+
+            return new ScidContentInspection
+            {
+                Length =
+                    before.Length,
+                Records =
+                    before.Records,
+                Sha256 =
+                    hash,
+                ContentClass =
+                    content.GetContentClass(),
+                SpecialControlOpenRecords =
+                    content.SpecialControlOpenRecords,
+                RegularOpenRecords =
+                    content.RegularOpenRecords,
+                ZeroOpenRecords =
+                    content.ZeroOpenRecords,
+                OtherOpenRecords =
+                    content.OtherOpenRecords,
+                FirstRegularOpenDateTime =
+                    content.FirstRegularOpenDateTime,
+                LastSpecialControlOpenDateTime =
+                    content.LastSpecialControlOpenDateTime,
+                SegmentCutoverDateTime =
+                    content.GetSegmentCutoverDateTime(),
+                ElapsedSeconds =
+                    (DateTime.UtcNow - started).TotalSeconds
+            };
+        }
+
+        public static ScidContentInspection InspectGzipScidContent(
+            string archivePath)
+        {
+            DateTime started =
+                DateTime.UtcNow;
+
+            if (!File.Exists(archivePath))
+                throw new FileNotFoundException(
+                    "Archive was not found.",
+                    archivePath);
+
+            var content =
+                new ScidContentCounter();
+
+            byte[] buffer =
+                new byte[8 * 1024 * 1024];
+
+            byte[] header =
+                new byte[HeaderSize];
+
+            int headerCaptured =
+                0;
+
+            long totalBytes =
+                0;
+
+            string hash;
+
+            using (var input = new FileStream(
+                archivePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                8 * 1024 * 1024,
+                FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(
+                input,
+                CompressionMode.Decompress))
+            using (var sha = SHA256.Create())
+            {
+                int read;
+
+                while ((read = gzip.Read(
+                    buffer,
+                    0,
+                    buffer.Length)) > 0)
+                {
+                    if (headerCaptured < HeaderSize)
+                    {
+                        int copy =
+                            Math.Min(
+                                HeaderSize - headerCaptured,
+                                read);
+
+                        Buffer.BlockCopy(
+                            buffer,
+                            0,
+                            header,
+                            headerCaptured,
+                            copy);
+
+                        headerCaptured +=
+                            copy;
+                    }
+
+                    sha.TransformBlock(
+                        buffer,
+                        0,
+                        read,
+                        buffer,
+                        0);
+
+                    content.Add(
+                        buffer,
+                        read);
+
+                    totalBytes +=
+                        read;
+                }
+
+                sha.TransformFinalBlock(
+                    new byte[0],
+                    0,
+                    0);
+
+                hash =
+                    BytesToHex(
+                        sha.Hash);
+            }
+
+            if (headerCaptured != HeaderSize ||
+                header[0] != (byte)'S' ||
+                header[1] != (byte)'C' ||
+                header[2] != (byte)'I' ||
+                header[3] != (byte)'D' ||
+                BitConverter.ToInt32(header, 4) != HeaderSize ||
+                BitConverter.ToInt32(header, 8) != RecordSize)
+            {
+                throw new IOException(
+                    "Archived SCID header was not recognized.");
+            }
+
+            if (totalBytes < HeaderSize ||
+                (totalBytes - HeaderSize) %
+                    RecordSize != 0)
+            {
+                throw new IOException(
+                    "Archived SCID length is not aligned to records.");
+            }
+
+            content.ValidateComplete();
+
+            return new ScidContentInspection
+            {
+                Length =
+                    totalBytes,
+                Records =
+                    (totalBytes - HeaderSize) /
+                    RecordSize,
+                Sha256 =
+                    hash,
+                ContentClass =
+                    content.GetContentClass(),
+                SpecialControlOpenRecords =
+                    content.SpecialControlOpenRecords,
+                RegularOpenRecords =
+                    content.RegularOpenRecords,
+                ZeroOpenRecords =
+                    content.ZeroOpenRecords,
+                OtherOpenRecords =
+                    content.OtherOpenRecords,
+                FirstRegularOpenDateTime =
+                    content.FirstRegularOpenDateTime,
+                LastSpecialControlOpenDateTime =
+                    content.LastSpecialControlOpenDateTime,
+                SegmentCutoverDateTime =
+                    content.GetSegmentCutoverDateTime(),
+                ElapsedSeconds =
+                    (DateTime.UtcNow - started).TotalSeconds
+            };
         }
 
         private static string BytesToHex(byte[] bytes)
@@ -1392,6 +2490,8 @@ namespace SierraHistoryBridge
 
                 byte[] buffer = new byte[8 * 1024 * 1024];
                 string sourceHash;
+                var content =
+                    new ScidContentCounter();
 
                 using (var source = new FileStream(
                     sourcePath,
@@ -1428,6 +2528,10 @@ namespace SierraHistoryBridge
                                 buffer,
                                 0);
 
+                            content.Add(
+                                buffer,
+                                read);
+
                             gzip.Write(
                                 buffer,
                                 0,
@@ -1443,6 +2547,11 @@ namespace SierraHistoryBridge
                     output.Flush(true);
                     sourceHash = BytesToHex(sha.Hash);
                 }
+
+                content.ValidateComplete();
+
+                string contentClass =
+                    content.GetContentClass();
 
                 ScidMeta sourceMetaAfter =
                     GetMeta(sourcePath);
@@ -1569,7 +2678,21 @@ namespace SierraHistoryBridge
                         "original_write_ticks=" +
                             originalWriteTime.Ticks.ToString(
                                 CultureInfo.InvariantCulture),
-                        "sha256=" + sourceHash
+                        "sha256=" + sourceHash,
+                        "content_class=" +
+                            contentClass,
+                        "special_control_open_records=" +
+                            content.SpecialControlOpenRecords.ToString(
+                                CultureInfo.InvariantCulture),
+                        "regular_open_records=" +
+                            content.RegularOpenRecords.ToString(
+                                CultureInfo.InvariantCulture),
+                        "zero_open_records=" +
+                            content.ZeroOpenRecords.ToString(
+                                CultureInfo.InvariantCulture),
+                        "other_open_records=" +
+                            content.OtherOpenRecords.ToString(
+                                CultureInfo.InvariantCulture)
                     },
                     new UTF8Encoding(false));
 
@@ -1606,6 +2729,22 @@ namespace SierraHistoryBridge
                     ArchiveBytes =
                         new FileInfo(archivePath).Length,
                     Sha256 = sourceHash,
+                    ContentClass =
+                        contentClass,
+                    SpecialControlOpenRecords =
+                        content.SpecialControlOpenRecords,
+                    RegularOpenRecords =
+                        content.RegularOpenRecords,
+                    ZeroOpenRecords =
+                        content.ZeroOpenRecords,
+                    OtherOpenRecords =
+                        content.OtherOpenRecords,
+                    FirstRegularOpenDateTime =
+                        content.FirstRegularOpenDateTime,
+                    LastSpecialControlOpenDateTime =
+                        content.LastSpecialControlOpenDateTime,
+                    SegmentCutoverDateTime =
+                        content.GetSegmentCutoverDateTime(),
                     ElapsedSeconds =
                         (DateTime.UtcNow - started).TotalSeconds
                 };
@@ -1650,6 +2789,39 @@ namespace SierraHistoryBridge
             stream.Position = HeaderSize + recordIndex * RecordSize + 20;
             ReadExact(stream, buffer, 4);
             return BitConverter.ToSingle(buffer, 0);
+        }
+
+        public static long GetRecordDateTime(
+            string path,
+            long recordIndex)
+        {
+            using (var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            {
+                ValidateHeader(
+                    stream,
+                    path);
+
+                long records =
+                    (stream.Length - HeaderSize) /
+                    RecordSize;
+
+                if (recordIndex < 0 ||
+                    recordIndex >= records)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        "recordIndex");
+                }
+
+                return ReadDateTimeAt(
+                    stream,
+                    recordIndex);
+            }
         }
 
         public static string FormatScDateTime(long value)
@@ -1714,246 +2886,6 @@ namespace SierraHistoryBridge
             return low;
         }
 
-        private struct SecondAggregate
-        {
-            public long Second;
-            public long Volume;
-            public long BidVolume;
-            public long AskVolume;
-            public float LastClose;
-        }
-
-        private static Dictionary<long, SecondAggregate> LoadSecondAggregates(
-            FileStream stream,
-            long recordCount,
-            long firstSecond,
-            long lastSecond)
-        {
-            var result = new Dictionary<long, SecondAggregate>();
-
-            if (recordCount <= 0 || lastSecond < firstSecond)
-                return result;
-
-            long firstIndex = LowerBound(
-                stream,
-                recordCount,
-                checked(firstSecond * 1000000L),
-                false);
-
-            long afterLastIndex = LowerBound(
-                stream,
-                recordCount,
-                checked((lastSecond + 1L) * 1000000L),
-                false);
-
-            long recordsRemaining = afterLastIndex - firstIndex;
-            stream.Position = HeaderSize + firstIndex * RecordSize;
-
-            const int RecordsPerChunk = 100000;
-            byte[] buffer = new byte[RecordsPerChunk * RecordSize];
-
-            while (recordsRemaining > 0)
-            {
-                int recordsThisChunk = (int)Math.Min(
-                    (long)RecordsPerChunk,
-                    recordsRemaining);
-
-                int bytesThisChunk = recordsThisChunk * RecordSize;
-                ReadExact(stream, buffer, bytesThisChunk);
-
-                for (int record = 0, offset = 0;
-                    record < recordsThisChunk;
-                    record++, offset += RecordSize)
-                {
-                    long second = BitConverter.ToInt64(buffer, offset) / 1000000L;
-                    SecondAggregate aggregate;
-
-                    if (!result.TryGetValue(second, out aggregate))
-                        aggregate = new SecondAggregate { Second = second };
-
-                    aggregate.Volume += BitConverter.ToUInt32(buffer, offset + 28);
-                    aggregate.BidVolume += BitConverter.ToUInt32(buffer, offset + 32);
-                    aggregate.AskVolume += BitConverter.ToUInt32(buffer, offset + 36);
-                    aggregate.LastClose = BitConverter.ToSingle(buffer, offset + 20);
-                    result[second] = aggregate;
-                }
-
-                recordsRemaining -= recordsThisChunk;
-            }
-
-            return result;
-        }
-
-        private static bool HandoffSecondMatches(
-            SecondAggregate source,
-            SecondAggregate target,
-            double scale)
-        {
-            if (source.Volume != target.Volume ||
-                source.BidVolume != target.BidVolume ||
-                source.AskVolume != target.AskVolume)
-                return false;
-
-            return Math.Abs(
-                (double)source.LastClose * scale -
-                (double)target.LastClose) <= 0.001;
-        }
-
-        private static bool ShouldPreserveTargetTail(
-            string sourcePath,
-            string targetPath,
-            ScidMeta sourceMeta,
-            ScidMeta targetMeta,
-            double scale)
-        {
-            if (sourceMeta.Records <= 0 || targetMeta.Records <= 0)
-                return false;
-
-            long sourceLastSecond = sourceMeta.LastDateTime / 1000000L;
-            long targetLastSecond = targetMeta.LastDateTime / 1000000L;
-
-            if (targetLastSecond > sourceLastSecond)
-                return true;
-            if (targetLastSecond < sourceLastSecond)
-                return false;
-
-            using (var source = new FileStream(
-                sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
-                1024 * 1024, FileOptions.RandomAccess))
-            using (var target = new FileStream(
-                targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
-                1024 * 1024, FileOptions.RandomAccess))
-            {
-                ValidateHeader(source, sourcePath);
-                ValidateHeader(target, targetPath);
-
-                Dictionary<long, SecondAggregate> sourceSeconds =
-                    LoadSecondAggregates(
-                        source,
-                        sourceMeta.Records,
-                        sourceLastSecond,
-                        sourceLastSecond);
-
-                Dictionary<long, SecondAggregate> targetSeconds =
-                    LoadSecondAggregates(
-                        target,
-                        targetMeta.Records,
-                        targetLastSecond,
-                        targetLastSecond);
-
-                SecondAggregate sourceSecond;
-                SecondAggregate targetSecond;
-
-                if (!sourceSeconds.TryGetValue(sourceLastSecond, out sourceSecond) ||
-                    !targetSeconds.TryGetValue(targetLastSecond, out targetSecond))
-                {
-                    throw new IOException(
-                        "LIVE_MERGE_ENDPOINT_INVALID: the final SCID second could not be aggregated.");
-                }
-
-                if (HandoffSecondMatches(sourceSecond, targetSecond, scale))
-                    return false;
-
-                return targetSecond.Volume > sourceSecond.Volume;
-            }
-        }
-
-        private static long FindVerifiedHandoffDateTime(
-            string sourcePath,
-            string targetPath,
-            ScidMeta sourceMeta,
-            ScidMeta targetMeta,
-            double scale,
-            out int verifiedTradeSeconds)
-        {
-            verifiedTradeSeconds = 0;
-
-            long sourceFirstSecond = sourceMeta.FirstDateTime / 1000000L;
-            long sourceLastSecond = sourceMeta.LastDateTime / 1000000L;
-            long targetFirstSecond = targetMeta.FirstDateTime / 1000000L;
-            long targetLastSecond = targetMeta.LastDateTime / 1000000L;
-            long newestSecond = Math.Min(sourceLastSecond, targetLastSecond);
-            long oldestPossible = Math.Max(sourceFirstSecond, targetFirstSecond);
-
-            if (newestSecond < oldestPossible)
-                return 0;
-
-            int[] windows = new int[] { 300, 3600, 21600 };
-
-            using (var source = new FileStream(
-                sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
-                1024 * 1024, FileOptions.RandomAccess))
-            using (var target = new FileStream(
-                targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
-                1024 * 1024, FileOptions.RandomAccess))
-            {
-                ValidateHeader(source, sourcePath);
-                ValidateHeader(target, targetPath);
-
-                foreach (int windowSeconds in windows)
-                {
-                    long firstSecond = Math.Max(
-                        oldestPossible,
-                        newestSecond - (long)windowSeconds + 1L);
-
-                    Dictionary<long, SecondAggregate> sourceSeconds =
-                        LoadSecondAggregates(
-                            source,
-                            sourceMeta.Records,
-                            firstSecond,
-                            newestSecond);
-
-                    Dictionary<long, SecondAggregate> targetSeconds =
-                        LoadSecondAggregates(
-                            target,
-                            targetMeta.Records,
-                            firstSecond,
-                            newestSecond);
-
-                    int run = 0;
-                    long newestInRun = 0;
-
-                    for (long second = newestSecond;
-                        second >= firstSecond;
-                        second--)
-                    {
-                        SecondAggregate sourceSecond;
-                        SecondAggregate targetSecond;
-                        bool haveSource = sourceSeconds.TryGetValue(second, out sourceSecond);
-                        bool haveTarget = targetSeconds.TryGetValue(second, out targetSecond);
-
-                        if (!haveSource && !haveTarget)
-                            continue;
-
-                        if (haveSource && haveTarget &&
-                            HandoffSecondMatches(sourceSecond, targetSecond, scale))
-                        {
-                            if (run == 0)
-                                newestInRun = second;
-
-                            run++;
-
-                            if (run >= 3)
-                            {
-                                verifiedTradeSeconds = run;
-                                return checked(newestInRun * 1000000L);
-                            }
-                        }
-                        else
-                        {
-                            run = 0;
-                            newestInRun = 0;
-                        }
-                    }
-
-                    if (firstSecond == oldestPossible)
-                        break;
-                }
-            }
-
-            return 0;
-        }
-
         private static long NearestIndex(FileStream stream, long count, long value)
         {
             long index = LowerBound(stream, count, value, false);
@@ -1982,6 +2914,415 @@ namespace SierraHistoryBridge
             public uint AskVolume;
         }
 
+        private struct SecondAggregate
+        {
+            public long Second;
+            public long Volume;
+            public long BidVolume;
+            public long AskVolume;
+            public float LastClose;
+        }
+
+        private static Dictionary<long, SecondAggregate> LoadSecondAggregates(
+            FileStream stream,
+            long recordCount,
+            long firstSecond,
+            long lastSecond)
+        {
+            var result =
+                new Dictionary<long, SecondAggregate>();
+
+            if (recordCount <= 0 ||
+                lastSecond < firstSecond)
+                return result;
+
+            long firstDateTime =
+                checked(firstSecond * 1000000L);
+
+            long afterLastDateTime =
+                checked((lastSecond + 1L) * 1000000L);
+
+            long firstIndex =
+                LowerBound(
+                    stream,
+                    recordCount,
+                    firstDateTime,
+                    false);
+
+            long afterLastIndex =
+                LowerBound(
+                    stream,
+                    recordCount,
+                    afterLastDateTime,
+                    false);
+
+            long recordsRemaining =
+                afterLastIndex -
+                firstIndex;
+
+            if (recordsRemaining <= 0)
+                return result;
+
+            stream.Position =
+                HeaderSize +
+                firstIndex * RecordSize;
+
+            const int RecordsPerChunk = 100000;
+            byte[] buffer =
+                new byte[RecordsPerChunk * RecordSize];
+
+            while (recordsRemaining > 0)
+            {
+                int recordsThisChunk =
+                    (int)Math.Min(
+                        (long)RecordsPerChunk,
+                        recordsRemaining);
+
+                int bytesThisChunk =
+                    recordsThisChunk *
+                    RecordSize;
+
+                ReadExact(
+                    stream,
+                    buffer,
+                    bytesThisChunk);
+
+                for (int record = 0, offset = 0;
+                    record < recordsThisChunk;
+                    record++, offset += RecordSize)
+                {
+                    long dateTime =
+                        BitConverter.ToInt64(
+                            buffer,
+                            offset);
+
+                    long second =
+                        dateTime /
+                        1000000L;
+
+                    SecondAggregate aggregate;
+
+                    if (!result.TryGetValue(
+                            second,
+                            out aggregate))
+                    {
+                        aggregate =
+                            new SecondAggregate
+                            {
+                                Second = second,
+                                Volume = 0,
+                                BidVolume = 0,
+                                AskVolume = 0,
+                                LastClose = 0
+                            };
+                    }
+
+                    aggregate.Volume +=
+                        BitConverter.ToUInt32(
+                            buffer,
+                            offset + 28);
+
+                    aggregate.BidVolume +=
+                        BitConverter.ToUInt32(
+                            buffer,
+                            offset + 32);
+
+                    aggregate.AskVolume +=
+                        BitConverter.ToUInt32(
+                            buffer,
+                            offset + 36);
+
+                    aggregate.LastClose =
+                        BitConverter.ToSingle(
+                            buffer,
+                            offset + 20);
+
+                    result[second] =
+                        aggregate;
+                }
+
+                recordsRemaining -=
+                    recordsThisChunk;
+            }
+
+            return result;
+        }
+
+        private static bool HandoffSecondMatches(
+            SecondAggregate source,
+            SecondAggregate target,
+            double scale)
+        {
+            if (source.Volume != target.Volume ||
+                source.BidVolume != target.BidVolume ||
+                source.AskVolume != target.AskVolume)
+                return false;
+
+            double scaledClose =
+                (double)source.LastClose *
+                scale;
+
+            return Math.Abs(
+                scaledClose -
+                (double)target.LastClose) <=
+                0.001;
+        }
+
+        private static bool ShouldPreserveTargetTail(
+            string sourcePath,
+            string targetPath,
+            ScidMeta sourceMeta,
+            ScidMeta targetMeta,
+            double scale)
+        {
+            if (sourceMeta.Records <= 0 ||
+                targetMeta.Records <= 0)
+                return false;
+
+            long sourceLastSecond =
+                sourceMeta.LastDateTime /
+                1000000L;
+
+            long targetLastSecond =
+                targetMeta.LastDateTime /
+                1000000L;
+
+            if (targetLastSecond >
+                sourceLastSecond)
+                return true;
+
+            if (targetLastSecond <
+                sourceLastSecond)
+                return false;
+
+            // The feeds can assign different microsecond timestamps to the
+            // same activity. Same-second raw timestamp order therefore proves
+            // nothing. Read only the shared final second and compare its
+            // aggregate trade content.
+            using (var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            using (var target = new FileStream(
+                targetPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            {
+                ValidateHeader(
+                    source,
+                    sourcePath);
+
+                ValidateHeader(
+                    target,
+                    targetPath);
+
+                Dictionary<long, SecondAggregate> sourceSeconds =
+                    LoadSecondAggregates(
+                        source,
+                        sourceMeta.Records,
+                        sourceLastSecond,
+                        sourceLastSecond);
+
+                Dictionary<long, SecondAggregate> targetSeconds =
+                    LoadSecondAggregates(
+                        target,
+                        targetMeta.Records,
+                        targetLastSecond,
+                        targetLastSecond);
+
+                SecondAggregate sourceSecond;
+                SecondAggregate targetSecond;
+
+                if (!sourceSeconds.TryGetValue(
+                        sourceLastSecond,
+                        out sourceSecond) ||
+                    !targetSeconds.TryGetValue(
+                        targetLastSecond,
+                        out targetSecond))
+                {
+                    throw new IOException(
+                        "LIVE_MERGE_ENDPOINT_INVALID: the final SCID second could not be aggregated.");
+                }
+
+                if (HandoffSecondMatches(
+                        sourceSecond,
+                        targetSecond,
+                        scale))
+                {
+                    return false;
+                }
+
+                // Higher target volume is positive evidence that the Rithmic
+                // endpoint contains trade activity absent from the SC source.
+                // Equal/lower target volume with disagreement is not treated
+                // as "newer" merely because a raw timestamp is later.
+                return targetSecond.Volume >
+                    sourceSecond.Volume;
+            }
+        }
+
+        private static long FindVerifiedHandoffDateTime(
+            string sourcePath,
+            string targetPath,
+            ScidMeta sourceMeta,
+            ScidMeta targetMeta,
+            double scale,
+            out int verifiedTradeSeconds)
+        {
+            verifiedTradeSeconds = 0;
+
+            long sourceFirstSecond =
+                sourceMeta.FirstDateTime /
+                1000000L;
+
+            long sourceLastSecond =
+                sourceMeta.LastDateTime /
+                1000000L;
+
+            long targetFirstSecond =
+                targetMeta.FirstDateTime /
+                1000000L;
+
+            long targetLastSecond =
+                targetMeta.LastDateTime /
+                1000000L;
+
+            long newestSecond =
+                Math.Min(
+                    sourceLastSecond,
+                    targetLastSecond);
+
+            long oldestPossible =
+                Math.Max(
+                    sourceFirstSecond,
+                    targetFirstSecond);
+
+            if (newestSecond < oldestPossible)
+                return 0;
+
+            // NQ should normally establish this within seconds. The wider
+            // windows are fallbacks for quiet/off-hours periods. Only a small
+            // trailing overlap is read; full preflight already validates the
+            // files independently.
+            int[] windows =
+                new int[] { 300, 3600, 21600 };
+
+            using (var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            using (var target = new FileStream(
+                targetPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                1024 * 1024,
+                FileOptions.RandomAccess))
+            {
+                ValidateHeader(
+                    source,
+                    sourcePath);
+
+                ValidateHeader(
+                    target,
+                    targetPath);
+
+                foreach (int windowSeconds in windows)
+                {
+                    long firstSecond =
+                        Math.Max(
+                            oldestPossible,
+                            newestSecond -
+                                (long)windowSeconds +
+                                1L);
+
+                    Dictionary<long, SecondAggregate> sourceSeconds =
+                        LoadSecondAggregates(
+                            source,
+                            sourceMeta.Records,
+                            firstSecond,
+                            newestSecond);
+
+                    Dictionary<long, SecondAggregate> targetSeconds =
+                        LoadSecondAggregates(
+                            target,
+                            targetMeta.Records,
+                            firstSecond,
+                            newestSecond);
+
+                    int run = 0;
+                    long newestInRun = 0;
+
+                    for (long second = newestSecond;
+                        second >= firstSecond;
+                        second--)
+                    {
+                        SecondAggregate sourceSecond;
+                        SecondAggregate targetSecond;
+
+                        bool haveSource =
+                            sourceSeconds.TryGetValue(
+                                second,
+                                out sourceSecond);
+
+                        bool haveTarget =
+                            targetSeconds.TryGetValue(
+                                second,
+                                out targetSecond);
+
+                        if (!haveSource &&
+                            !haveTarget)
+                        {
+                            continue;
+                        }
+
+                        if (haveSource &&
+                            haveTarget &&
+                            HandoffSecondMatches(
+                                sourceSecond,
+                                targetSecond,
+                                scale))
+                        {
+                            if (run == 0)
+                                newestInRun =
+                                    second;
+
+                            run++;
+
+                            if (run >= 3)
+                            {
+                                verifiedTradeSeconds =
+                                    run;
+
+                                return checked(
+                                    newestInRun *
+                                    1000000L);
+                            }
+                        }
+                        else
+                        {
+                            run = 0;
+                            newestInRun = 0;
+                        }
+                    }
+
+                    if (firstSecond == oldestPossible)
+                        break;
+                }
+            }
+
+            return 0;
+        }
+
         private sealed class SequentialRecordReader : IDisposable
         {
             private readonly Stream _stream;
@@ -1997,6 +3338,10 @@ namespace SierraHistoryBridge
             public long OutOfOrderRecords;
             public long RichRecords;
             public long ControlOpenRecords;
+            public long SpecialControlOpenRecords;
+            public long RegularOpenRecords;
+            public long ZeroOpenRecords;
+            public long OtherOpenRecords;
             public long UnclassifiedVolumeRecords;
 
             public long RecordsRead
@@ -2097,11 +3442,29 @@ namespace SierraHistoryBridge
                 if (record.Open <= 0)
                     ControlOpenRecords++;
 
+                if (Single.IsNaN(record.Open) ||
+                    Single.IsInfinity(record.Open))
+                    OtherOpenRecords++;
+                else if (record.Open < -1.0e30f)
+                    SpecialControlOpenRecords++;
+                else if (record.Open > 0.0f)
+                    RegularOpenRecords++;
+                else if (record.Open == 0.0f)
+                    ZeroOpenRecords++;
+                else
+                    OtherOpenRecords++;
+
                 if ((ulong)record.BidVolume + (ulong)record.AskVolume !=
                     (ulong)record.TotalVolume)
                     UnclassifiedVolumeRecords++;
 
                 return true;
+            }
+
+            public bool TryReadRaw(out RawScidRecord record)
+            {
+                return TryReadRecord(
+                    out record);
             }
 
             public bool TryReadSecond(out SecondAggregate aggregate)
@@ -2406,6 +3769,14 @@ namespace SierraHistoryBridge
                     TargetRichRecords = target.RichRecords,
                     SourceControlOpenRecords = source.ControlOpenRecords,
                     TargetControlOpenRecords = target.ControlOpenRecords,
+                    SourceSpecialControlOpenRecords = source.SpecialControlOpenRecords,
+                    TargetSpecialControlOpenRecords = target.SpecialControlOpenRecords,
+                    SourceRegularOpenRecords = source.RegularOpenRecords,
+                    TargetRegularOpenRecords = target.RegularOpenRecords,
+                    SourceZeroOpenRecords = source.ZeroOpenRecords,
+                    TargetZeroOpenRecords = target.ZeroOpenRecords,
+                    SourceOtherOpenRecords = source.OtherOpenRecords,
+                    TargetOtherOpenRecords = target.OtherOpenRecords,
                     SourceUnclassifiedVolumeRecords = source.UnclassifiedVolumeRecords,
                     TargetUnclassifiedVolumeRecords = target.UnclassifiedVolumeRecords,
 
@@ -2663,6 +4034,14 @@ namespace SierraHistoryBridge
                     TargetRichRecords = target.RichRecords,
                     SourceControlOpenRecords = source.ControlOpenRecords,
                     TargetControlOpenRecords = target.ControlOpenRecords,
+                    SourceSpecialControlOpenRecords = source.SpecialControlOpenRecords,
+                    TargetSpecialControlOpenRecords = target.SpecialControlOpenRecords,
+                    SourceRegularOpenRecords = source.RegularOpenRecords,
+                    TargetRegularOpenRecords = target.RegularOpenRecords,
+                    SourceZeroOpenRecords = source.ZeroOpenRecords,
+                    TargetZeroOpenRecords = target.ZeroOpenRecords,
+                    SourceOtherOpenRecords = source.OtherOpenRecords,
+                    TargetOtherOpenRecords = target.OtherOpenRecords,
                     SourceUnclassifiedVolumeRecords = source.UnclassifiedVolumeRecords,
                     TargetUnclassifiedVolumeRecords = target.UnclassifiedVolumeRecords,
 
@@ -2911,26 +4290,40 @@ namespace SierraHistoryBridge
             ref long completedBytes,
             ref int lastPercent,
             ref long previousDateTime,
+            HashAlgorithm outputHash,
             DateTime started)
         {
             const int RecordsPerChunk = 250000;
-            byte[] buffer = new byte[RecordsPerChunk * RecordSize];
-            long recordsRemaining = records;
+            byte[] buffer =
+                new byte[RecordsPerChunk * RecordSize];
+
+            long recordsRemaining =
+                records;
 
             while (recordsRemaining > 0)
             {
-                int recordsThisChunk = (int)Math.Min(
-                    (long)RecordsPerChunk,
-                    recordsRemaining);
+                int recordsThisChunk =
+                    (int)Math.Min(
+                        (long)RecordsPerChunk,
+                        recordsRemaining);
 
-                int bytesThisChunk = recordsThisChunk * RecordSize;
-                ReadExact(input, buffer, bytesThisChunk);
+                int bytesThisChunk =
+                    recordsThisChunk *
+                    RecordSize;
+
+                ReadExact(
+                    input,
+                    buffer,
+                    bytesThisChunk);
 
                 for (int record = 0, offset = 0;
                     record < recordsThisChunk;
                     record++, offset += RecordSize)
                 {
-                    long dateTime = BitConverter.ToInt64(buffer, offset);
+                    long dateTime =
+                        BitConverter.ToInt64(
+                            buffer,
+                            offset);
 
                     if (dateTime < minimumDateTime)
                     {
@@ -2947,12 +4340,27 @@ namespace SierraHistoryBridge
                             "timestamps are not monotonic. No target was changed.");
                     }
 
-                    previousDateTime = dateTime;
+                    previousDateTime =
+                        dateTime;
                 }
 
-                output.Write(buffer, 0, bytesThisChunk);
-                recordsRemaining -= recordsThisChunk;
-                completedBytes += bytesThisChunk;
+                outputHash.TransformBlock(
+                    buffer,
+                    0,
+                    bytesThisChunk,
+                    buffer,
+                    0);
+
+                output.Write(
+                    buffer,
+                    0,
+                    bytesThisChunk);
+
+                recordsRemaining -=
+                    recordsThisChunk;
+
+                completedBytes +=
+                    bytesThisChunk;
 
                 ShowProgress(
                     statusPrefix,
@@ -3002,6 +4410,9 @@ namespace SierraHistoryBridge
                 targetWriteTime =
                     File.GetLastWriteTimeUtc(targetPath);
 
+                // Preserve a target tail only when the target is genuinely
+                // newer/more complete at the live edge. Raw microsecond order
+                // is never used as evidence across feeds.
                 if (targetMetaAtStart.Records > 0 &&
                     ShouldPreserveTargetTail(
                         sourcePath,
@@ -3010,6 +4421,12 @@ namespace SierraHistoryBridge
                         targetMetaAtStart,
                         scale))
                 {
+                    // Never splice feeds on a raw timestamp. SC Data and
+                    // Rithmic encode the same trades with different intra-
+                    // second timestamps and record forms. A whole second is
+                    // therefore the atomic handoff unit. The boundary must be
+                    // backed by at least three matching active seconds using
+                    // volume, bid volume, ask volume and scaled last price.
                     handoffDateTime =
                         FindVerifiedHandoffDateTime(
                             sourcePath,
@@ -3077,17 +4494,22 @@ namespace SierraHistoryBridge
                                 "tail. No target was changed.");
                         }
 
-                        long sourceLastWritten = ReadDateTimeAt(
-                            source,
-                            sourceRecordsWritten - 1);
+                        long sourceLastWritten =
+                            ReadDateTimeAt(
+                                source,
+                                sourceRecordsWritten - 1);
 
-                        long targetFirstTail = ReadDateTimeAt(
-                            target,
-                            tailIndex);
+                        long targetFirstTail =
+                            ReadDateTimeAt(
+                                target,
+                                tailIndex);
 
-                        if (sourceLastWritten >= handoffDateTime ||
-                            targetFirstTail < handoffDateTime ||
-                            sourceLastWritten >= targetFirstTail)
+                        if (sourceLastWritten >=
+                                handoffDateTime ||
+                            targetFirstTail <
+                                handoffDateTime ||
+                            sourceLastWritten >=
+                                targetFirstTail)
                         {
                             throw new IOException(
                                 "LIVE_MERGE_BOUNDARY_INVALID: source and target " +
@@ -3153,6 +4575,7 @@ namespace SierraHistoryBridge
             double flushSeconds = 0;
             double validationSeconds = 0;
             double replaceSeconds = 0;
+            string outputSha256 = null;
 
             try
             {
@@ -3166,9 +4589,18 @@ namespace SierraHistoryBridge
                 using (var output = new FileStream(
                     temporaryPath, FileMode.Open, FileAccess.Write, FileShare.None,
                     16 * 1024 * 1024, FileOptions.SequentialScan))
+                using (var outputHash = SHA256.Create())
                 {
                     byte[] header = new byte[HeaderSize];
                     ReadExact(input, header, HeaderSize);
+
+                    outputHash.TransformBlock(
+                        header,
+                        0,
+                        HeaderSize,
+                        header,
+                        0);
+
                     output.Write(header, 0, HeaderSize);
 
                     const int RecordsPerChunk = 250000;
@@ -3244,6 +4676,13 @@ namespace SierraHistoryBridge
                                 (float)(close * scale));
                         }
 
+                        outputHash.TransformBlock(
+                            buffer,
+                            0,
+                            bytesThisChunk,
+                            buffer,
+                            0);
+
                         output.Write(buffer, 0, bytesThisChunk);
                         recordsRemaining -= recordsThisChunk;
                         completedBytes += bytesThisChunk;
@@ -3281,9 +4720,19 @@ namespace SierraHistoryBridge
                                 ref completedBytes,
                                 ref lastPercent,
                                 ref previousDateTime,
+                                outputHash,
                                 started);
                         }
                     }
+
+                    outputHash.TransformFinalBlock(
+                        new byte[0],
+                        0,
+                        0);
+
+                    outputSha256 =
+                        BytesToHex(
+                            outputHash.Hash);
 
                     DateTime conversionFinished = DateTime.UtcNow;
                     conversionSeconds =
@@ -3427,7 +4876,7 @@ namespace SierraHistoryBridge
                         Path.Combine(
                             backupDirectory,
                             Path.GetFileName(sourcePath) +
-                            "__" +
+                            "--" +
                             Path.GetFileName(targetPath) +
                             ".rithmic-baseline.bak");
 
@@ -3521,6 +4970,8 @@ namespace SierraHistoryBridge
                         compressionEnabled,
                     OutputAllocatedBytes =
                         outputAllocatedBytes,
+                    OutputSha256 =
+                        outputSha256,
                     OutOfOrderRecords = outOfOrderRecords,
                     FirstOutOfOrderIndex = firstOutOfOrderIndex,
                     FirstPriorDateTime = firstPriorDateTime,
@@ -4119,3 +5570,4 @@ namespace SierraHistoryBridge
     }
 
 }
+

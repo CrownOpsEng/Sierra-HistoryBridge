@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge"
-$Version = "0.0.32"
+$Version = "0.0.33"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -45,6 +45,57 @@ function Write-SetupLog(
             $Level.ToUpperInvariant(),
             $Message) `
         -Encoding UTF8
+}
+
+function Set-SetupLogDestination(
+    [string]$LogFolder) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $LogFolder)) {
+
+        return
+    }
+
+    New-Item `
+        -ItemType Directory `
+        -Path $LogFolder `
+        -Force |
+        Out-Null
+
+    $newLog =
+        Join-Path `
+            $LogFolder `
+            "setup.log"
+
+    if (-not $SetupLog.Equals(
+            $newLog,
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        if (Test-Path `
+            -LiteralPath $SetupLog `
+            -PathType Leaf) {
+
+            $existing =
+                Get-Content `
+                    -LiteralPath $SetupLog `
+                    -ErrorAction SilentlyContinue
+
+            if ($existing) {
+                Add-Content `
+                    -LiteralPath $newLog `
+                    -Value $existing `
+                    -Encoding UTF8
+            }
+
+            Remove-Item `
+                -LiteralPath $SetupLog `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+
+        $script:SetupLog =
+            $newLog
+    }
 }
 
 function Show-Header {
@@ -233,8 +284,172 @@ function Read-SetupConfig {
     }
 }
 
-function Get-DefaultSierraDataFolder {
-    $config = Read-SetupConfig
+function Test-SierraPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace(
+            $Path)) {
+
+        return $false
+    }
+
+    try {
+        $resolved =
+            [IO.Path]::GetFullPath(
+                $Path).TrimEnd('\')
+    }
+    catch {
+        return $false
+    }
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $resolved `
+            -PathType Container)) {
+
+        return $false
+    }
+
+    foreach ($name in @(
+        "SierraChart.exe",
+        "SierraChart_64.exe",
+        "SierraChart_32.exe"
+    )) {
+        if (Test-Path `
+            -LiteralPath (
+                Join-Path `
+                    $resolved `
+                    $name) `
+            -PathType Leaf) {
+
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-DefaultSierraPath {
+    $config =
+        Read-SetupConfig
+
+    if ($config -and
+        $config.sierra_path -and
+        (Test-SierraPath `
+            ([string]$config.sierra_path))) {
+
+        return [IO.Path]::GetFullPath(
+            [string]$config.sierra_path).TrimEnd('\')
+    }
+
+    # A remembered Data path is the strongest way to identify the existing
+    # Sierra instance when Data still sits beneath that installation.
+    if ($config -and
+        $config.default_data_folder) {
+
+        try {
+            $data =
+                [IO.Path]::GetFullPath(
+                    [string]$config.default_data_folder).TrimEnd('\')
+
+            $info =
+                New-Object IO.DirectoryInfo(
+                    $data)
+
+            if ($info.Name.Equals(
+                    "Data",
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                $info.Parent -and
+                (Test-SierraPath `
+                    $info.Parent.FullName)) {
+
+                return $info.Parent.FullName.TrimEnd('\')
+            }
+        }
+        catch { }
+    }
+
+    $runningPaths =
+        @()
+
+    try {
+        $running =
+            @(
+                Get-Process `
+                    -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.ProcessName -like
+                        "SierraChart*"
+                }
+            )
+
+        foreach ($process in $running) {
+            try {
+                if ($process.Path) {
+                    $candidate =
+                        Split-Path `
+                            -Parent `
+                            $process.Path
+
+                    if ((Test-SierraPath `
+                            $candidate) -and
+                        $runningPaths -notcontains
+                            $candidate) {
+
+                        $runningPaths +=
+                            [IO.Path]::GetFullPath(
+                                $candidate).TrimEnd('\')
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+    catch { }
+
+    if ($runningPaths.Count -eq 1) {
+        return $runningPaths[0]
+    }
+
+    # Multiple live Sierra installations are deliberately not guessed.
+    if ($runningPaths.Count -gt 1) {
+        return $null
+    }
+
+    $standardPaths =
+        @()
+
+    foreach ($candidate in @(
+        "C:\SierraChart",
+        "C:\SierraChart64",
+        "D:\SierraChart",
+        "D:\SierraChart64",
+        "E:\SierraChart",
+        "E:\SierraChart64",
+        "F:\SierraChart",
+        "F:\SierraChart64"
+    )) {
+        if ((Test-SierraPath `
+                $candidate) -and
+            $standardPaths -notcontains
+                $candidate) {
+
+            $standardPaths +=
+                [IO.Path]::GetFullPath(
+                    $candidate).TrimEnd('\')
+        }
+    }
+
+    if ($standardPaths.Count -eq 1) {
+        return $standardPaths[0]
+    }
+
+    return $null
+}
+
+function Get-DefaultSierraDataFolder(
+    [string]$SierraPath) {
+
+    $config =
+        Read-SetupConfig
 
     if ($config -and
         $config.default_data_folder -and
@@ -246,13 +461,16 @@ function Get-DefaultSierraDataFolder {
             [string]$config.default_data_folder).TrimEnd('\')
     }
 
-    foreach ($candidate in @(
-        "C:\SierraChart\Data",
-        "C:\SierraChart64\Data",
-        "D:\SierraChart\Data",
-        "D:\SierraChart64\Data"
-    )) {
-        if (Test-Path -LiteralPath $candidate -PathType Container) {
+    if ($SierraPath) {
+        $candidate =
+            Join-Path `
+                $SierraPath `
+                "Data"
+
+        if (Test-Path `
+            -LiteralPath $candidate `
+            -PathType Container) {
+
             return [IO.Path]::GetFullPath(
                 $candidate).TrimEnd('\')
         }
@@ -304,9 +522,2056 @@ function Read-SetupFolder(
     return $resolved
 }
 
+function Move-LayoutFileSafely(
+    [string]$Source,
+    [string]$Destination) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Source `
+            -PathType Leaf)) {
+
+        return
+    }
+
+    if (Test-Path `
+        -LiteralPath $Destination) {
+
+        throw (
+            "Layout relocation destination already exists: " +
+            $Destination)
+    }
+
+    $parent =
+        Split-Path `
+            -Parent `
+            $Destination
+
+    New-Item `
+        -ItemType Directory `
+        -Path $parent `
+        -Force |
+        Out-Null
+
+    Move-Item `
+        -LiteralPath $Source `
+        -Destination $Destination
+}
+
+function Convert-LayoutCompositeBackupName(
+    [string]$Name,
+    [string]$ProvenanceCode) {
+
+    $normalized =
+        $Name.Replace(
+            "__",
+            "--")
+
+    if ([string]::IsNullOrWhiteSpace(
+            $ProvenanceCode)) {
+
+        return $normalized
+    }
+
+    $extension =
+        $null
+
+    $base =
+        $normalized
+
+    if ($base.EndsWith(
+            ".gz.meta",
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        $extension =
+            ".gz.meta"
+
+        $base =
+            $base.Substring(
+                0,
+                $base.Length -
+                    $extension.Length)
+    }
+    elseif ($base.EndsWith(
+            ".gz",
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        $extension =
+            ".gz"
+
+        $base =
+            $base.Substring(
+                0,
+                $base.Length -
+                    $extension.Length)
+    }
+    else {
+        return $normalized
+    }
+
+    $lastSeparator =
+        $base.LastIndexOf(
+            "--",
+            [StringComparison]::Ordinal)
+
+    if ($lastSeparator -le 0) {
+        return $normalized
+    }
+
+    $prefix =
+        $base.Substring(
+            0,
+            $lastSeparator)
+
+    $target =
+        $base.Substring(
+            $lastSeparator + 2)
+
+    foreach ($code in @(
+        "RT",
+        "SC",
+        "MX",
+        "FR",
+        "UN"
+    )) {
+        $codeSuffix =
+            "--" +
+            $code
+
+        if ($prefix.EndsWith(
+                $codeSuffix,
+                [StringComparison]::OrdinalIgnoreCase)) {
+
+            $prefix =
+                $prefix.Substring(
+                    0,
+                    $prefix.Length -
+                        $codeSuffix.Length)
+
+            break
+        }
+    }
+
+    return (
+        $prefix +
+        "--" +
+        $ProvenanceCode +
+        "--" +
+        $target +
+        $extension
+    )
+}
+
+function Move-LayoutDirectoryContents(
+    [string]$Source,
+    [string]$Destination,
+    [bool]$RenameComposite,
+    [string]$ProvenanceCode) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Source `
+            -PathType Container)) {
+
+        return 0
+    }
+
+    $moved =
+        0
+
+    foreach ($file in @(
+        Get-ChildItem `
+            -LiteralPath $Source `
+            -File `
+            -ErrorAction SilentlyContinue)) {
+
+        $name =
+            $file.Name
+
+        if ($RenameComposite) {
+            $name =
+                Convert-LayoutCompositeBackupName `
+                    $name `
+                    $ProvenanceCode
+        }
+
+        Move-LayoutFileSafely `
+            $file.FullName `
+            (Join-Path `
+                $Destination `
+                $name)
+
+        $moved++
+    }
+
+    foreach ($directory in @(
+        Get-ChildItem `
+            -LiteralPath $Source `
+            -Directory `
+            -ErrorAction SilentlyContinue)) {
+
+        $childDestination =
+            Join-Path `
+                $Destination `
+                $directory.Name
+
+        $moved +=
+            Move-LayoutDirectoryContents `
+                $directory.FullName `
+                $childDestination `
+                $RenameComposite `
+                $ProvenanceCode
+    }
+
+    try {
+        $remaining =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $Source `
+                    -Force `
+                    -ErrorAction Stop
+            )
+
+        if ($remaining.Count -eq 0) {
+            Remove-Item `
+                -LiteralPath $Source `
+                -Force `
+                -ErrorAction Stop
+        }
+    }
+    catch { }
+
+    return $moved
+}
+
+function Set-LayoutArchiveProvenance(
+    [string]$Directory,
+    [string]$Provenance) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Directory `
+            -PathType Container)) {
+
+        return
+    }
+
+    foreach ($metadata in @(
+        Get-ChildItem `
+            -LiteralPath $Directory `
+            -File `
+            -Filter "*.meta" `
+            -ErrorAction SilentlyContinue)) {
+
+        try {
+            $lines =
+                @(
+                    Get-Content `
+                        -LiteralPath $metadata.FullName `
+                        -ErrorAction Stop
+                )
+
+            $found =
+                $false
+
+            $updated =
+                @()
+
+            foreach ($line in $lines) {
+                if ($line.StartsWith(
+                        "provenance=",
+                        [StringComparison]::OrdinalIgnoreCase)) {
+
+                    if ($Provenance -eq "Unknown") {
+                        $updated +=
+                            $line
+                    }
+                    else {
+                        $updated +=
+                            (
+                                "provenance=" +
+                                $Provenance
+                            )
+                    }
+
+                    $found =
+                        $true
+                }
+                else {
+                    $updated +=
+                        $line
+                }
+            }
+
+            if (-not $found) {
+                $updated +=
+                    (
+                        "provenance=" +
+                        $Provenance
+                    )
+            }
+
+            $updated |
+                Set-Content `
+                    -LiteralPath $metadata.FullName `
+                    -Encoding UTF8
+        }
+        catch {
+            Write-Host (
+                "Metadata provenance warning: " +
+                $metadata.FullName +
+                " | " +
+                $_.Exception.Message) `
+                -ForegroundColor Yellow
+        }
+    }
+}
+
+function Read-SetupArchiveMeta(
+    [string]$ArchivePath) {
+
+    $metadataPath =
+        $ArchivePath +
+        ".meta"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $metadataPath `
+            -PathType Leaf)) {
+
+        return $null
+    }
+
+    $values =
+        @{}
+
+    foreach ($line in @(
+        Get-Content `
+            -LiteralPath $metadataPath `
+            -ErrorAction Stop)) {
+
+        $separator =
+            $line.IndexOf("=")
+
+        if ($separator -le 0) {
+            continue
+        }
+
+        $values[
+            $line.Substring(
+                0,
+                $separator)
+        ] =
+            $line.Substring(
+                $separator + 1)
+    }
+
+    return $values
+}
+
+function Get-SetupBackupTargetName(
+    [string]$ArchivePath) {
+
+    $name =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    if ($name.EndsWith(
+            ".gz",
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        $name =
+            $name.Substring(
+                0,
+                $name.Length - 3)
+    }
+
+    $separator =
+        $name.LastIndexOf(
+            "--",
+            [StringComparison]::Ordinal)
+
+    if ($separator -lt 0 -or
+        $separator + 2 -ge
+            $name.Length) {
+
+        return $null
+    }
+
+    return $name.Substring(
+        $separator + 2)
+}
+
+function Get-SetupProvenanceCode(
+    [string]$Provenance) {
+
+    switch ($Provenance.Trim().ToLowerInvariant()) {
+        "rithmic" { return "RT" }
+        "scdata" { return "SC" }
+        "hybrid" { return "MX" }
+        "foreign" { return "FR" }
+        default { return "UN" }
+    }
+}
+
+function Get-SetupProvenanceFromContent(
+    [string]$ContentClass) {
+
+    switch ($ContentClass) {
+        "ForeignLike" { return "Foreign" }
+
+        # SCDataLike cannot prove purity by itself; a Rithmic live suffix can
+        # contain zero-Open records. Mixed requires a clean segment cutoff
+        # before Setup labels it Hybrid.
+        default { return "Unknown" }
+    }
+}
+
+function Convert-SetupScDateTimeToUtc(
+    [long]$Value) {
+
+    if ($Value -le 0) {
+        return $null
+    }
+
+    try {
+        $epoch =
+            [datetime]::SpecifyKind(
+                [datetime]"1899-12-30",
+                [DateTimeKind]::Utc)
+
+        return $epoch.AddTicks(
+            ($Value * 10L))
+    }
+    catch {
+        return $null
+    }
+}
+
+function Format-SetupScDateTimeCompact(
+    [long]$Value) {
+
+    $date =
+        Convert-SetupScDateTimeToUtc `
+            $Value
+
+    if (-not $date) {
+        return $null
+    }
+
+    return $date.ToString(
+        "yyyyMMddTHHmmssZ",
+        [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Set-SetupArchiveEvidence(
+    [string]$ArchivePath,
+    [string]$Provenance,
+    $Inspection,
+    [long]$CutoverDateTime = 0) {
+
+    $metadataPath =
+        $ArchivePath +
+        ".meta"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $metadataPath `
+            -PathType Leaf)) {
+
+        return
+    }
+
+    $values =
+        [ordered]@{}
+
+    foreach ($line in @(
+        Get-Content `
+            -LiteralPath $metadataPath `
+            -ErrorAction Stop)) {
+
+        $separator =
+            $line.IndexOf("=")
+
+        if ($separator -le 0) {
+            continue
+        }
+
+        $key =
+            $line.Substring(
+                0,
+                $separator)
+
+        $values[$key] =
+            $line.Substring(
+                $separator + 1)
+    }
+
+    $values["provenance"] =
+        $Provenance
+
+    if ($CutoverDateTime -gt 0) {
+        $values["cutover_datetime"] =
+            [string]$CutoverDateTime
+
+        $cutover =
+            Convert-SetupScDateTimeToUtc `
+                $CutoverDateTime
+
+        if ($cutover) {
+            $values["cutover_utc"] =
+                $cutover.ToString(
+                    "yyyy-MM-dd HH:mm:ss 'UTC'",
+                    [Globalization.CultureInfo]::InvariantCulture)
+        }
+    }
+    else {
+        [void]$values.Remove(
+            "cutover_datetime")
+
+        [void]$values.Remove(
+            "cutover_utc")
+    }
+
+    if ($Inspection) {
+        $archiveInfo =
+            Get-Item `
+                -LiteralPath $ArchivePath `
+                -ErrorAction Stop
+
+        $values["verified_archive_bytes"] =
+            [string][long]$archiveInfo.Length
+
+        $values["verified_archive_write_ticks"] =
+            [string][long]$archiveInfo.LastWriteTimeUtc.Ticks
+
+        $values["verified_content_sha256"] =
+            [string]$Inspection.Sha256
+
+        $values["content_class"] =
+            [string]$Inspection.ContentClass
+
+        $values["special_control_open_records"] =
+            [string][long]$Inspection.SpecialControlOpenRecords
+
+        $values["regular_open_records"] =
+            [string][long]$Inspection.RegularOpenRecords
+
+        $values["zero_open_records"] =
+            [string][long]$Inspection.ZeroOpenRecords
+
+        $values["other_open_records"] =
+            [string][long]$Inspection.OtherOpenRecords
+
+        if ([long]$Inspection.SegmentCutoverDateTime -gt 0) {
+            $values["morphology_cutover_datetime"] =
+                [string][long]$Inspection.SegmentCutoverDateTime
+        }
+    }
+
+    $lines =
+        @()
+
+    foreach ($entry in $values.GetEnumerator()) {
+        $lines +=
+            (
+                [string]$entry.Key +
+                "=" +
+                [string]$entry.Value
+            )
+    }
+
+    $lines |
+        Set-Content `
+            -LiteralPath $metadataPath `
+            -Encoding UTF8
+}
+
+function Rename-SetupBackupForProvenance(
+    [string]$ArchivePath,
+    [string]$TargetName,
+    [string]$Provenance,
+    [long]$CutoverDateTime = 0) {
+
+    $code =
+        Get-SetupProvenanceCode `
+            $Provenance
+
+    if ($code -eq "MX" -and
+        $CutoverDateTime -gt 0) {
+
+        $compact =
+            Format-SetupScDateTimeCompact `
+                $CutoverDateTime
+
+        if ($compact) {
+            $code +=
+                "-" +
+                $compact
+        }
+    }
+
+    $name =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    $directory =
+        Split-Path `
+            -Parent `
+            $ArchivePath
+
+    $suffix =
+        "--" +
+        $TargetName +
+        ".gz"
+
+    if (-not $name.EndsWith(
+            $suffix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        return $ArchivePath
+    }
+
+    $prefix =
+        $name.Substring(
+            0,
+            $name.Length -
+                $suffix.Length)
+
+    $codeMatch =
+        [regex]::Match(
+            $prefix,
+            '--(?:RT|SC|FR|UN|MX(?:-\d{8}T\d{6}Z)?)$',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+    if ($codeMatch.Success) {
+        $prefix =
+            $prefix.Substring(
+                0,
+                $codeMatch.Index)
+    }
+
+    $newPath =
+        Join-Path `
+            $directory `
+            (
+                $prefix +
+                "--" +
+                $code +
+                "--" +
+                $TargetName +
+                ".gz"
+            )
+
+    if ($newPath.Equals(
+            $ArchivePath,
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        return $ArchivePath
+    }
+
+    if (Test-Path `
+        -LiteralPath $newPath) {
+
+        Write-Host (
+            "Backup name warning: destination already exists; leaving current name: " +
+            $ArchivePath) `
+            -ForegroundColor Yellow
+
+        return $ArchivePath
+    }
+
+    Move-Item `
+        -LiteralPath $ArchivePath `
+        -Destination $newPath
+
+    $oldMeta =
+        $ArchivePath +
+        ".meta"
+
+    $newMeta =
+        $newPath +
+        ".meta"
+
+    if (Test-Path `
+        -LiteralPath $oldMeta `
+        -PathType Leaf) {
+
+        Move-Item `
+            -LiteralPath $oldMeta `
+            -Destination $newMeta
+    }
+
+    return $newPath
+}
+
+function Normalize-SetupProvenance(
+    [string]$Value) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $Value)) {
+
+        return "Unknown"
+    }
+
+    switch ($Value.Trim().ToLowerInvariant()) {
+        "rithmic" { return "Rithmic" }
+        "scdata" { return "SCData" }
+        "hybrid" { return "Hybrid" }
+        "foreign" { return "Foreign" }
+        default { return "Unknown" }
+    }
+}
+
+function Find-SetupScDataSource(
+    [string]$DataFolder,
+    [string]$TargetName) {
+
+    $targetPattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.scid$'
+
+    $sourcePattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d{2})-(?<exchange>[A-Za-z0-9_]+)\.scid$'
+
+    $target =
+        $targetPattern.Match(
+            $TargetName)
+
+    if (-not $target.Success) {
+        return $null
+    }
+
+    $matches =
+        @(
+            Get-ChildItem `
+                -LiteralPath $DataFolder `
+                -File `
+                -Filter "*.scid" `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+                $source =
+                    $sourcePattern.Match(
+                        $_.Name)
+
+                $source.Success -and
+                $source.Groups["root"].Value.Equals(
+                    $target.Groups["root"].Value,
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                $source.Groups["month"].Value.Equals(
+                    $target.Groups["month"].Value,
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                $source.Groups["year"].Value.EndsWith(
+                    $target.Groups["year"].Value,
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                $source.Groups["exchange"].Value.Equals(
+                    $target.Groups["exchange"].Value,
+                    [StringComparison]::OrdinalIgnoreCase)
+            }
+        )
+
+    if ($matches.Count -eq 1) {
+        return $matches[0].FullName
+    }
+
+    return $null
+}
+
+function Get-SetupProvenanceScale(
+    [string]$DataFolder,
+    [string]$TargetName,
+    [string]$SourcePath,
+    $Config) {
+
+    $targetPattern =
+        [regex]'^(?<root>.+?)[FGHJKMNQUVXZ]\d\.(?<exchange>[A-Za-z0-9_]+)\.scid$'
+
+    $match =
+        $targetPattern.Match(
+            $TargetName)
+
+    if ($match.Success -and
+        $Config -and
+        $Config.proven_scales) {
+
+        $group =
+            "{0}|{1}" -f
+            $match.Groups["root"].Value.ToUpperInvariant(),
+            $match.Groups["exchange"].Value.ToUpperInvariant()
+
+        if ($Config.proven_scales.PSObject.Properties[
+                $group]) {
+
+            try {
+                return [double]$Config.proven_scales.$group
+            }
+            catch { }
+        }
+    }
+
+    $currentTarget =
+        Join-Path `
+            $DataFolder `
+            $TargetName
+
+    if (Test-Path `
+        -LiteralPath $currentTarget `
+        -PathType Leaf) {
+
+        try {
+            $inference =
+                [SierraHistoryBridge.ScidBridge]::InferScale(
+                    $SourcePath,
+                    $currentTarget)
+
+            return [double]$inference.Factor
+        }
+        catch { }
+    }
+
+    return 0.0
+}
+
+function Test-SetupArchiveInspectionCache(
+    [System.IO.FileInfo]$Archive,
+    $Meta) {
+
+    if (-not $Meta -or
+        -not $Meta.ContainsKey(
+            "verified_archive_bytes") -or
+        -not $Meta.ContainsKey(
+            "verified_archive_write_ticks") -or
+        -not $Meta.ContainsKey(
+            "verified_content_sha256") -or
+        -not $Meta.ContainsKey(
+            "content_class")) {
+
+        return $false
+    }
+
+    try {
+        return (
+            [long]$Meta["verified_archive_bytes"] -eq
+                [long]$Archive.Length -and
+            [long]$Meta["verified_archive_write_ticks"] -eq
+                [long]$Archive.LastWriteTimeUtc.Ticks -and
+            [string]$Meta["verified_content_sha256"] -ieq
+                [string]$Meta["sha256"]
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-SetupSourceRelationshipIdentity(
+    [string]$SourcePath,
+    [double]$Scale) {
+
+    $file =
+        Get-Item `
+            -LiteralPath $SourcePath `
+            -ErrorAction Stop
+
+    return [pscustomobject]@{
+        Bytes =
+            [long]$file.Length
+        WriteTicks =
+            [long]$file.LastWriteTimeUtc.Ticks
+        Signature =
+            [SierraHistoryBridge.ScidBridge]::GetQuickSignature(
+                $SourcePath)
+        Scale =
+            $Scale.ToString(
+                "R",
+                [Globalization.CultureInfo]::InvariantCulture)
+    }
+}
+
+function Get-SetupCachedSourceRelationship(
+    $Meta,
+    [string]$SourcePath,
+    [double]$Scale) {
+
+    if (-not $Meta -or
+        -not $Meta.ContainsKey("relationship_source_path") -or
+        -not $Meta.ContainsKey("relationship_source_bytes") -or
+        -not $Meta.ContainsKey("relationship_source_write_ticks") -or
+        -not $Meta.ContainsKey("relationship_source_signature") -or
+        -not $Meta.ContainsKey("relationship_scale") -or
+        -not $Meta.ContainsKey("relationship_result")) {
+
+        return $null
+    }
+
+    try {
+        $identity =
+            Get-SetupSourceRelationshipIdentity `
+                $SourcePath `
+                $Scale
+
+        $savedPath =
+            [IO.Path]::GetFullPath(
+                [string]$Meta["relationship_source_path"]).TrimEnd('\')
+
+        $currentPath =
+            [IO.Path]::GetFullPath(
+                $SourcePath).TrimEnd('\')
+
+        if (-not $savedPath.Equals(
+                $currentPath,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            [long]$Meta["relationship_source_bytes"] -ne
+                [long]$identity.Bytes -or
+            [long]$Meta["relationship_source_write_ticks"] -ne
+                [long]$identity.WriteTicks -or
+            [string]$Meta["relationship_source_signature"] -ne
+                [string]$identity.Signature -or
+            [string]$Meta["relationship_scale"] -ne
+                [string]$identity.Scale) {
+
+            return $null
+        }
+
+        return [pscustomobject]@{
+            Relationship =
+                [string]$Meta["relationship_result"]
+            CutoverDateTime =
+                if ($Meta.ContainsKey(
+                    "relationship_cutover_datetime")) {
+                    [long]$Meta["relationship_cutover_datetime"]
+                }
+                else {
+                    0L
+                }
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Set-SetupSourceRelationshipEvidence(
+    [string]$ArchivePath,
+    [string]$SourcePath,
+    [double]$Scale,
+    $Relationship) {
+
+    $metadataPath =
+        $ArchivePath +
+        ".meta"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $metadataPath `
+            -PathType Leaf)) {
+
+        return
+    }
+
+    $identity =
+        Get-SetupSourceRelationshipIdentity `
+            $SourcePath `
+            $Scale
+
+    $values =
+        [ordered]@{}
+
+    foreach ($line in @(
+        Get-Content `
+            -LiteralPath $metadataPath `
+            -ErrorAction Stop)) {
+
+        $separator =
+            $line.IndexOf("=")
+
+        if ($separator -le 0) {
+            continue
+        }
+
+        $values[
+            $line.Substring(
+                0,
+                $separator)
+        ] =
+            $line.Substring(
+                $separator + 1)
+    }
+
+    $values["relationship_source_path"] =
+        [IO.Path]::GetFullPath(
+            $SourcePath).TrimEnd('\')
+
+    $values["relationship_source_bytes"] =
+        [string][long]$identity.Bytes
+
+    $values["relationship_source_write_ticks"] =
+        [string][long]$identity.WriteTicks
+
+    $values["relationship_source_signature"] =
+        [string]$identity.Signature
+
+    $values["relationship_scale"] =
+        [string]$identity.Scale
+
+    $values["relationship_result"] =
+        [string]$Relationship.Relationship
+
+    $values["relationship_cutover_datetime"] =
+        [string][long]$Relationship.CutoverDateTime
+
+    $lines =
+        @()
+
+    foreach ($entry in $values.GetEnumerator()) {
+        $lines +=
+            (
+                [string]$entry.Key +
+                "=" +
+                [string]$entry.Value
+            )
+    }
+
+    $lines |
+        Set-Content `
+            -LiteralPath $metadataPath `
+            -Encoding UTF8
+}
+
+function Move-SetupBaselineToRollbacks(
+    [string]$ArchivePath,
+    [string]$RollbackDirectory,
+    [string]$TargetName,
+    [string]$Provenance,
+    [long]$CutoverDateTime,
+    $Inspection) {
+
+    New-Item `
+        -ItemType Directory `
+        -Path $RollbackDirectory `
+        -Force |
+        Out-Null
+
+    $name =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    $destination =
+        Join-Path `
+            $RollbackDirectory `
+            $name
+
+    if (Test-Path `
+        -LiteralPath $destination) {
+
+        $stamp =
+            (Get-Date).ToString(
+                "yyyyMMdd-HHmmss-fff")
+
+        $destination =
+            Join-Path `
+                $RollbackDirectory `
+                (
+                    "baseline-review-" +
+                    $stamp +
+                    "-" +
+                    [guid]::NewGuid().ToString("N").Substring(0, 8) +
+                    "--UN--" +
+                    $TargetName +
+                    ".gz"
+                )
+    }
+
+    Move-Item `
+        -LiteralPath $ArchivePath `
+        -Destination $destination
+
+    $oldMeta =
+        $ArchivePath +
+        ".meta"
+
+    $newMeta =
+        $destination +
+        ".meta"
+
+    if (Test-Path `
+        -LiteralPath $oldMeta `
+        -PathType Leaf) {
+
+        Move-Item `
+            -LiteralPath $oldMeta `
+            -Destination $newMeta
+    }
+
+    Set-SetupArchiveEvidence `
+        $destination `
+        $Provenance `
+        $Inspection `
+        $CutoverDateTime
+
+    return Rename-SetupBackupForProvenance `
+        $destination `
+        $TargetName `
+        $Provenance `
+        $CutoverDateTime
+}
+
+function Move-SetupUnidentifiedBaselineToRollbacks(
+    [string]$ArchivePath,
+    [string]$RollbackDirectory) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $ArchivePath `
+            -PathType Leaf)) {
+
+        return $null
+    }
+
+    New-Item `
+        -ItemType Directory `
+        -Path $RollbackDirectory `
+        -Force |
+        Out-Null
+
+    $stamp =
+        (Get-Date).ToString(
+            "yyyyMMdd-HHmmss-fff")
+
+    $originalName =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    if ($originalName.EndsWith(
+            ".gz",
+            [StringComparison]::OrdinalIgnoreCase)) {
+
+        $originalName =
+            $originalName.Substring(
+                0,
+                $originalName.Length - 3)
+    }
+
+    $safeName =
+        [regex]::Replace(
+            $originalName,
+            '[^A-Za-z0-9.\-]+',
+            "-")
+
+    if ([string]::IsNullOrWhiteSpace(
+            $safeName)) {
+
+        $safeName =
+            "unidentified"
+    }
+
+    $destination =
+        Join-Path `
+            $RollbackDirectory `
+            (
+                "baseline-review-" +
+                $stamp +
+                "-" +
+                [guid]::NewGuid().ToString("N").Substring(0, 8) +
+                "--UN--" +
+                $safeName +
+                ".gz"
+            )
+
+    Move-Item `
+        -LiteralPath $ArchivePath `
+        -Destination $destination
+
+    $oldMeta =
+        $ArchivePath +
+        ".meta"
+
+    $newMeta =
+        $destination +
+        ".meta"
+
+    if (Test-Path `
+        -LiteralPath $oldMeta `
+        -PathType Leaf) {
+
+        Move-Item `
+            -LiteralPath $oldMeta `
+            -Destination $newMeta
+    }
+
+    return $destination
+}
+
+function Normalize-RithmicBackupProvenance(
+    [string]$StorageFolder,
+    [string]$DataFolder,
+    $Config) {
+
+    $baselineDirectory =
+        Join-Path `
+            $StorageFolder `
+            "Baselines"
+
+    $rollbackDirectory =
+        Join-Path `
+            $StorageFolder `
+            "Rollbacks"
+
+    $authenticated =
+        @{}
+
+    $baselineArchives =
+        @(
+            Get-ChildItem `
+                -LiteralPath $baselineDirectory `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue
+        )
+
+    if ($baselineArchives.Count -gt 0) {
+        Write-Host
+        Write-Host (
+            "Verifying {0} Rithmic baseline backup(s)..." -f
+            $baselineArchives.Count)
+    }
+
+    foreach ($archive in $baselineArchives) {
+        $meta =
+            $null
+
+        $target =
+            $null
+
+        $inspection =
+            $null
+
+        $provenance =
+            "Unknown"
+
+        $cutover =
+            0L
+
+        try {
+            $meta =
+                Read-SetupArchiveMeta `
+                    $archive.FullName
+
+            $target =
+                Get-SetupBackupTargetName `
+                    $archive.FullName
+
+            if (-not $meta -or
+                -not $target -or
+                -not $meta.ContainsKey("sha256") -or
+                -not $meta.ContainsKey("original_bytes")) {
+
+                throw "Baseline metadata is incomplete."
+            }
+
+            $existing =
+                Normalize-SetupProvenance `
+                    ([string]$meta["provenance"])
+
+            $inspection =
+                $null
+
+            $cacheValid =
+                Test-SetupArchiveInspectionCache `
+                    $archive `
+                    $meta
+
+            if (-not $cacheValid) {
+                if (-not $target.EndsWith(
+                        ".scid",
+                        [StringComparison]::OrdinalIgnoreCase)) {
+
+                    throw "Only verified SCID content can be authenticated as a Rithmic baseline."
+                }
+
+                $inspection =
+                    [SierraHistoryBridge.ScidBridge]::InspectGzipScidContent(
+                        $archive.FullName)
+
+                if ([long]$inspection.Length -ne
+                        [long]$meta["original_bytes"] -or
+                    [string]$inspection.Sha256 -ine
+                        [string]$meta["sha256"]) {
+
+                    throw "Baseline content does not match its verified metadata."
+                }
+            }
+
+            $contentClass =
+                if ($inspection) {
+                    [string]$inspection.ContentClass
+                }
+                else {
+                    [string]$meta["content_class"]
+                }
+
+            $special =
+                if ($inspection) {
+                    [long]$inspection.SpecialControlOpenRecords
+                }
+                elseif ($meta.ContainsKey(
+                    "special_control_open_records")) {
+                    [long]$meta["special_control_open_records"]
+                }
+                else {
+                    0L
+                }
+
+            $regular =
+                if ($inspection) {
+                    [long]$inspection.RegularOpenRecords
+                }
+                elseif ($meta.ContainsKey(
+                    "regular_open_records")) {
+                    [long]$meta["regular_open_records"]
+                }
+                else {
+                    0L
+                }
+
+            $other =
+                if ($inspection) {
+                    [long]$inspection.OtherOpenRecords
+                }
+                elseif ($meta.ContainsKey(
+                    "other_open_records")) {
+                    [long]$meta["other_open_records"]
+                }
+                else {
+                    0L
+                }
+
+            $nativeShape =
+                $contentClass -eq "ForeignLike" -and
+                $special -eq 0 -and
+                $regular -gt 0 -and
+                $other -eq 0
+
+            if ($nativeShape -and
+                $existing -notin @(
+                    "SCData",
+                    "Hybrid",
+                    "Foreign")) {
+
+                $provenance =
+                    "Rithmic"
+
+                Set-SetupArchiveEvidence `
+                    $archive.FullName `
+                    $provenance `
+                    $inspection `
+                    0
+
+                $renamed =
+                    Rename-SetupBackupForProvenance `
+                        $archive.FullName `
+                        $target `
+                        $provenance `
+                        0
+
+                $meta =
+                    Read-SetupArchiveMeta `
+                        $renamed
+
+                $identity =
+                    (
+                        $target.ToUpperInvariant() +
+                        "|" +
+                        [string]$meta["original_bytes"] +
+                        "|" +
+                        ([string]$meta["sha256"]).ToUpperInvariant()
+                    )
+
+                $authenticated[$identity] =
+                    $true
+
+                Write-Host (
+                    "  RT {0}" -f
+                    ([IO.Path]::GetFileName(
+                        $renamed)))
+
+                continue
+            }
+
+            # Baselines is an invariant, not a miscellaneous backup folder.
+            # Anything that cannot be authenticated as native Rithmic is
+            # retained but moved to Rollbacks with conservative identity.
+            $cutover =
+                0L
+
+            if ($existing -eq "SCData") {
+                $provenance = "SCData"
+            }
+            elseif ($existing -eq "Hybrid") {
+                $provenance = "Hybrid"
+
+                if ($meta.ContainsKey(
+                    "cutover_datetime")) {
+                    $cutover =
+                        [long]$meta["cutover_datetime"]
+                }
+            }
+            elseif ($contentClass -eq "Mixed" -and
+                $inspection -and
+                [long]$inspection.SegmentCutoverDateTime -gt 0) {
+
+                $provenance = "Hybrid"
+                $cutover =
+                    [long]$inspection.SegmentCutoverDateTime
+            }
+            elseif ($contentClass -eq "ForeignLike") {
+                $provenance = "Foreign"
+            }
+            else {
+                $provenance = "Unknown"
+            }
+
+            $moved =
+                Move-SetupBaselineToRollbacks `
+                    $archive.FullName `
+                    $rollbackDirectory `
+                    $target `
+                    $provenance `
+                    $cutover `
+                    $inspection
+
+            Write-Host (
+                "  moved from Baselines: {0} | {1}" -f
+                ([IO.Path]::GetFileName(
+                    $moved)),
+                (Get-SetupProvenanceCode `
+                    $provenance)) `
+                -ForegroundColor Yellow
+        }
+        catch {
+            $errorText =
+                $_.Exception.Message
+
+            try {
+                $preserved =
+                    if (-not [string]::IsNullOrWhiteSpace(
+                            $target)) {
+
+                        Move-SetupBaselineToRollbacks `
+                            $archive.FullName `
+                            $rollbackDirectory `
+                            $target `
+                            "Unknown" `
+                            0 `
+                            $inspection
+                    }
+                    else {
+                        Move-SetupUnidentifiedBaselineToRollbacks `
+                            $archive.FullName `
+                            $rollbackDirectory
+                    }
+
+                Write-Host (
+                    "Baseline rejected and preserved in Rollbacks: " +
+                    $preserved +
+                    " | " +
+                    $errorText) `
+                    -ForegroundColor Yellow
+            }
+            catch {
+                throw (
+                    "A file in Baselines could not be authenticated and could " +
+                    "not be moved safely to Rollbacks. Repair stopped to preserve " +
+                    "the Baselines invariant. File: " +
+                    $archive.FullName +
+                    " | validation error: " +
+                    $errorText +
+                    " | relocation error: " +
+                    $_.Exception.Message)
+            }
+        }
+    }
+
+    $rollbackArchives =
+        @(
+            Get-ChildItem `
+                -LiteralPath $rollbackDirectory `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue
+        )
+
+    if ($rollbackArchives.Count -gt 0) {
+        Write-Host
+        Write-Host (
+            "Classifying {0} Rithmic rollback backup(s)..." -f
+            $rollbackArchives.Count)
+    }
+
+    $rollbackIndex = 0
+
+    foreach ($archive in $rollbackArchives) {
+        $rollbackIndex++
+
+        try {
+            $meta =
+                Read-SetupArchiveMeta `
+                    $archive.FullName
+
+            $target =
+                Get-SetupBackupTargetName `
+                    $archive.FullName
+
+            if (-not $meta -or
+                -not $target -or
+                -not $meta.ContainsKey("sha256") -or
+                -not $meta.ContainsKey("original_bytes")) {
+
+                Write-Host (
+                    "  [{0}/{1}] UN {2} | incomplete metadata" -f
+                    $rollbackIndex,
+                    $rollbackArchives.Count,
+                    $archive.Name) `
+                    -ForegroundColor Yellow
+
+                continue
+            }
+
+            $identity =
+                (
+                    $target.ToUpperInvariant() +
+                    "|" +
+                    [string]$meta["original_bytes"] +
+                    "|" +
+                    ([string]$meta["sha256"]).ToUpperInvariant()
+                )
+
+            $existing =
+                Normalize-SetupProvenance `
+                    ([string]$meta["provenance"])
+
+            $provenance =
+                if ($authenticated.ContainsKey(
+                        $identity)) {
+
+                    "Rithmic"
+                }
+                else {
+                    $existing
+                }
+
+            $cutover =
+                if ($meta.ContainsKey(
+                    "cutover_datetime")) {
+                    [long]$meta["cutover_datetime"]
+                }
+                else {
+                    0L
+                }
+
+            $inspection =
+                $null
+
+            $cacheValid =
+                Test-SetupArchiveInspectionCache `
+                    $archive `
+                    $meta
+
+            # Known bridge evidence can be reused only while the compressed
+            # archive itself is unchanged. Unknown or changed archives are
+            # inspected again.
+            if (-not $cacheValid) {
+
+                if ($target.EndsWith(
+                        ".scid",
+                        [StringComparison]::OrdinalIgnoreCase)) {
+
+                    $inspection =
+                        [SierraHistoryBridge.ScidBridge]::InspectGzipScidContent(
+                            $archive.FullName)
+
+                    if ([long]$inspection.Length -ne
+                            [long]$meta["original_bytes"] -or
+                        [string]$inspection.Sha256 -ine
+                            [string]$meta["sha256"]) {
+
+                        throw "Rollback content does not match its verified metadata."
+                    }
+                }
+            }
+
+            if (-not $authenticated.ContainsKey(
+                    $identity)) {
+
+                # Existing explicit evidence survives only when content does
+                # not contradict it. Provider identity is never inferred from
+                # morphology alone.
+                if ($provenance -eq "Rithmic") {
+                    if ($inspection -and
+                        [string]$inspection.ContentClass -ne "ForeignLike") {
+
+                        $provenance =
+                            "Unknown"
+                    }
+                }
+                elseif ($provenance -eq "SCData") {
+                    if ($inspection -and
+                        [string]$inspection.ContentClass -eq "ForeignLike") {
+
+                        $provenance =
+                            "Unknown"
+                    }
+                }
+                elseif ($provenance -eq "Hybrid") {
+                    if ($cutover -le 0 -and
+                        $inspection -and
+                        [string]$inspection.ContentClass -eq "Mixed" -and
+                        [long]$inspection.SegmentCutoverDateTime -gt 0) {
+
+                        $cutover =
+                            [long]$inspection.SegmentCutoverDateTime
+                    }
+                }
+            }
+
+            # If identity is still unknown, compare the compressed data
+            # directly against the matching SC Data source. This is exact
+            # record relationship testing, not filename/morphology guessing.
+            if ($provenance -eq "Unknown" -and
+                $target.EndsWith(
+                    ".scid",
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                $source =
+                    Find-SetupScDataSource `
+                        $DataFolder `
+                        $target
+
+                if ($source) {
+                    $scale =
+                        Get-SetupProvenanceScale `
+                            $DataFolder `
+                            $target `
+                            $source `
+                            $Config
+
+                    if ($scale -gt 0) {
+                        $relationship =
+                            Get-SetupCachedSourceRelationship `
+                                $meta `
+                                $source `
+                                $scale
+
+                        if (-not $relationship) {
+                            $relationship =
+                                [SierraHistoryBridge.ScidBridge]::InspectGzipScidRelationshipToSource(
+                                    $source,
+                                    $archive.FullName,
+                                    [long]$meta["original_bytes"],
+                                    $scale)
+
+                            Set-SetupSourceRelationshipEvidence `
+                                $archive.FullName `
+                                $source `
+                                $scale `
+                                $relationship
+                        }
+
+                        switch ([string]$relationship.Relationship) {
+                            "SCData" {
+                                $provenance =
+                                    "SCData"
+                            }
+
+                            "Mixed" {
+                                $provenance =
+                                    "Hybrid"
+
+                                $cutover =
+                                    [long]$relationship.CutoverDateTime
+                            }
+
+                            "Foreign" {
+                                $provenance =
+                                    "Foreign"
+                            }
+                        }
+                    }
+                }
+            }
+
+            if ($provenance -eq "Unknown" -and
+                $inspection) {
+
+                if ([string]$inspection.ContentClass -eq "Mixed" -and
+                    [long]$inspection.SegmentCutoverDateTime -gt 0) {
+
+                    $provenance =
+                        "Hybrid"
+
+                    $cutover =
+                        [long]$inspection.SegmentCutoverDateTime
+                }
+                elseif ([string]$inspection.ContentClass -eq "ForeignLike") {
+                    $provenance =
+                        "Foreign"
+                }
+            }
+
+            Set-SetupArchiveEvidence `
+                $archive.FullName `
+                $provenance `
+                $inspection `
+                $cutover
+
+            $renamed =
+                Rename-SetupBackupForProvenance `
+                    $archive.FullName `
+                    $target `
+                    $provenance `
+                    $cutover
+
+            Write-Host (
+                "  [{0}/{1}] {2} {3}" -f
+                $rollbackIndex,
+                $rollbackArchives.Count,
+                (Get-SetupProvenanceCode `
+                    $provenance),
+                ([IO.Path]::GetFileName(
+                    $renamed)))
+        }
+        catch {
+            Write-Host (
+                "Rollback provenance warning: " +
+                $archive.FullName +
+                " | " +
+                $_.Exception.Message) `
+                -ForegroundColor Yellow
+        }
+    }
+
+    # Baselines and Rollbacks are lazy storage categories.
+    foreach ($directory in @(
+        $baselineDirectory,
+        $rollbackDirectory
+    )) {
+        try {
+            if (Test-Path `
+                -LiteralPath $directory `
+                -PathType Container) {
+
+                $remaining =
+                    @(
+                        Get-ChildItem `
+                            -LiteralPath $directory `
+                            -Force `
+                            -ErrorAction Stop
+                    )
+
+                if ($remaining.Count -eq 0) {
+                    Remove-Item `
+                        -LiteralPath $directory `
+                        -Force `
+                        -ErrorAction Stop
+                }
+            }
+        }
+        catch { }
+    }
+}
+
+function Normalize-CurrentBridgeLayout(
+    $ExistingConfig,
+    [string]$DataFolder,
+    [string]$StorageFolder,
+    [string]$TempFolder,
+    [string]$LogFolder) {
+
+    if (-not $ExistingConfig) {
+        return
+    }
+
+    # Only archive_folder/recovery_folder identify the previous filesystem
+    # model. The current model also has log_folder, so log_folder alone must
+    # never trigger a previous-layout relocation prompt on later Repairs.
+    $previousLayout =
+        [bool]$ExistingConfig.archive_folder -or
+        [bool]$ExistingConfig.recovery_folder
+
+    if (-not $previousLayout) {
+        return
+    }
+
+    $previousStorage =
+        $null
+
+    $previousTemp =
+        $null
+
+    $previousLogs =
+        $null
+
+    if ($ExistingConfig.archive_folder) {
+        $previousStorage =
+            [IO.Path]::GetFullPath(
+                [string]$ExistingConfig.archive_folder).TrimEnd('\')
+    }
+
+    if ($ExistingConfig.recovery_folder) {
+        $previousTemp =
+            [IO.Path]::GetFullPath(
+                [string]$ExistingConfig.recovery_folder).TrimEnd('\')
+    }
+
+    if ($ExistingConfig.log_folder) {
+        $previousLogs =
+            [IO.Path]::GetFullPath(
+                [string]$ExistingConfig.log_folder).TrimEnd('\')
+    }
+
+    $hasPrevious =
+        (
+            $previousStorage -and
+            (Test-Path `
+                -LiteralPath $previousStorage `
+                -PathType Container)
+        ) -or
+        (
+            $previousTemp -and
+            (Test-Path `
+                -LiteralPath $previousTemp `
+                -PathType Container)
+        ) -or
+        (
+            $previousLogs -and
+            (Test-Path `
+                -LiteralPath $previousLogs `
+                -PathType Container)
+        )
+
+    if (-not $hasPrevious) {
+        return
+    }
+
+    $sameStorage =
+        $previousStorage -and
+        $previousStorage.Equals(
+            $StorageFolder,
+            [StringComparison]::OrdinalIgnoreCase)
+
+    $sameTemp =
+        $previousTemp -and
+        $previousTemp.Equals(
+            $TempFolder,
+            [StringComparison]::OrdinalIgnoreCase)
+
+    $sameLogs =
+        $previousLogs -and
+        $previousLogs.Equals(
+            $LogFolder,
+            [StringComparison]::OrdinalIgnoreCase)
+
+    if ($sameStorage -and
+        $sameTemp -and
+        $sameLogs) {
+
+        return
+    }
+
+    $move =
+        $true
+
+    if (-not $Quiet) {
+        Write-Host
+        Write-Host "Existing Sierra History Bridge files use the previous folder layout."
+        Write-Host "They can be moved into the current HistoryBridge layout now."
+
+        $answer =
+            Read-Host "Move existing bridge files to the current layout? [Y/n]"
+
+        if (-not [string]::IsNullOrWhiteSpace(
+                $answer)) {
+
+            $move =
+                $answer.Trim().ToLowerInvariant() -in @(
+                    "y",
+                    "yes")
+        }
+    }
+
+    if (-not $move) {
+        throw (
+            "Repair canceled. Existing bridge files were left untouched; " +
+            "the current layout was not activated.")
+    }
+
+    if ($previousStorage -and
+        -not $sameStorage -and
+        (Test-Path `
+            -LiteralPath $previousStorage `
+            -PathType Container)) {
+
+        $categoryMap =
+            [ordered]@{
+                "SC_Data" = "Archive"
+                "Rithmic_Baselines" = "Baselines"
+                "Rollbacks" = "Rollbacks"
+                "Restore_Conflicts" = "RestoreConflicts"
+            }
+
+        foreach ($entry in $categoryMap.GetEnumerator()) {
+            $source =
+                Join-Path `
+                    $previousStorage `
+                    $entry.Key
+
+            if (Test-Path `
+                -LiteralPath $source `
+                -PathType Container) {
+
+                $destination =
+                    Join-Path `
+                        $StorageFolder `
+                        $entry.Value
+
+                $filenameCode =
+                    switch ($entry.Value) {
+                        "Baselines" {
+                            "UN"
+                        }
+
+                        "Rollbacks" {
+                            "UN"
+                        }
+
+                        default {
+                            $null
+                        }
+                    }
+
+                [void](Move-LayoutDirectoryContents `
+                    $source `
+                    $destination `
+                    $true `
+                    $filenameCode)
+
+                $provenance =
+                    switch ($entry.Value) {
+                        "Archive" {
+                            "SCData"
+                        }
+
+                        "Baselines" {
+                            "Unknown"
+                        }
+
+                        default {
+                            "Unknown"
+                        }
+                    }
+
+                Set-LayoutArchiveProvenance `
+                    $destination `
+                    $provenance
+            }
+        }
+
+        $unexpected =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $previousStorage `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            )
+
+        if ($unexpected.Count -eq 0) {
+            Remove-Item `
+                -LiteralPath $previousStorage `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host (
+                "Previous storage contains unrecognized items and was left in place: " +
+                $previousStorage) `
+                -ForegroundColor Yellow
+        }
+    }
+
+    if ($previousTemp -and
+        -not $sameTemp -and
+        (Test-Path `
+            -LiteralPath $previousTemp `
+            -PathType Container)) {
+
+        $tempItems =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $previousTemp `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            )
+
+        if ($tempItems.Count -eq 0) {
+            Remove-Item `
+                -LiteralPath $previousTemp `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+        else {
+            [void](Move-LayoutDirectoryContents `
+                $previousTemp `
+                $TempFolder `
+                $true `
+                $null)
+        }
+    }
+
+    if ($previousLogs -and
+        -not $sameLogs -and
+        (Test-Path `
+            -LiteralPath $previousLogs `
+            -PathType Container)) {
+
+        [void](Move-LayoutDirectoryContents `
+            $previousLogs `
+            $LogFolder `
+            $false `
+            $null)
+    }
+
+}
+
 function Configure-UserPaths([bool]$IsRepair) {
-    $existingConfig = Read-SetupConfig
-    $currentData = Get-DefaultSierraDataFolder
+    $existingConfig =
+        Read-SetupConfig
+
+    $currentSierra =
+        Get-DefaultSierraPath
+
+    if (-not $currentSierra) {
+        if ($Quiet) {
+            throw "Sierra Chart installation path could not be detected."
+        }
+
+        $currentSierra =
+            Read-SetupFolder `
+                "Sierra Chart installation folder" `
+                $null `
+                $true
+    }
+
+    if (-not (
+        Test-SierraPath `
+            $currentSierra)) {
+
+        throw (
+            "The selected folder does not appear to be a Sierra Chart installation: " +
+            $currentSierra)
+    }
+
+    $currentData =
+        Get-DefaultSierraDataFolder `
+            $currentSierra
 
     if (-not $currentData) {
         if ($Quiet) {
@@ -316,162 +2581,234 @@ function Configure-UserPaths([bool]$IsRepair) {
         $currentData =
             Read-SetupFolder `
                 "Sierra Chart Data folder" `
-                $null `
+                (Join-Path `
+                    $currentSierra `
+                    "Data") `
                 $true
     }
 
-    $currentArchive =
+    $currentStorage =
         if ($existingConfig -and
-            $existingConfig.archive_folder) {
+            $existingConfig.storage_folder) {
 
             [IO.Path]::GetFullPath(
-                [string]$existingConfig.archive_folder).TrimEnd('\')
+                [string]$existingConfig.storage_folder).TrimEnd('\')
         }
         else {
-            Join-Path $currentData "SCID_Bridge_Archive"
-        }
-
-    $currentRecovery =
-        if ($existingConfig -and
-            $existingConfig.recovery_folder) {
-
-            [IO.Path]::GetFullPath(
-                [string]$existingConfig.recovery_folder).TrimEnd('\')
-        }
-        else {
-            Join-Path $currentData "SCID_Bridge_Backups"
+            Join-Path `
+                $currentData `
+                "HistoryBridge"
         }
 
     $currentLogs =
         if ($existingConfig -and
-            $existingConfig.log_folder) {
+            $existingConfig.log_folder -and
+            $existingConfig.sierra_path) {
 
             [IO.Path]::GetFullPath(
                 [string]$existingConfig.log_folder).TrimEnd('\')
         }
         else {
-            Join-Path $currentData "SCID_Bridge_Logs"
+            Join-Path `
+                (Join-Path `
+                    $currentSierra `
+                    "Logs") `
+                "HistoryBridge"
         }
 
-    $changePaths = -not $IsRepair
+    $changePaths =
+        -not $IsRepair
 
-    if ($IsRepair -and -not $Quiet) {
+    if ($IsRepair -and
+        -not $Quiet) {
+
         Write-Host
-        Write-Host "Configured Sierra folders:"
+        Write-Host "Configured Sierra instance:"
+        Write-Host "  Sierra:   $currentSierra"
         Write-Host "  Data:     $currentData"
-        Write-Host "  Archive:  $currentArchive"
-        Write-Host "  Recovery staging: $currentRecovery"
+        Write-Host "  Storage:  $currentStorage"
+        Write-Host (
+            "  Temp:     {0}" -f
+            (Join-Path `
+                $currentData `
+                "HistoryBridgeTemp"))
         Write-Host "  Logs:     $currentLogs"
 
         $answer =
-            Read-Host "Change these folders? [y/N]"
+            Read-Host "Change these paths? [y/N]"
 
         $changePaths =
-            $answer.Trim().ToLowerInvariant() -in @("y", "yes")
+            $answer.Trim().ToLowerInvariant() -in @(
+                "y",
+                "yes")
     }
 
-    $data = $currentData
-    $archive = $currentArchive
-    $recovery = $currentRecovery
-    $logs = $currentLogs
+    $sierra =
+        $currentSierra
+
+    $data =
+        $currentData
+
+    $storage =
+        $currentStorage
+
+    $logs =
+        $currentLogs
 
     if ($changePaths) {
+        $sierra =
+            Read-SetupFolder `
+                "Sierra Chart installation folder" `
+                $currentSierra `
+                $true
+
+        if (-not (
+            Test-SierraPath `
+                $sierra)) {
+
+            throw (
+                "The selected folder does not appear to be a Sierra Chart installation: " +
+                $sierra)
+        }
+
+        $dataDefault =
+            if ($currentData -and
+                $currentData.StartsWith(
+                    $currentSierra + '\',
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                Join-Path `
+                    $sierra `
+                    "Data"
+            }
+            else {
+                $currentData
+            }
+
         $data =
             Read-SetupFolder `
                 "Sierra Chart Data folder" `
-                $currentData `
+                $dataDefault `
                 $true
 
-        $archiveDefault =
-            if ($currentArchive -and
-                $currentArchive.StartsWith(
-                    $currentData,
+        $storageDefault =
+            if ($currentStorage -and
+                $currentStorage.StartsWith(
+                    $currentData + '\',
                     [StringComparison]::OrdinalIgnoreCase)) {
 
-                Join-Path $data "SCID_Bridge_Archive"
+                Join-Path `
+                    $data `
+                    "HistoryBridge"
             }
             else {
-                $currentArchive
-            }
-
-        $recoveryDefault =
-            if ($currentRecovery -and
-                $currentRecovery.StartsWith(
-                    $currentData,
-                    [StringComparison]::OrdinalIgnoreCase)) {
-
-                Join-Path $data "SCID_Bridge_Backups"
-            }
-            else {
-                $currentRecovery
+                $currentStorage
             }
 
         $logsDefault =
-            if ($currentLogs -and
-                $currentLogs.StartsWith(
-                    $currentData,
-                    [StringComparison]::OrdinalIgnoreCase)) {
+            Join-Path `
+                (Join-Path `
+                    $sierra `
+                    "Logs") `
+                "HistoryBridge"
 
-                Join-Path $data "SCID_Bridge_Logs"
-            }
-            else {
-                $currentLogs
-            }
-
-        $customize = $false
+        $customize =
+            $false
 
         if (-not $Quiet) {
             Write-Host
+
             $answer =
                 Read-Host (
-                    "Customize archive, recovery staging, or log folders? [y/N]")
+                    "Customize persistent storage or log folders? [y/N]")
 
             $customize =
-                $answer.Trim().ToLowerInvariant() -in @("y", "yes")
+                $answer.Trim().ToLowerInvariant() -in @(
+                    "y",
+                    "yes")
         }
 
         if ($customize) {
-            $archive =
+            $storage =
                 Read-SetupFolder `
-                    "Archive folder" `
-                    $archiveDefault `
-                    $false
-
-            $recovery =
-                Read-SetupFolder `
-                    "Recovery folder" `
-                    $recoveryDefault `
+                    "HistoryBridge storage folder" `
+                    $storageDefault `
                     $false
 
             $logs =
                 Read-SetupFolder `
-                    "Log folder" `
+                    "HistoryBridge log folder" `
                     $logsDefault `
                     $false
         }
         else {
-            $archive = $archiveDefault
-            $recovery = $recoveryDefault
-            $logs = $logsDefault
+            $storage =
+                $storageDefault
+
+            $logs =
+                $logsDefault
         }
     }
 
-    $namedStorage =
+    $temp =
+        Join-Path `
+            $data `
+            "HistoryBridgeTemp"
+
+    foreach ($pair in @(
+        [pscustomobject]@{
+            Name = "Storage"
+            Path = $storage
+        },
+        [pscustomobject]@{
+            Name = "Temp"
+            Path = $temp
+        },
+        [pscustomobject]@{
+            Name = "Logs"
+            Path = $logs
+        }
+    )) {
+        $pair.Path =
+            [IO.Path]::GetFullPath(
+                $pair.Path).TrimEnd('\')
+    }
+
+    $storageDomains =
         @(
-            [pscustomobject]@{ Name = "Archive"; Path = $archive },
-            [pscustomobject]@{ Name = "Recovery"; Path = $recovery },
-            [pscustomobject]@{ Name = "Logs"; Path = $logs }
+            [pscustomobject]@{
+                Name = "Storage"
+                Path = $storage
+            },
+            [pscustomobject]@{
+                Name = "Temp"
+                Path = $temp
+            },
+            [pscustomobject]@{
+                Name = "Logs"
+                Path = $logs
+            }
         )
 
-    for ($i = 0; $i -lt $namedStorage.Count; $i++) {
-        for ($j = $i + 1; $j -lt $namedStorage.Count; $j++) {
+    for ($leftIndex = 0;
+        $leftIndex -lt $storageDomains.Count;
+        $leftIndex++) {
+
+        for ($rightIndex =
+                $leftIndex + 1;
+            $rightIndex -lt
+                $storageDomains.Count;
+            $rightIndex++) {
+
             $left =
                 [IO.Path]::GetFullPath(
-                    $namedStorage[$i].Path).TrimEnd('\')
+                    $storageDomains[
+                        $leftIndex].Path).TrimEnd('\')
 
             $right =
                 [IO.Path]::GetFullPath(
-                    $namedStorage[$j].Path).TrimEnd('\')
+                    $storageDomains[
+                        $rightIndex].Path).TrimEnd('\')
 
             if ($left.Equals(
                     $right,
@@ -484,25 +2821,39 @@ function Configure-UserPaths([bool]$IsRepair) {
                     [StringComparison]::OrdinalIgnoreCase)) {
 
                 throw (
-                    "$($namedStorage[$i].Name) and " +
-                    "$($namedStorage[$j].Name) folders must be separate.")
+                    $storageDomains[$leftIndex].Name +
+                    " and " +
+                    $storageDomains[$rightIndex].Name +
+                    " folders must be separate.")
             }
         }
     }
 
-    foreach ($directory in @(
-        $archive,
-        $recovery,
+    Normalize-CurrentBridgeLayout `
+        $existingConfig `
+        $data `
+        $storage `
+        $temp `
         $logs
-    )) {
-        New-Item `
-            -ItemType Directory `
-            -Path $directory `
-            -Force |
-            Out-Null
-    }
 
-    $provenScales = @{}
+    # Normalize provenance/filename codes for the current storage too. After
+    # the first classification, known metadata avoids expensive reinspection.
+    Normalize-RithmicBackupProvenance `
+        $storage `
+        $data `
+        $existingConfig
+
+    # Logs exist because Setup itself is an operation. Persistent storage and
+    # temp folders remain lazy and are created only when required.
+    New-Item `
+        -ItemType Directory `
+        -Path $logs `
+        -Force |
+        Out-Null
+
+    $provenScales =
+        @{}
+
     if ($existingConfig -and
         $existingConfig.proven_scales) {
 
@@ -517,25 +2868,40 @@ function Configure-UserPaths([bool]$IsRepair) {
     $settings =
         [ordered]@{
             proven_scales = $provenScales
+            sierra_path = $sierra
             default_data_folder = $data
-            archive_folder = $archive
-            recovery_folder = $recovery
+            storage_folder = $storage
             log_folder = $logs
         }
 
     $configPath =
-        Join-Path $UserDataRoot "config.json"
+        Join-Path `
+            $UserDataRoot `
+            "config.json"
 
     $settings |
-        ConvertTo-Json -Depth 8 |
+        ConvertTo-Json `
+            -Depth 8 |
         Set-Content `
             -LiteralPath $configPath `
             -Encoding UTF8
 
+    Set-SetupLogDestination `
+        $logs
+
+    Write-SetupLog (
+        "Configured Sierra instance: sierra={0}; data={1}; storage={2}; temp={3}; logs={4}" -f
+        $sierra,
+        $data,
+        $storage,
+        $temp,
+        $logs)
+
     return [pscustomobject]@{
+        Sierra = $sierra
         Data = $data
-        Archive = $archive
-        Recovery = $recovery
+        Storage = $storage
+        Temp = $temp
         Logs = $logs
     }
 }
@@ -906,13 +3272,17 @@ function Install-ExplorerIntegration(
     $icon =
         "$env:SystemRoot\System32\shell32.dll,167"
 
+    $sierraFolder =
+        [IO.Path]::GetFullPath(
+            [string]$Settings.Sierra).TrimEnd('\')
+
     $dataFolder =
         [IO.Path]::GetFullPath(
             [string]$Settings.Data).TrimEnd('\')
 
-    $archiveFolder =
+    $storageFolder =
         [IO.Path]::GetFullPath(
-            [string]$Settings.Archive).TrimEnd('\')
+            [string]$Settings.Storage).TrimEnd('\')
 
     $folderAppliesTo =
         'System.ItemPathDisplay:="' +
@@ -926,7 +3296,7 @@ function Install-ExplorerIntegration(
 
     # AQS starts-with comparison scopes static file verbs to configured roots.
     $sourceArchiveFolder =
-        Join-Path $archiveFolder "SC_Data"
+        Join-Path $storageFolder "Archive"
 
     $archiveFileAppliesTo =
         'System.ItemPathDisplay:~<"' +
@@ -938,7 +3308,8 @@ function Install-ExplorerIntegration(
         '"' + $PowerShellExe + '"' +
         ' -NoLogo -NoProfile -ExecutionPolicy Bypass' +
         ' -File "' + $installedScript + '"' +
-        ' -DataFolder "' + $dataFolder + '"'
+        ' -DataFolder "' + $dataFolder + '"' +
+        ' -SierraPath "' + $sierraFolder + '"'
 
     $dispatchBase =
         '"' + $PowerShellExe + '"' +
@@ -946,6 +3317,7 @@ function Install-ExplorerIntegration(
         ' -WindowStyle Hidden' +
         ' -File "' + $installedScript + '"' +
         ' -DataFolder "' + $dataFolder + '"' +
+        ' -SierraPath "' + $sierraFolder + '"' +
         ' -Mode Explorer'
 
     New-ExplorerVerb `
@@ -992,11 +3364,11 @@ function Install-ExplorerIntegration(
     foreach ($rollbackScope in @(
         [pscustomobject]@{
             Key = "$ProductKey.RollbackBaseline"
-            Path = Join-Path $archiveFolder "Rithmic_Baselines"
+            Path = Join-Path $storageFolder "Baselines"
         },
         [pscustomobject]@{
             Key = "$ProductKey.RollbackCurrent"
-            Path = Join-Path $archiveFolder "Rollbacks"
+            Path = Join-Path $storageFolder "Rollbacks"
         }
     )) {
         $rollbackAppliesTo =
@@ -1101,7 +3473,7 @@ function Install-StartMenuShortcuts(
         -TargetPath $PowerShellExe `
         -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Storage -Interactive') `
         -WorkingDirectory $InstallDirectory `
-        -Description "Show Sierra Chart Data logical, disk, archive, recovery, and free-space usage." `
+        -Description "Show Sierra Chart Data, HistoryBridge, temp, and free-space usage." `
         -IconLocation "$env:SystemRoot\System32\shell32.dll,4"
 
     New-Shortcut `
@@ -1276,6 +3648,13 @@ function Invoke-InstallOrRepair(
         Write-Host
         Write-Host "Completed successfully." -ForegroundColor Green
         Write-Host
+        Write-Host "Sierra instance:"
+        Write-Host "  Sierra:  $($settings.Sierra)"
+        Write-Host "  Data:    $($settings.Data)"
+        Write-Host "  Storage: $($settings.Storage)"
+        Write-Host "  Temp:    $($settings.Temp)"
+        Write-Host "  Logs:    $($settings.Logs)"
+        Write-Host
         Write-Host "Explorer commands:"
         Write-Host "  Data folder: Update History, Storage Report"
         Write-Host "  SC Data files: Archive SC Data"
@@ -1372,6 +3751,62 @@ function Invoke-Uninstall([string]$InstallScope, [string]$InstallDirectory) {
     Remove-StartMenuShortcuts $InstallScope
     Remove-UninstallerRegistration $InstallScope
 
+    $savedConfig =
+        Read-SetupConfig
+
+    $tempRetained =
+        $false
+
+    if ($savedConfig -and
+        $savedConfig.default_data_folder) {
+
+        try {
+            $bridgeTemp =
+                Join-Path `
+                    ([IO.Path]::GetFullPath(
+                        [string]$savedConfig.default_data_folder).TrimEnd('\')) `
+                    "HistoryBridgeTemp"
+
+            if (Test-Path `
+                -LiteralPath $bridgeTemp `
+                -PathType Container) {
+
+                $remaining =
+                    @(
+                        Get-ChildItem `
+                            -LiteralPath $bridgeTemp `
+                            -Force `
+                            -ErrorAction Stop
+                    )
+
+                if ($remaining.Count -eq 0) {
+                    Remove-Item `
+                        -LiteralPath $bridgeTemp `
+                        -Force `
+                        -ErrorAction Stop
+                }
+                else {
+                    $tempRetained =
+                        $true
+                }
+            }
+        }
+        catch {
+            $tempRetained =
+                $true
+        }
+    }
+
+    # Explorer batching is purely transient and never user data.
+    Remove-Item `
+        -LiteralPath (
+            Join-Path `
+                $env:TEMP `
+                "SierraHistoryBridge") `
+        -Recurse `
+        -Force `
+        -ErrorAction SilentlyContinue
+
     $removeData = Ask-RemoveUserData
 
     if ($removeData) {
@@ -1416,8 +3851,14 @@ del /f /q "%~f0" >nul 2>&1
     }
 
     Write-Host
-    Write-Host "Bridge archives, recovery files, and logs were left in their"
-    Write-Host "configured storage locations."
+    Write-Host "Persistent HistoryBridge storage and logs were left in their"
+    Write-Host "configured locations."
+
+    if ($tempRetained) {
+        Write-Host (
+            "Non-empty HistoryBridgeTemp data was retained for review.") `
+            -ForegroundColor Yellow
+    }
 }
 
 function Invoke-MaintenanceMenu($Existing) {

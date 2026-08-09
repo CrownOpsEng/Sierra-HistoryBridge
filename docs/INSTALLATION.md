@@ -3,115 +3,139 @@
 ## Requirements
 
 - Windows
-- Sierra Chart
 - Windows PowerShell 5.1
-- a Sierra Chart Data folder containing SC Data and/or Rithmic history files
+- Sierra Chart installation
+- writable Sierra Data folder
+- enough free space for verified temporary output
 
-## Install
+## Application paths
 
-Extract the release and run:
-
-```text
-setup.cmd
-```
-
-Choose:
-
-- current user — installs under `%LOCALAPPDATA%\Programs\Sierra History Bridge`
-- all users — installs under `%ProgramFiles%\Sierra History Bridge`
-
-Setup can create Start Menu shortcuts and registers the application in Windows
-Installed apps.
-
-## Configured folders
-
-Setup records four locations:
-
-- **Data** — Sierra Chart Data folder
-- **Archive** — persistent compressed archives
-- **Recovery** — temporary replacement/recovery staging
-- **Logs** — operation logs
-
-Default storage locations are under the Sierra Chart Data folder:
+Default program installation:
 
 ```text
-SCID_Bridge_Archive
-SCID_Bridge_Backups
-SCID_Bridge_Logs
+C:\Program Files\Sierra History Bridge
 ```
 
-Archive, Recovery, and Logs may be placed on other drives.
+Current-user application state:
 
-## Explorer integration
+```text
+%LOCALAPPDATA%\SierraHistoryBridge
+```
 
-The installer creates scoped Explorer commands.
+The space in the Program Files folder is intentional and follows normal Windows
+application naming. The compact `SierraHistoryBridge` identifier is used for
+LocalAppData and bridge-owned filesystem namespaces.
 
-Configured Sierra Data folder:
+## Sierra instance selection
 
-- **Update History**
-- **Storage Report**
+Sierra History Bridge treats the Sierra installation and Sierra Data folder as
+separate paths.
 
-SC Data `.scid` and `.dly` files directly in the Data folder:
+Setup/Repair resolves:
 
-- **Archive SC Data**
+```text
+SierraPath
+DataPath
+```
 
-Verified `.gz` files in `SCID_Bridge_Archive\SC_Data`:
+A Sierra installation path is validated as a Sierra Chart installation.
 
-- **Restore SC Data**
+The default Data folder is:
 
-Verified `.gz` files in `Rithmic_Baselines` and `Rollbacks`:
+```text
+<SierraPath>\Data
+```
 
-- **Rollback Rithmic**
+but the user can select a different Data folder to match Sierra Chart's actual
+configuration.
 
-On Windows 11 these entries may appear under **Show more options**.
+This supports:
 
+- multiple independent Sierra installations
+- relocated Data folders
+- Data stored on another drive
 
-### Multi-select behavior
+## Derived paths
 
-File verbs are registered with the Windows `Player` multi-select model and feed
-their selections into one bridge batch.
+Unless explicitly customized where allowed:
 
-Supported Explorer batch targets:
+```text
+Storage = <DataPath>\HistoryBridge
+Temp    = <DataPath>\HistoryBridgeTemp
+Logs    = <SierraPath>\Logs\HistoryBridge
+```
 
-- **Archive SC Data** — multiple SC Data `.scid` / `.dly` files
-- **Restore SC Data** — multiple `SC_Data` `.gz` archives
-- **Rollback Rithmic** — multiple Rithmic backup `.gz` files
+`Temp` is derived from DataPath and is not independently configurable because
+same-volume transaction staging is required for safe replacement behavior.
 
-Folder commands (**Update History** and **Storage Report**) use the `Single`
-selection model.
+`Storage` and `Logs` can be customized.
 
-The legacy Windows `Player` model supports up to 100 selected items.
+## Lazy directories
 
-## Start Menu
+Setup does not create empty persistent history categories or
+`HistoryBridgeTemp`.
 
-When enabled, the Start Menu folder contains:
+Folders are created on first use:
 
-- Sierra History Bridge
-- Archive SC Data
-- Restore SC Data
-- Rollback Rithmic
-- Storage Report
-- Sierra History Bridge Documentation
-- Repair Sierra History Bridge
-- Uninstall Sierra History Bridge
+```text
+HistoryBridge\Archive
+HistoryBridge\Baselines
+HistoryBridge\Rollbacks
+HistoryBridge\RestoreConflicts
+```
+
+and removed when empty where safe.
+
+`Logs\HistoryBridge` exists because Setup itself writes a log.
 
 ## Repair
 
-Run:
+Repair validates the exact package before replacing installed program files:
+
+1. PowerShell parser validation
+2. C# `Add-Type` compilation
+3. only then application replacement
+
+If the configured installation still uses the immediately preceding bridge
+folder arrangement, Repair offers to relocate bridge-owned files into the
+current `HistoryBridge` layout.
+
+Relocation is conservative:
+
+- recognized owned files are moved
+- composite filename separators become `--`
+- old baseline candidates begin as `UN` and must be re-authenticated
+- unrecognized material is not deleted
+- Repair stops if an unauthenticated baseline cannot be preserved safely
+
+## Explorer integration
+
+Folder commands use the Single selection model:
+
+- Update History
+- Storage Report
+
+File commands use the Windows Player multi-select model:
+
+- Archive SC Data
+- Restore SC Data
+- Rollback Rithmic
+
+File selections are collected through:
 
 ```text
-repair.cmd
+%TEMP%\SierraHistoryBridge\Explorer
 ```
 
-or run `setup.cmd` and choose Repair.
+before one visible operation is started.
 
-Repair reinstalls the packaged application files and Explorer/Start Menu
-integration while preserving current settings and state.
+On Windows 11 these commands may appear under **Show more options**.
 
 ## Uninstall
 
-Use Windows Settings → Apps → Installed apps, run `uninstall.cmd`, or use the
-Start Menu shortcut.
+Use Windows **Settings > Apps** or the installed uninstall command.
 
-Uninstall can remove the saved application settings/state. Archive, Recovery,
-and Log folders are not deleted automatically.
+Uninstall removes application files, Explorer integration, Start Menu entries
+and Installed Apps registration.
+
+Persistent Sierra history/archive material is not automatically deleted.
