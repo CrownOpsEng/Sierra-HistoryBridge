@@ -56,8 +56,9 @@ Run:
 archive.cmd
 ```
 
-or right-click a two-digit-year SC Data `.scid` / `.dly` file and choose
-**Archive SC Data**.
+or select one or more two-digit-year SC Data `.scid` / `.dly` files and
+choose **Archive SC Data**. Explorer selections are processed as one batch with
+one archive plan and one confirmation.
 
 Selections can be made by:
 
@@ -86,7 +87,8 @@ Run:
 restore.cmd
 ```
 
-or right-click an archive in `SC_Data` and choose **Restore SC Data**.
+or select one or more archives in `SC_Data` and choose **Restore SC Data**.
+The selected archives are restored as one batch.
 
 Restore can select:
 
@@ -107,10 +109,16 @@ Run:
 rollback.cmd
 ```
 
-or right-click a verified backup in `Rithmic_Baselines` or `Rollbacks` and
-choose **Rollback Rithmic**.
+or select one or more verified backups in `Rithmic_Baselines` or `Rollbacks`
+and choose **Rollback Rithmic**.
 
-Interactive rollback lists available backups and restores one selection.
+Explorer selections are combined into one rollback plan and one confirmation.
+A batch may contain only one backup for each Rithmic target. Selecting two
+different backups that map to the same target is rejected rather than applying
+an order-dependent rollback.
+
+Interactive rollback also accepts comma-separated numbers and ranges, for
+example `1,3-5`.
 
 If the current target differs from the selected backup, the bridge first
 ensures an exact verified undo backup exists in `Rollbacks`. An existing exact
@@ -182,3 +190,18 @@ allocation in the log, and reports reclaimed disk space.
 
 Normal Update only reports existing uncompressed targets and points to Storage
 Report; it does not modify them automatically.
+
+
+### Explorer selection batching
+
+Windows legacy file verbs are invoked once per selected item. Sierra History
+Bridge uses an internal hidden broker to collect those invocations for a short
+quiet period, writes the complete selection to a temporary manifest, and opens
+one visible operation.
+
+The manifest is consumed and removed when the operation starts. Interrupted
+selection fragments older than ten seconds are discarded so a later Explorer
+action cannot inherit an old selection.
+
+The Windows legacy `Player` multi-select model supports up to 100 selected
+items. Use Archive/Restore date or All filters for larger batches.

@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.31 - 2026-08-08
+## v0.0.32 - 2026-08-08
 
 Experimental release.
 
@@ -46,6 +46,9 @@ Experimental release.
 - logical and allocated/on-disk storage reporting
 - configurable Data, Archive, Recovery, and Logs folders
 - scoped Explorer commands
+- Explorer file commands support multi-select batches through one selection broker
+- Archive, Restore, and Rollback process Explorer multi-selections in one visible operation
+- Rollback manual selection accepts comma-separated indexes and ranges
 - optional Start Menu shortcuts
 - Windows Installed apps registration
 - repair and uninstall

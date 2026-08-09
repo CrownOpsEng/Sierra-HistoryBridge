@@ -395,7 +395,7 @@ foreach ($rollbackToken in @(
     'Get-RithmicBackupArchives',
     'New-RithmicUndoArchive',
     'Invalidate-BridgeStateForRithmicTarget',
-    'Selected backup retained'
+    'Selected backups retained'
 )) {
     if ($appText -notlike "*$rollbackToken*") {
         throw "Rithmic rollback regression: missing $rollbackToken"
@@ -419,7 +419,8 @@ foreach ($requiredMode in @(
     'Archive',
     'Restore',
     'Rollback',
-    'Storage'
+    'Storage',
+    'Explorer'
 )) {
     if ($modeValues -notmatch ('"' + [regex]::Escape($requiredMode) + '"')) {
         throw "Mode ValidateSet must include $requiredMode."
@@ -526,7 +527,7 @@ $rollbackText =
         $rollbackStart,
         $rollbackEnd - $rollbackStart)
 
-if (-not $rollbackText.Contains('[bool]$targetExists')) {
+if (-not $rollbackText.Contains('[bool]$plan.TargetExists')) {
     throw "Rollback must authorize verified replacement of a protected existing target."
 }
 
@@ -722,6 +723,116 @@ $compressionReviewText =
 if ($compressionReviewText -notlike '*Read-Host*' -or
     $compressionReviewText -notlike '*Wait-ForSierraChartClosed*') {
     throw "Compression policy regression: existing-file compression must be confirmed and require Sierra Chart closed."
+}
+
+
+foreach ($multiSelectAppToken in @(
+    'SelectionFile',
+    'Initialize-OperationSelection',
+    'Resolve-SelectedOperationItems',
+    'Invoke-ExplorerSelectionDispatch',
+    'Convert-IndexSelection',
+    'Rollback plan: {0} backup(s)',
+    'A rollback batch can contain only one backup per target'
+)) {
+    if ($appText -notlike "*$multiSelectAppToken*") {
+        throw "Multi-select regression: application is missing $multiSelectAppToken"
+    }
+}
+
+foreach ($multiSelectSetupToken in @(
+    'MultiSelectModel',
+    '"Player"',
+    '"Single"',
+    '-Mode Explorer',
+    '-DispatchMode Archive',
+    '-DispatchMode Restore',
+    '-DispatchMode Rollback',
+    '-WindowStyle Hidden'
+)) {
+    if ($setupText -notlike "*$multiSelectSetupToken*") {
+        throw "Multi-select regression: Explorer integration is missing $multiSelectSetupToken"
+    }
+}
+
+if ($setupText -like '*-Mode Archive -SelectedFile "%1" -Interactive*' -or
+    $setupText -like '*-Mode Restore -SelectedFile "%1" -Interactive*' -or
+    $setupText -like '*-Mode Rollback -SelectedFile "%1" -Interactive*') {
+
+    throw "Multi-select regression: Explorer file verbs bypass the selection broker."
+}
+
+$archiveManagerStart =
+    $appText.IndexOf(
+        'function Invoke-SourceArchiveManager')
+
+$archiveManagerEnd =
+    $appText.IndexOf(
+        'function Get-ArchivedSourceFiles',
+        $archiveManagerStart)
+
+$archiveManagerText =
+    $appText.Substring(
+        $archiveManagerStart,
+        $archiveManagerEnd - $archiveManagerStart)
+
+if ($archiveManagerText -notlike '*Resolve-SelectedOperationItems*') {
+    throw "Multi-select regression: Archive does not resolve batch selections."
+}
+
+$restoreManagerStart =
+    $appText.IndexOf(
+        'function Invoke-SourceRestoreManager')
+
+$restoreManagerEnd =
+    $appText.IndexOf(
+        'function Get-RithmicTargetNameFromBackupArchive',
+        $restoreManagerStart)
+
+$restoreManagerText =
+    $appText.Substring(
+        $restoreManagerStart,
+        $restoreManagerEnd - $restoreManagerStart)
+
+if ($restoreManagerText -notlike '*Resolve-SelectedOperationItems*') {
+    throw "Multi-select regression: Restore does not resolve batch selections."
+}
+
+$rollbackManagerStart =
+    $appText.IndexOf(
+        'function Invoke-RithmicRollbackManager')
+
+$rollbackManagerEnd =
+    $appText.IndexOf(
+        'function Get-RithmicBaselineArchives',
+        $rollbackManagerStart)
+
+$rollbackManagerText =
+    $appText.Substring(
+        $rollbackManagerStart,
+        $rollbackManagerEnd - $rollbackManagerStart)
+
+if ($rollbackManagerText -notlike '*Resolve-SelectedOperationItems*' -or
+    $rollbackManagerText -notlike '*Group-Object*TargetName*' -or
+    -not $rollbackManagerText.Contains(
+        'Roll back {0} target(s) from the selected backup(s)? [y/N]')) {
+
+    throw "Multi-select regression: Rollback batch planning/confirmation is incomplete."
+}
+
+
+$lineEndedBooleanCommandPattern =
+    '(?m)-(and|or)\s*\r?\n\s*(?![$(\[])([A-Za-z][A-Za-z0-9_-]*)\b'
+
+$lineEndedBooleanCommandMatch =
+    [regex]::Match(
+        $appText,
+        $lineEndedBooleanCommandPattern)
+
+if ($lineEndedBooleanCommandMatch.Success) {
+    throw (
+        "PowerShell 5.1 syntax regression: a bare command follows a line-ended boolean operator: " +
+        $lineEndedBooleanCommandMatch.Groups[2].Value)
 }
 
 $required = @(

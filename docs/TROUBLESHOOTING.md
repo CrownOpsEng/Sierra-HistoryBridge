@@ -124,3 +124,17 @@ Sierra Chart must be closed while existing files are compressed.
 
 If the Data volume does not support per-file compression, the bridge reports
 that condition and leaves the files unchanged.
+
+
+## Only one file appears from an Explorer multi-selection
+
+Run Repair to refresh the Explorer verb registration.
+
+Current file verbs use the `Player` multi-select model and hidden selection
+broker. A valid multi-selection should open one bridge window containing the
+complete Archive, Restore, or Rollback batch.
+
+If multiple bridge windows appear or a utility log reports a sharing/stream
+error immediately after a context-menu action, Repair the installation and
+retry. Stale Explorer registration can still point directly at the operation
+instead of the selection broker.

@@ -65,6 +65,23 @@ Verified `.gz` files in `Rithmic_Baselines` and `Rollbacks`:
 
 On Windows 11 these entries may appear under **Show more options**.
 
+
+### Multi-select behavior
+
+File verbs are registered with the Windows `Player` multi-select model and feed
+their selections into one bridge batch.
+
+Supported Explorer batch targets:
+
+- **Archive SC Data** — multiple SC Data `.scid` / `.dly` files
+- **Restore SC Data** — multiple `SC_Data` `.gz` archives
+- **Rollback Rithmic** — multiple Rithmic backup `.gz` files
+
+Folder commands (**Update History** and **Storage Report**) use the `Single`
+selection model.
+
+The legacy Windows `Player` model supports up to 100 selected items.
+
 ## Start Menu
 
 When enabled, the Start Menu folder contains:

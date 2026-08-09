@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge"
-$Version = "0.0.31"
+$Version = "0.0.32"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -545,7 +545,8 @@ function New-ExplorerVerb(
     [string]$Title,
     [string]$Command,
     [string]$Icon,
-    [string]$AppliesTo) {
+    [string]$AppliesTo,
+    [string]$MultiSelectModel) {
 
     New-Item -Path $Path -Force | Out-Null
     Set-Item -LiteralPath $Path -Value $Title
@@ -565,6 +566,16 @@ function New-ExplorerVerb(
             -LiteralPath $Path `
             -Name "AppliesTo" `
             -Value $AppliesTo `
+            -PropertyType String `
+            -Force |
+            Out-Null
+    }
+
+    if ($MultiSelectModel) {
+        New-ItemProperty `
+            -LiteralPath $Path `
+            -Name "MultiSelectModel" `
+            -Value $MultiSelectModel `
             -PropertyType String `
             -Force |
             Out-Null
@@ -929,19 +940,29 @@ function Install-ExplorerIntegration(
         ' -File "' + $installedScript + '"' +
         ' -DataFolder "' + $dataFolder + '"'
 
+    $dispatchBase =
+        '"' + $PowerShellExe + '"' +
+        ' -NoLogo -NoProfile -ExecutionPolicy Bypass' +
+        ' -WindowStyle Hidden' +
+        ' -File "' + $installedScript + '"' +
+        ' -DataFolder "' + $dataFolder + '"' +
+        ' -Mode Explorer'
+
     New-ExplorerVerb `
         "$classesRoot\Directory\shell\$ProductKey.Update" `
         "Update History" `
         ($baseCommand + ' -Mode Update -Interactive') `
         $icon `
-        $folderAppliesTo
+        $folderAppliesTo `
+        "Single"
 
     New-ExplorerVerb `
         "$classesRoot\Directory\shell\$ProductKey.Storage" `
         "Storage Report" `
         ($baseCommand + ' -Mode Storage -Interactive') `
         "$env:SystemRoot\System32\shell32.dll,4" `
-        $folderAppliesTo
+        $folderAppliesTo `
+        "Single"
 
     foreach ($extension in @(".scid", ".dly")) {
         $sourceFileAppliesTo =
@@ -953,17 +974,19 @@ function Install-ExplorerIntegration(
         New-ExplorerVerb `
             "$classesRoot\SystemFileAssociations\$extension\shell\$ProductKey.Archive" `
             "Archive SC Data" `
-            ($baseCommand + ' -Mode Archive -SelectedFile "%1" -Interactive') `
+            ($dispatchBase + ' -DispatchMode Archive -SelectedFile "%1"') `
             "$env:SystemRoot\System32\shell32.dll,46" `
-            $sourceFileAppliesTo
+            $sourceFileAppliesTo `
+            "Player"
     }
 
     New-ExplorerVerb `
         "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore" `
         "Restore SC Data" `
-        ($baseCommand + ' -Mode Restore -SelectedFile "%1" -Interactive') `
+        ($dispatchBase + ' -DispatchMode Restore -SelectedFile "%1"') `
         "$env:SystemRoot\System32\shell32.dll,167" `
-        $archiveFileAppliesTo
+        $archiveFileAppliesTo `
+        "Player"
 
 
     foreach ($rollbackScope in @(
@@ -986,9 +1009,10 @@ function Install-ExplorerIntegration(
         New-ExplorerVerb `
             "$classesRoot\SystemFileAssociations\.gz\shell\$($rollbackScope.Key)" `
             "Rollback Rithmic" `
-            ($baseCommand + ' -Mode Rollback -SelectedFile "%1" -Interactive') `
+            ($dispatchBase + ' -DispatchMode Rollback -SelectedFile "%1"') `
             "$env:SystemRoot\System32\shell32.dll,167" `
-            $rollbackAppliesTo
+            $rollbackAppliesTo `
+            "Player"
     }
 }
 

@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.31**
+**Version 0.0.32**
 
 Sierra History Bridge maintains Rithmic-named Sierra Chart history files from
 matching Sierra Chart SC Data files.
@@ -52,6 +52,25 @@ Relevant files receive:
 
 The integration is scoped to the configured Sierra folders. It does not add a
 global Explorer background menu.
+
+
+### Explorer multi-select
+
+File operations support Explorer multi-selection:
+
+- select multiple SC Data `.scid` / `.dly` files and choose **Archive SC Data**
+- select multiple `SC_Data` `.gz` files and choose **Restore SC Data**
+- select multiple Rithmic backup `.gz` files and choose **Rollback Rithmic**
+
+Explorer launches legacy file verbs once per selected item. The bridge uses a
+short-lived local selection broker to collect those invocations and opens one
+visible bridge operation with the complete batch.
+
+Update History and Storage Report remain single-folder commands.
+
+The Windows legacy `Player` selection model supports up to 100 selected items.
+For larger SC Data archive/restore jobs, use the built-in date/all filters
+instead of selecting files individually.
 
 ## Update policy
 

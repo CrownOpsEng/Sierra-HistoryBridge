@@ -261,3 +261,33 @@ successful content replacement as a failed transaction.
 
 If the volume does not support per-file compression, normal data processing can
 continue uncompressed and the condition is recorded in logs.
+
+
+## Explorer multi-selection
+
+Static Windows file verbs receive `%1` per invocation. The installer explicitly
+uses `MultiSelectModel=Player` for Archive, Restore, and Rollback file verbs and
+`MultiSelectModel=Single` for folder commands.
+
+The file verbs invoke the bridge in hidden `Explorer` dispatch mode. Each
+per-file invocation writes a uniquely named selection item. One leader process
+waits for a 500 ms quiet period, consumes the current item set, and launches one
+normal bridge process with a temporary selection manifest.
+
+The broker uses:
+
+- independent item files rather than concurrent writes to one stream
+- an exclusive `FileMode.CreateNew` leader lock
+- a bounded three-second collection window
+- follower retry so a late item can become the leader of a subsequent batch
+- stale-item cleanup after ten seconds
+- manifest deletion when the real operation starts
+
+This prevents multiple selected files from opening competing utility processes
+or sharing the same log stream.
+
+Archive and Restore resolve every manifest path against the current validated
+inventory before changing files.
+
+Rollback additionally requires one selected backup per target and runs each
+target as its own verified undo/restore transaction inside the batch.

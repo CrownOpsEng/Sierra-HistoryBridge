@@ -1,4 +1,4 @@
-SIERRA HISTORY BRIDGE v0.0.31
+SIERRA HISTORY BRIDGE v0.0.32
 
 PURPOSE
   Maintains Rithmic-named Sierra Chart SCID and Historical Daily files from
@@ -49,3 +49,13 @@ LICENSE
   See LICENSE for the complete terms.
 
 Full documentation is installed in the docs folder.
+
+
+MULTI-SELECT
+  Explorer file commands batch selected files into one operation:
+    Archive SC Data
+    Restore SC Data
+    Rollback Rithmic
+
+  Rollback accepts one selected backup per Rithmic target.
+  Interactive rollback also accepts comma/range selections such as 1,3-5.

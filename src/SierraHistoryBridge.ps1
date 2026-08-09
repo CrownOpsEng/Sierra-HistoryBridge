@@ -2,13 +2,16 @@
 [CmdletBinding()]
 param(
     [string]$DataFolder,
-    [ValidateSet("Update", "Archive", "Restore", "Rollback", "Storage")]
+    [ValidateSet("Update", "Archive", "Restore", "Rollback", "Storage", "Explorer")]
     [string]$Mode = "Update",
+    [ValidateSet("Archive", "Restore", "Rollback")]
+    [string]$DispatchMode,
     [string]$FromDate,
     [string]$ToDate,
     [int]$Days = 0,
     [switch]$All,
     [string]$SelectedFile,
+    [string]$SelectionFile,
     [switch]$Interactive,
     [switch]$Force,
     [switch]$DryRun,
@@ -17,7 +20,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.31"
+$Version = "0.0.32"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -27,6 +30,122 @@ $SourceDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConverterSource = Join-Path $SourceDirectory "ScidBridge.cs"
 
 New-Item -ItemType Directory -Force -Path $AppDataDirectory | Out-Null
+
+$script:OperationSelectedPaths =
+    @()
+
+function Initialize-OperationSelection {
+    $paths =
+        @()
+
+    if (-not [string]::IsNullOrWhiteSpace(
+            $SelectedFile)) {
+
+        $paths +=
+            $SelectedFile
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace(
+            $SelectionFile)) {
+
+        $manifestPath =
+            [IO.Path]::GetFullPath(
+                $SelectionFile.Trim().Trim('"'))
+
+        if (-not (
+            Test-Path `
+                -LiteralPath $manifestPath `
+                -PathType Leaf)) {
+
+            throw (
+                "Selection manifest was not found: " +
+                $manifestPath)
+        }
+
+        try {
+            $paths +=
+                @(
+                    Get-Content `
+                        -LiteralPath $manifestPath `
+                        -Encoding UTF8 |
+                    Where-Object {
+                        -not [string]::IsNullOrWhiteSpace(
+                            $_)
+                    }
+                )
+        }
+        finally {
+            Remove-Item `
+                -LiteralPath $manifestPath `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+
+    $normalized =
+        @()
+
+    foreach ($pathValue in $paths) {
+        $full =
+            [IO.Path]::GetFullPath(
+                ([string]$pathValue).Trim().Trim('"'))
+
+        if ($normalized -notcontains $full) {
+            $normalized +=
+                $full
+        }
+    }
+
+    $script:OperationSelectedPaths =
+        [object[]]$normalized
+}
+
+function Get-OperationSelectedPaths {
+    return [object[]]$script:OperationSelectedPaths
+}
+
+function Resolve-SelectedOperationItems(
+    $AvailableItems,
+    [string]$PathProperty,
+    [string]$Description) {
+
+    $selectedPaths =
+        @(Get-OperationSelectedPaths)
+
+    if ($selectedPaths.Count -eq 0) {
+        return @()
+    }
+
+    $result =
+        @()
+
+    foreach ($selectedPath in $selectedPaths) {
+        $matches =
+            @(
+                $AvailableItems |
+                Where-Object {
+                    ([string]($_.$PathProperty)).Equals(
+                        $selectedPath,
+                        [StringComparison]::OrdinalIgnoreCase)
+                }
+            )
+
+        if ($matches.Count -ne 1) {
+            throw (
+                "Selected file is not a recognized " +
+                $Description +
+                ": " +
+                $selectedPath)
+        }
+
+        $result +=
+            $matches[0]
+    }
+
+    return [object[]]$result
+}
+
+Initialize-OperationSelection
 
 $script:DeferredCleanupDirectories = @()
 $script:CleanupDataFolder = $null
@@ -413,7 +532,7 @@ function Start-UtilityOperationLog(
         Out-Null
 
     $stamp =
-        Get-Date -Format "yyyyMMdd-HHmmss"
+        Get-Date -Format "yyyyMMdd-HHmmss-fff"
 
     $logPath =
         Join-Path `
@@ -2016,26 +2135,17 @@ function Invoke-SourceArchiveManager(
     $window = Get-BridgeWindow
     $sourceFiles = Get-ScDataSourceFiles $ResolvedDataFolder
 
-    if ($SelectedFile) {
-        $selectedPath =
-            [IO.Path]::GetFullPath(
-                $SelectedFile.Trim().Trim('"'))
+    $selectedPaths =
+        @(Get-OperationSelectedPaths)
 
+    if ($selectedPaths.Count -gt 0) {
         $selection =
             @(
-                $sourceFiles |
-                Where-Object {
-                    $_.Path.Equals(
-                        $selectedPath,
-                        [StringComparison]::OrdinalIgnoreCase)
-                }
+                Resolve-SelectedOperationItems `
+                    $sourceFiles `
+                    "Path" `
+                    "SC Data source file"
             )
-
-        if ($selection.Count -eq 0) {
-            throw (
-                "The selected file is not an SC Data two-digit-year source " +
-                "file in the configured Sierra Data folder.")
-        }
     }
     else {
         $selection =
@@ -2889,25 +2999,17 @@ function Invoke-SourceRestoreManager(
         return 0
     }
 
-    if ($SelectedFile) {
-        $selectedPath =
-            [IO.Path]::GetFullPath(
-                $SelectedFile.Trim().Trim('"'))
+    $selectedPaths =
+        @(Get-OperationSelectedPaths)
 
+    if ($selectedPaths.Count -gt 0) {
         $selection =
             @(
-                $archives |
-                Where-Object {
-                    $_.ArchivePath.Equals(
-                        $selectedPath,
-                        [StringComparison]::OrdinalIgnoreCase)
-                }
+                Resolve-SelectedOperationItems `
+                    $archives `
+                    "ArchivePath" `
+                    "SC Data archive"
             )
-
-        if ($selection.Count -ne 1) {
-            throw (
-                "The selected file is not a recognized SC Data archive.")
-        }
     }
     else {
         $selection =
@@ -3594,7 +3696,7 @@ function Get-ExactRithmicRollbackBackup(
 function Get-DuplicateRithmicRollbackBackups(
     [string]$DataFolder,
     [string]$TargetName,
-    [string]$PreserveArchivePath) {
+    [string[]]$PreserveArchivePaths) {
 
     $rollbacks =
         @(
@@ -3664,16 +3766,31 @@ function Get-DuplicateRithmicRollbackBackups(
 
         $keeper = $null
 
-        if (-not [string]::IsNullOrWhiteSpace(
-                $PreserveArchivePath)) {
+        $preserved =
+            @(
+                $PreserveArchivePaths |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace(
+                        $_)
+                }
+            )
 
+        if ($preserved.Count -gt 0) {
             $keeperMatch =
                 @(
                     $items |
                     Where-Object {
-                        $_.ArchivePath.Equals(
-                            $PreserveArchivePath,
-                            [StringComparison]::OrdinalIgnoreCase)
+                        $archivePath =
+                            $_.ArchivePath
+
+                        @(
+                            $preserved |
+                            Where-Object {
+                                $archivePath.Equals(
+                                    $_,
+                                    [StringComparison]::OrdinalIgnoreCase)
+                            }
+                        ).Count -gt 0
                     } |
                     Select-Object -First 1
                 )
@@ -3819,14 +3936,14 @@ function Clear-ConfirmedRithmicRollbackDuplicates(
 function Review-RithmicRollbackDuplicates(
     [string]$DataFolder,
     [string]$TargetName,
-    [string]$PreserveArchivePath,
+    [string[]]$PreserveArchivePaths,
     [bool]$AskToClear) {
 
     $report =
         Get-DuplicateRithmicRollbackBackups `
             $DataFolder `
             $TargetName `
-            $PreserveArchivePath
+            $PreserveArchivePaths
 
     if ($report.GroupCount -eq 0) {
         return [pscustomobject]@{
@@ -4069,6 +4186,85 @@ function New-RithmicUndoArchive(
     return $archivePath
 }
 
+function Convert-IndexSelection(
+    [string]$Text,
+    [int]$Maximum) {
+
+    if ([string]::IsNullOrWhiteSpace(
+            $Text)) {
+
+        return @()
+    }
+
+    $indexes =
+        @()
+
+    foreach ($token in ($Text -split ",")) {
+        $part =
+            $token.Trim()
+
+        if ([string]::IsNullOrWhiteSpace(
+                $part)) {
+            continue
+        }
+
+        if ($part -match
+            '^(?<first>\d+)\s*-\s*(?<last>\d+)$') {
+
+            $first =
+                [int]$Matches["first"]
+
+            $last =
+                [int]$Matches["last"]
+
+            if ($first -lt 1 -or
+                $last -lt $first -or
+                $last -gt $Maximum) {
+
+                throw (
+                    "Invalid backup range: " +
+                    $part)
+            }
+
+            for ($value = $first;
+                $value -le $last;
+                $value++) {
+
+                if ($indexes -notcontains
+                    ($value - 1)) {
+
+                    $indexes +=
+                        ($value - 1)
+                }
+            }
+
+            continue
+        }
+
+        $number = 0
+
+        if (-not [int]::TryParse(
+                $part,
+                [ref]$number) -or
+            $number -lt 1 -or
+            $number -gt $Maximum) {
+
+            throw (
+                "Invalid backup selection: " +
+                $part)
+        }
+
+        if ($indexes -notcontains
+            ($number - 1)) {
+
+            $indexes +=
+                ($number - 1)
+        }
+    }
+
+    return [int[]]$indexes
+}
+
 function Invoke-RithmicRollbackManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForSelection) {
@@ -4089,30 +4285,20 @@ function Invoke-RithmicRollbackManager(
         return 0
     }
 
-    $selection = $null
+    $selectedPaths =
+        @(Get-OperationSelectedPaths)
 
-    if ($SelectedFile) {
-        $selectedPath =
-            [IO.Path]::GetFullPath(
-                $SelectedFile.Trim().Trim('"'))
+    $selections =
+        @()
 
-        $matches =
+    if ($selectedPaths.Count -gt 0) {
+        $selections =
             @(
-                $backups |
-                Where-Object {
-                    $_.ArchivePath.Equals(
-                        $selectedPath,
-                        [StringComparison]::OrdinalIgnoreCase)
-                }
+                Resolve-SelectedOperationItems `
+                    $backups `
+                    "ArchivePath" `
+                    "Rithmic backup"
             )
-
-        if ($matches.Count -ne 1) {
-            throw (
-                "The selected file is not a recognized Rithmic backup.")
-        }
-
-        $selection =
-            $matches[0]
     }
     elseif ($AskForSelection) {
         Write-Host
@@ -4138,32 +4324,68 @@ function Invoke-RithmicRollbackManager(
 
         Write-Host
         $answer =
-            Read-Host "Backup number to roll back, or Enter to cancel"
+            Read-Host (
+                "Backup number(s), comma/range allowed (example 1,3-5), or Enter to cancel")
 
-        if ([string]::IsNullOrWhiteSpace(
-            $answer)) {
+        $indexes =
+            @(
+                Convert-IndexSelection `
+                    $answer `
+                    $backups.Count
+            )
+
+        if ($indexes.Count -eq 0) {
             return 0
         }
 
-        $number = 0
-
-        if (-not [int]::TryParse(
-            $answer,
-            [ref]$number) -or
-            $number -lt 1 -or
-            $number -gt $backups.Count) {
-
-            throw "Invalid backup selection."
+        foreach ($index in $indexes) {
+            $selections +=
+                $backups[$index]
         }
-
-        $selection =
-            $backups[
-                $number - 1]
     }
     else {
         throw (
-            "Rollback requires -SelectedFile or interactive selection.")
+            "Rollback requires selected backup files or interactive selection.")
     }
+
+    if ($selections.Count -eq 0) {
+        Write-Host
+        Write-Host "No Rithmic backups were selected."
+        return 0
+    }
+
+    $duplicateTargets =
+        @(
+            $selections |
+            Group-Object `
+                TargetName |
+            Where-Object {
+                $_.Count -gt 1
+            }
+        )
+
+    if ($duplicateTargets.Count -gt 0) {
+        $names =
+            @(
+                $duplicateTargets |
+                ForEach-Object {
+                    $_.Name
+                }
+            ) -join ", "
+
+        throw (
+            "A rollback batch can contain only one backup per target. " +
+            "Multiple selected backups map to: " +
+            $names)
+    }
+
+    $selections =
+        @(
+            $selections |
+            Sort-Object `
+                TargetName,
+                ArchiveWriteTime
+        )
 
     if (-not (Wait-ForSierraChartClosed `
             "Rolling back Rithmic data" `
@@ -4171,112 +4393,204 @@ function Invoke-RithmicRollbackManager(
         return 0
     }
 
-    $duplicateReview =
-        Review-RithmicRollbackDuplicates `
-            $ResolvedDataFolder `
-            $null `
-            $(if ($selection.Kind -eq "rollback") {
-                $selection.ArchivePath
+    $selectedRollbackPaths =
+        @(
+            $selections |
+            Where-Object {
+                $_.Kind -eq "rollback"
+            } |
+            ForEach-Object {
+                $_.ArchivePath
             }
-            else {
-                $null
-            }) `
-            ([bool]$AskForSelection)
+        )
 
-    # Refresh inventory after any user-confirmed cleanup.
+    [void](Review-RithmicRollbackDuplicates `
+        $ResolvedDataFolder `
+        $null `
+        ([string[]]$selectedRollbackPaths) `
+        ([bool]$AskForSelection))
+
+    # Refresh backup inventory after any user-confirmed duplicate cleanup.
     $backups =
         Get-RithmicBackupArchives `
             $ResolvedDataFolder
 
-    $targetExists =
-        Test-Path `
-            -LiteralPath $selection.TargetPath `
-            -PathType Leaf
+    $plans =
+        @()
 
-    $alreadyMatches = $false
-    $targetHash = $null
-    $targetLength = 0L
-    $existingUndo = $null
+    foreach ($selection in $selections) {
+        if (-not (
+            Test-Path `
+                -LiteralPath $selection.ArchivePath `
+                -PathType Leaf)) {
 
-    if ($targetExists) {
-        try {
-            $targetHash =
-                [SierraHistoryBridge.ScidBridge]::HashFileSha256(
-                    $selection.TargetPath)
-
-            $targetLength =
-                [long](
-                    Get-Item `
-                        -LiteralPath $selection.TargetPath).Length
-
-            $alreadyMatches =
-                $targetLength -eq
-                    [long]$selection.OriginalBytes -and
-                $targetHash -ieq
-                    [string]$selection.Sha256
-        }
-        catch {
-            $alreadyMatches = $false
-            $targetHash = $null
-            $targetLength = 0L
+            throw (
+                "Selected rollback backup is no longer available: " +
+                $selection.ArchivePath)
         }
 
-        if ($targetHash) {
-            $existingUndo =
-                Get-ExactRithmicRollbackBackup `
-                    $ResolvedDataFolder `
-                    $selection.TargetName `
-                    $targetLength `
-                    $targetHash `
+        $targetExists =
+            Test-Path `
+                -LiteralPath $selection.TargetPath `
+                -PathType Leaf
+
+        $alreadyMatches =
+            $false
+
+        $targetHash =
+            $null
+
+        $targetLength =
+            0L
+
+        $existingUndo =
+            $null
+
+        if ($targetExists) {
+            try {
+                $targetLength =
+                    [long](
+                        Get-Item `
+                            -LiteralPath $selection.TargetPath).Length
+
+                $targetHash =
+                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                        $selection.TargetPath)
+
+                $alreadyMatches =
+                    $targetLength -eq
+                        [long]$selection.OriginalBytes -and
+                    $targetHash -ieq
+                        [string]$selection.Sha256
+            }
+            catch {
+                $alreadyMatches =
+                    $false
+
+                $targetHash =
                     $null
+
+                $targetLength =
+                    0L
+            }
+
+            if ($targetHash) {
+                $existingUndo =
+                    Get-ExactRithmicRollbackBackup `
+                        $ResolvedDataFolder `
+                        $selection.TargetName `
+                        $targetLength `
+                        $targetHash `
+                        $null
+            }
         }
+
+        $plans +=
+            [pscustomobject]@{
+                Backup =
+                    $selection
+                TargetExists =
+                    $targetExists
+                AlreadyMatches =
+                    $alreadyMatches
+                TargetHash =
+                    $targetHash
+                TargetLength =
+                    $targetLength
+                ExistingUndo =
+                    $existingUndo
+            }
     }
 
     Write-Host
-    Write-Host "Rollback plan:"
-    Write-Host "  Backup: $($selection.ArchivePath)"
-    Write-Host "  Type:   $($selection.Kind)"
-    Write-Host "  Target: $($selection.TargetPath)"
     Write-Host (
-        "  Size:   {0}" -f
-        (Format-StorageBytes `
-            $selection.OriginalBytes))
+        "Rollback plan: {0} backup(s)" -f
+        $plans.Count)
 
-    if ($alreadyMatches) {
+    $planIndex =
+        0
+
+    foreach ($plan in $plans) {
+        $planIndex++
+
+        $selection =
+            $plan.Backup
+
+        $state =
+            if ($plan.AlreadyMatches) {
+                "already current"
+            }
+            elseif (-not $plan.TargetExists) {
+                "target missing; recreate"
+            }
+            elseif ($plan.ExistingUndo) {
+                "undo already protected"
+            }
+            else {
+                "preserve current target first"
+            }
+
+        Write-Host (
+            "  [{0}] {1} <- {2} | {3} | {4} | {5}" -f
+            $planIndex,
+            $selection.TargetName,
+            ([IO.Path]::GetFileName(
+                $selection.ArchivePath)),
+            $selection.Kind,
+            (Format-StorageBytes `
+                $selection.OriginalBytes),
+            $state)
+
+        Write-UtilityLog `
+            "INFO" `
+            "PLAN" `
+            (
+                "operation=Rollback; index={0}; kind={1}; backup={2}; target={3}; original_bytes={4}; target_exists={5}; target_already_matches={6}; existing_undo={7}" -f
+                $planIndex,
+                $selection.Kind,
+                $selection.ArchivePath,
+                $selection.TargetPath,
+                $selection.OriginalBytes,
+                $plan.TargetExists,
+                $plan.AlreadyMatches,
+                $(if ($plan.ExistingUndo) {
+                    $plan.ExistingUndo.ArchivePath
+                }
+                else {
+                    "none"
+                }))
+    }
+
+    Write-Host (
+        "  Backup retention: selected backup(s) are kept after rollback.")
+
+    $activePlans =
+        @(
+            $plans |
+            Where-Object {
+                -not $_.AlreadyMatches
+            }
+        )
+
+    $alreadyCurrent =
+        $plans.Count -
+        $activePlans.Count
+
+    if ($activePlans.Count -eq 0) {
         Write-Host
         Write-Host (
-            "Target already matches this backup. No rollback is required.")
+            "All selected target(s) already match their backups. No rollback is required.")
+
+        Write-UtilityLog `
+            "INFO" `
+            "SUMMARY" `
+            (
+                "operation=Rollback; selected={0}; restored=0; already_current={1}; failed=0" -f
+                $plans.Count,
+                $alreadyCurrent)
+
         return 0
     }
-
-    if ($targetExists -and $existingUndo) {
-        Write-Host (
-            "  Safety: current target already has a verified rollback backup.")
-    }
-    elseif ($targetExists) {
-        Write-Host (
-            "  Safety: current target will be preserved before replacement.")
-    }
-    else {
-        Write-Host (
-            "  Safety: target is missing; the selected backup will recreate it.")
-    }
-
-    Write-Host (
-        "  Backup retention: selected backup is kept after rollback.")
-
-    Write-UtilityLog `
-        "INFO" `
-        "PLAN" `
-        (
-            "operation=Rollback; kind={0}; backup={1}; target={2}; original_bytes={3}; target_exists={4}; target_already_matches={5}; existing_undo={6}" -f
-            $selection.Kind,
-            $selection.ArchivePath,
-            $selection.TargetPath,
-            $selection.OriginalBytes,
-            $targetExists,
-            $alreadyMatches,
-            $(if ($existingUndo) { $existingUndo.ArchivePath } else { "none" }))
 
     if ($DryRun) {
         Write-Host
@@ -4287,7 +4601,8 @@ function Invoke-RithmicRollbackManager(
     if (-not $Yes) {
         $answer =
             Read-Host (
-                "Roll back $($selection.TargetName) from this backup? [y/N]")
+                "Roll back {0} target(s) from the selected backup(s)? [y/N]" -f
+                $activePlans.Count)
 
         if ($answer.Trim().ToLowerInvariant() -notin @(
             "y",
@@ -4298,73 +4613,56 @@ function Invoke-RithmicRollbackManager(
         }
     }
 
-    $requiredBytes =
-        [long]$selection.OriginalBytes +
-        256MB
-
-    $freeBytes =
-        Get-AvailableFreeBytes `
-            $ResolvedDataFolder
-
-    if ($freeBytes -ge 0 -and
-        $freeBytes -lt $requiredBytes) {
-
-        throw (
-            "Insufficient free space for verified rollback. Need about " +
-            (Format-StorageBytes $requiredBytes) +
-            "; available " +
-            (Format-StorageBytes $freeBytes) +
-            ".")
-    }
-
     $before =
         Get-StorageSnapshot `
             $ResolvedDataFolder
 
-    $undoArchive = $null
-    $undoReused = $false
+    $restored =
+        0
 
-    if ($targetExists) {
-        Write-Host
+    $failed =
+        0
 
-        if ($existingUndo) {
-            $undoArchive =
-                $existingUndo.ArchivePath
+    $undoArchives =
+        @()
 
-            $undoReused =
-                $true
+    foreach ($plan in $activePlans) {
+        $selection =
+            $plan.Backup
 
-            Write-Host (
-                "Using existing undo backup: $undoArchive")
-        }
-        else {
-            Write-Host (
-                "Preserving current target before rollback...")
+        $status =
+            "Rollback $($selection.TargetName)"
 
-            $undoArchive =
-                New-RithmicUndoArchive `
-                    $selection `
+        $undoArchive =
+            $null
+
+        $undoReused =
+            $false
+
+        try {
+            $requiredBytes =
+                [long]$selection.OriginalBytes +
+                256MB
+
+            $freeBytes =
+                Get-AvailableFreeBytes `
                     $ResolvedDataFolder
 
-            $duplicateUndo =
-                Get-ExactRithmicRollbackBackup `
-                    $ResolvedDataFolder `
-                    $selection.TargetName `
-                    $targetLength `
-                    $targetHash `
-                    $undoArchive
+            if ($freeBytes -ge 0 -and
+                $freeBytes -lt $requiredBytes) {
 
-            if ($duplicateUndo) {
-                $postCreateReview =
-                    Review-RithmicRollbackDuplicates `
-                        $ResolvedDataFolder `
-                        $selection.TargetName `
-                        $duplicateUndo.ArchivePath `
-                        ([bool]$AskForSelection)
+                throw (
+                    "Insufficient free space for verified rollback. Need about " +
+                    (Format-StorageBytes $requiredBytes) +
+                    "; available " +
+                    (Format-StorageBytes $freeBytes) +
+                    ".")
+            }
 
-                if ($postCreateReview.Cleared) {
+            if ($plan.TargetExists) {
+                if ($plan.ExistingUndo) {
                     $undoArchive =
-                        $duplicateUndo.ArchivePath
+                        $plan.ExistingUndo.ArchivePath
 
                     $undoReused =
                         $true
@@ -4374,93 +4672,158 @@ function Invoke-RithmicRollbackManager(
                 }
                 else {
                     Write-Host (
+                        "Preserving {0} before rollback..." -f
+                        $selection.TargetName)
+
+                    $undoArchive =
+                        New-RithmicUndoArchive `
+                            $selection `
+                            $ResolvedDataFolder
+
+                    if ($plan.TargetHash) {
+                        $duplicateUndo =
+                            Get-ExactRithmicRollbackBackup `
+                                $ResolvedDataFolder `
+                                $selection.TargetName `
+                                $plan.TargetLength `
+                                $plan.TargetHash `
+                                $undoArchive
+
+                        if ($duplicateUndo) {
+                            $preserve =
+                                @(
+                                    $selectedRollbackPaths +
+                                    @(
+                                        $duplicateUndo.ArchivePath
+                                    )
+                                )
+
+                            $postCreateReview =
+                                Review-RithmicRollbackDuplicates `
+                                    $ResolvedDataFolder `
+                                    $selection.TargetName `
+                                    ([string[]]$preserve) `
+                                    ([bool]$AskForSelection)
+
+                            $duplicateStillExists =
+                                Test-Path `
+                                    -LiteralPath $duplicateUndo.ArchivePath `
+                                    -PathType Leaf
+
+                            if ($postCreateReview.Cleared -and
+                                $duplicateStillExists) {
+
+                                $undoArchive =
+                                    $duplicateUndo.ArchivePath
+
+                                $undoReused =
+                                    $true
+                            }
+                        }
+                    }
+
+                    Write-Host (
                         "Undo backup: $undoArchive")
                 }
+
+                if ($undoArchives -notcontains
+                    $undoArchive) {
+
+                    $undoArchives +=
+                        $undoArchive
+                }
+
+                Write-UtilityLog `
+                    "INFO" `
+                    "UNDO" `
+                    (
+                        "target={0}; backup={1}; reused={2}; status=OK" -f
+                        $selection.TargetPath,
+                        $undoArchive,
+                        $undoReused)
             }
-            else {
-                Write-Host (
-                    "Undo backup: $undoArchive")
+
+            [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+                $status)
+
+            $isScid =
+                $selection.Extension -eq
+                "scid"
+
+            $result =
+                [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
+                    $selection.ArchivePath,
+                    $selection.TargetPath,
+                    [long]$selection.OriginalBytes,
+                    [string]$selection.Sha256,
+                    [long]$selection.OriginalWriteTicks,
+                    [bool]$isScid,
+                    [bool]$plan.TargetExists)
+
+            [void](Invalidate-BridgeStateForRithmicTarget `
+                $selection.TargetPath `
+                $selection.Extension)
+
+            $rollbackStatus =
+                "$status | OK"
+
+            if ($result.CompressionSupported -and
+                -not $result.CompressionEnabled) {
+
+                $rollbackStatus +=
+                    " | compression warning"
             }
+
+            [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                $rollbackStatus)
+
+            $restored++
+
+            Write-UtilityLog `
+                "INFO" `
+                "ROLLBACK" `
+                (
+                    "target={0}; backup={1}; restored_bytes={2}; sha256={3}; replace_existing={4}; undo_backup={5}; undo_reused={6}; compression_supported={7}; compressed={8}; allocated_bytes={9}; state_invalidated=true; status=OK" -f
+                    $selection.TargetName,
+                    $selection.ArchivePath,
+                    $result.RestoredBytes,
+                    $selection.Sha256,
+                    $plan.TargetExists,
+                    $(if ($undoArchive) {
+                        $undoArchive
+                    }
+                    else {
+                        "none"
+                    }),
+                    $undoReused,
+                    $result.CompressionSupported,
+                    $result.CompressionEnabled,
+                    $result.AllocatedBytes)
         }
+        catch {
+            $failed++
 
-        Write-UtilityLog `
-            "INFO" `
-            "UNDO" `
-            (
-                "target={0}; backup={1}; reused={2}; status=OK" -f
-                $selection.TargetPath,
-                $undoArchive,
-                $undoReused)
-    }
+            try {
+                [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    "$status | FAILED")
+            }
+            catch { }
 
-    $status =
-        "Rollback $($selection.TargetName)"
+            Write-Host (
+                "  {0}: {1}" -f
+                $selection.TargetName,
+                $_.Exception.Message) `
+                -ForegroundColor Red
 
-    try {
-        [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
-            $status)
-
-        $isScid =
-            $selection.Extension -eq
-            "scid"
-
-        $result =
-            [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
-                $selection.ArchivePath,
-                $selection.TargetPath,
-                [long]$selection.OriginalBytes,
-                [string]$selection.Sha256,
-                [long]$selection.OriginalWriteTicks,
-                [bool]$isScid,
-                [bool]$targetExists)
-
-        [void](Invalidate-BridgeStateForRithmicTarget `
-            $selection.TargetPath `
-            $selection.Extension)
-
-        $rollbackStatus =
-            "$status | OK"
-
-        if ($result.CompressionSupported -and
-            -not $result.CompressionEnabled) {
-
-            $rollbackStatus +=
-                " | compression warning"
+            Write-UtilityLog `
+                "ERROR" `
+                "ROLLBACK" `
+                (
+                    "target={0}; backup={1}; status=FAILED; error={2}" -f
+                    $selection.TargetName,
+                    $selection.ArchivePath,
+                    $_.Exception.Message)
         }
-
-        [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-            $rollbackStatus)
-
-        Write-UtilityLog `
-            "INFO" `
-            "ROLLBACK" `
-            (
-                "target={0}; backup={1}; restored_bytes={2}; sha256={3}; replace_existing={4}; undo_backup={5}; undo_reused={6}; compression_supported={7}; compressed={8}; allocated_bytes={9}; state_invalidated=true; status=OK" -f
-                $selection.TargetName,
-                $selection.ArchivePath,
-                $result.RestoredBytes,
-                $selection.Sha256,
-                $targetExists,
-                $(if ($undoArchive) { $undoArchive } else { "none" }),
-                $undoReused,
-                $result.CompressionSupported,
-                $result.CompressionEnabled,
-                $result.AllocatedBytes)
-    }
-    catch {
-        [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-            "$status | FAILED")
-
-        Write-UtilityLog `
-            "ERROR" `
-            "ROLLBACK" `
-            (
-                "target={0}; backup={1}; status=FAILED; error={2}" -f
-                $selection.TargetName,
-                $selection.ArchivePath,
-                $_.Exception.Message)
-
-        throw
     }
 
     $after =
@@ -4469,34 +4832,49 @@ function Invoke-RithmicRollbackManager(
 
     Write-Host
     Write-Host (
-        "Rollback complete: {0}" -f
-        $selection.TargetName)
+        "Rollback: {0} restored | {1} already current | {2} failed" -f
+        $restored,
+        $alreadyCurrent,
+        $failed)
 
     Write-Host (
-        "Selected backup retained: {0}" -f
-        $selection.ArchivePath)
+        "Selected backups retained: {0}" -f
+        $plans.Count)
 
-    if ($undoArchive) {
+    if ($undoArchives.Count -gt 0) {
         Write-Host (
-            "Undo backup retained:     {0}" -f
-            $undoArchive)
+            "Undo backups retained:    {0}" -f
+            $undoArchives.Count)
     }
 
-    Write-Host (
-        "Bridge state for the restored target was invalidated; the next Update will re-evaluate it.")
+    if ($restored -gt 0) {
+        Write-Host (
+            "Bridge state for restored target(s) was invalidated; the next Update will re-evaluate them.")
+    }
 
     Show-StorageDelta `
         $before `
         $after
 
     Write-UtilityLog `
-        "INFO" `
+        $(if ($failed -eq 0) {
+            "INFO"
+        }
+        else {
+            "ERROR"
+        }) `
         "SUMMARY" `
         (
-            "operation=Rollback; target={0}; selected_backup_retained=true; undo_backup={1}; undo_reused={2}" -f
-            $selection.TargetName,
-            $(if ($undoArchive) { $undoArchive } else { "none" }),
-            $undoReused)
+            "operation=Rollback; selected={0}; restored={1}; already_current={2}; failed={3}; undo_backups={4}; selected_backups_retained=true" -f
+            $plans.Count,
+            $restored,
+            $alreadyCurrent,
+            $failed,
+            $undoArchives.Count)
+
+    if ($failed -gt 0) {
+        return 2
+    }
 
     return 0
 }
@@ -9097,6 +9475,341 @@ function Invoke-SierraHistoryBridge {
     return 0
 }
 
+function Invoke-ExplorerSelectionDispatch {
+    if ([string]::IsNullOrWhiteSpace(
+            $DispatchMode)) {
+
+        throw "Explorer dispatch requires an operation mode."
+    }
+
+    if ([string]::IsNullOrWhiteSpace(
+            $SelectedFile)) {
+
+        throw "Explorer dispatch requires a selected file."
+    }
+
+    $resolvedDataFolder =
+        [IO.Path]::GetFullPath(
+            $DataFolder.Trim().Trim('"'))
+
+    $selectedPath =
+        [IO.Path]::GetFullPath(
+            $SelectedFile.Trim().Trim('"'))
+
+    $identity =
+        (
+            $DispatchMode.ToUpperInvariant() +
+            "|" +
+            $resolvedDataFolder.ToUpperInvariant()
+        )
+
+    $sha =
+        [Security.Cryptography.SHA256]::Create()
+
+    try {
+        $hash =
+            [BitConverter]::ToString(
+                $sha.ComputeHash(
+                    [Text.Encoding]::UTF8.GetBytes(
+                        $identity))).Replace(
+                            "-",
+                            "")
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    $queueRoot =
+        Join-Path `
+            $AppDataDirectory `
+            "ExplorerQueue"
+
+    $sessionDirectory =
+        Join-Path `
+            $queueRoot `
+            (
+                $DispatchMode.ToLowerInvariant() +
+                "-" +
+                $hash.Substring(
+                    0,
+                    20)
+            )
+
+    New-Item `
+        -ItemType Directory `
+        -Path $sessionDirectory `
+        -Force |
+        Out-Null
+
+    # Never carry an interrupted Explorer selection into a later operation.
+    $staleCutoff =
+        [DateTime]::UtcNow.AddSeconds(
+            -10)
+
+    foreach ($stale in @(
+        Get-ChildItem `
+            -LiteralPath $sessionDirectory `
+            -File `
+            -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.LastWriteTimeUtc -lt
+                $staleCutoff -and
+            (
+                $_.Name.EndsWith(
+                    ".item",
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                $_.Name.StartsWith(
+                    "selection-",
+                    [StringComparison]::OrdinalIgnoreCase)
+            )
+        }
+    )) {
+        Remove-Item `
+            -LiteralPath $stale.FullName `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+
+    # Selection items are individual files so concurrent Explorer invocations
+    # never write to the same stream.
+    $itemPath =
+        Join-Path `
+            $sessionDirectory `
+            (
+                [guid]::NewGuid().ToString(
+                    "N") +
+                ".item"
+            )
+
+    [IO.File]::WriteAllText(
+        $itemPath,
+        $selectedPath,
+        [Text.Encoding]::UTF8)
+
+    $lockPath =
+        Join-Path `
+            $sessionDirectory `
+            "leader.lock"
+
+    $lockStream =
+        $null
+
+    $leader =
+        $false
+
+    $waitDeadline =
+        [DateTime]::UtcNow.AddSeconds(
+            5)
+
+    while (-not $leader) {
+        try {
+            $lockStream =
+                [IO.File]::Open(
+                    $lockPath,
+                    [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::ReadWrite,
+                    [IO.FileShare]::None)
+
+            $leader =
+                $true
+        }
+        catch [IO.IOException] {
+            if (-not (
+                Test-Path `
+                    -LiteralPath $itemPath `
+                    -PathType Leaf)) {
+
+                return 0
+            }
+
+            if ([DateTime]::UtcNow -ge
+                $waitDeadline) {
+
+                try {
+                    $lockInfo =
+                        Get-Item `
+                            -LiteralPath $lockPath `
+                            -ErrorAction Stop
+
+                    if ($lockInfo.LastWriteTimeUtc -lt
+                        [DateTime]::UtcNow.AddSeconds(
+                            -10)) {
+
+                        Remove-Item `
+                            -LiteralPath $lockPath `
+                            -Force `
+                            -ErrorAction Stop
+                    }
+                }
+                catch { }
+
+                $waitDeadline =
+                    [DateTime]::UtcNow.AddSeconds(
+                        5)
+            }
+
+            Start-Sleep `
+                -Milliseconds 75
+        }
+    }
+
+    $manifestPath =
+        $null
+
+    try {
+        # Explorer invokes a legacy Player verb once per selected item. Wait
+        # for a short quiet period so one visible bridge process receives the
+        # complete selection.
+        $lastCount =
+            -1
+
+        $lastChange =
+            [DateTime]::UtcNow
+
+        $absoluteDeadline =
+            [DateTime]::UtcNow.AddSeconds(
+                3)
+
+        while ([DateTime]::UtcNow -lt
+            $absoluteDeadline) {
+
+            $count =
+                @(
+                    Get-ChildItem `
+                        -LiteralPath $sessionDirectory `
+                        -Filter "*.item" `
+                        -File `
+                        -ErrorAction SilentlyContinue
+                ).Count
+
+            if ($count -ne
+                $lastCount) {
+
+                $lastCount =
+                    $count
+
+                $lastChange =
+                    [DateTime]::UtcNow
+            }
+            elseif ((
+                [DateTime]::UtcNow -
+                $lastChange).TotalMilliseconds -ge
+                500) {
+
+                break
+            }
+
+            Start-Sleep `
+                -Milliseconds 75
+        }
+
+        $itemFiles =
+            @(
+                Get-ChildItem `
+                    -LiteralPath $sessionDirectory `
+                    -Filter "*.item" `
+                    -File `
+                    -ErrorAction SilentlyContinue |
+                Sort-Object `
+                    CreationTimeUtc,
+                    Name
+            )
+
+        $paths =
+            @()
+
+        foreach ($item in $itemFiles) {
+            try {
+                $value =
+                    [IO.File]::ReadAllText(
+                        $item.FullName,
+                        [Text.Encoding]::UTF8).Trim()
+
+                if (-not [string]::IsNullOrWhiteSpace(
+                        $value) -and
+                    $paths -notcontains
+                        $value) {
+
+                    $paths +=
+                        $value
+                }
+
+                Remove-Item `
+                    -LiteralPath $item.FullName `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            }
+            catch { }
+        }
+
+        if ($paths.Count -eq 0) {
+            return 0
+        }
+
+        $manifestPath =
+            Join-Path `
+                $sessionDirectory `
+                (
+                    "selection-" +
+                    [guid]::NewGuid().ToString(
+                        "N") +
+                    ".txt"
+                )
+
+        [IO.File]::WriteAllLines(
+            $manifestPath,
+            [string[]]$paths,
+            [Text.Encoding]::UTF8)
+    }
+    finally {
+        if ($lockStream) {
+            try {
+                $lockStream.Dispose()
+            }
+            catch { }
+        }
+
+        Remove-Item `
+            -LiteralPath $lockPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+
+    if ([string]::IsNullOrWhiteSpace(
+            $manifestPath)) {
+
+        return 0
+    }
+
+    $powerShellExe =
+        Join-Path `
+            $env:SystemRoot `
+            "System32\WindowsPowerShell\v1.0\powershell.exe"
+
+    $arguments =
+        '-NoLogo -NoProfile -ExecutionPolicy Bypass' +
+        ' -File "' +
+        $PSCommandPath +
+        '"' +
+        ' -DataFolder "' +
+        $resolvedDataFolder +
+        '"' +
+        ' -Mode ' +
+        $DispatchMode +
+        ' -SelectionFile "' +
+        $manifestPath +
+        '"' +
+        ' -Interactive'
+
+    Start-Process `
+        -FilePath $powerShellExe `
+        -ArgumentList $arguments `
+        -WindowStyle Normal |
+        Out-Null
+
+    return 0
+}
+
 function Invoke-SierraHistoryUtilityMode {
     Show-Banner
 
@@ -9154,11 +9867,17 @@ function Invoke-SierraHistoryUtilityMode {
 $exitCode = 0
 
 try {
-    if ($Mode -eq "Update") {
-        $exitCode = Invoke-SierraHistoryBridge
+    if ($Mode -eq "Explorer") {
+        $exitCode =
+            Invoke-ExplorerSelectionDispatch
+    }
+    elseif ($Mode -eq "Update") {
+        $exitCode =
+            Invoke-SierraHistoryBridge
     }
     else {
-        $exitCode = Invoke-SierraHistoryUtilityMode
+        $exitCode =
+            Invoke-SierraHistoryUtilityMode
     }
 }
 catch {
@@ -9189,7 +9908,9 @@ finally {
         }
     }
 
-    if ($Interactive) {
+    if ($Interactive -and
+        $Mode -ne "Explorer") {
+
         Write-Host
         Read-Host "Press Enter to close" | Out-Null
     }
