@@ -176,9 +176,11 @@ A manual rollback:
 1. requires Sierra Chart to be closed
 2. identifies the target from the verified backup
 3. compares the current target to the selected backup
-4. saves a different current target as a manual undo backup
-5. restores and verifies the selected backup
-6. invalidates the corresponding saved state
+4. reuses an exact rollback copy when one already protects the current target,
+   otherwise creates a verified manual undo backup
+5. authorizes atomic replacement only after the existing target is protected
+6. restores and verifies the selected backup
+7. invalidates the corresponding saved state
 
 The selected backup is retained.
 

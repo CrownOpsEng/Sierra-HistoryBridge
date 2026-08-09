@@ -112,8 +112,9 @@ choose **Rollback Rithmic**.
 
 Interactive rollback lists available backups and restores one selection.
 
-If the current target differs from the selected backup, the current target is
-first saved as a timestamped manual undo backup in `Rollbacks`.
+If the current target differs from the selected backup, the bridge first
+ensures an exact verified undo backup exists in `Rollbacks`. An existing exact
+rollback copy is reused; otherwise a timestamped manual undo backup is created.
 
 The selected backup is retained. The corresponding saved bridge state is
 invalidated so the next Update evaluates the restored target normally.

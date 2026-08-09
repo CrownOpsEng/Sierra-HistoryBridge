@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.26 - 2026-08-08
+## v0.0.27 - 2026-08-08
 
 Experimental release.
 
@@ -29,7 +29,7 @@ Experimental release.
 - flat SC Data archive
 - flat Rithmic baseline and rollback categories
 - verified GZip archive/restore
-- Rithmic rollback with manual undo backup
+- Rithmic rollback with verified undo protection and atomic target replacement
 - restore conflict preservation
 - temporary recovery staging
 - bridge-owned empty-directory cleanup

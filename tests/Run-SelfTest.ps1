@@ -361,6 +361,39 @@ try {
 
     Write-Host "PASS: compressed SCID restore round-trip"
 
+    # Rollback replacement path: a verified archive must be able to atomically
+    # replace an existing destination when replacement has been explicitly
+    # authorized.
+    $replaceTarget =
+        Join-Path `
+            $temp `
+            "NQU6-replace.CME.scid"
+
+    [IO.File]::WriteAllBytes(
+        $replaceTarget,
+        [byte[]](1, 2, 3, 4))
+
+    [void][SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
+        $baselineArchive,
+        $replaceTarget,
+        [long]$baselineMeta["original_bytes"],
+        [string]$baselineMeta["sha256"],
+        [long]$baselineMeta["original_write_ticks"],
+        $true,
+        $true)
+
+    $replaceHash =
+        [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+            $replaceTarget)
+
+    if ($replaceHash -ne
+        [string]$baselineMeta["sha256"]) {
+
+        throw "Authorized archive replacement failed."
+    }
+
+    Write-Host "PASS: verified archive replacement"
+
     $mergeResult =
         [SierraHistoryBridge.ScidBridge]::Convert(
             $mergeSource,

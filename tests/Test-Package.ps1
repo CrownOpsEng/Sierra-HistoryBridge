@@ -511,6 +511,30 @@ if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "docs\RELEASE.md"))) {
     throw "Documentation regression: release guide is missing."
 }
 
+
+$rollbackStart =
+    $appText.IndexOf(
+        'function Invoke-RithmicRollbackManager')
+
+$rollbackEnd =
+    $appText.IndexOf(
+        'function Get-RithmicBaselineArchives',
+        $rollbackStart)
+
+$rollbackText =
+    $appText.Substring(
+        $rollbackStart,
+        $rollbackEnd - $rollbackStart)
+
+if (-not $rollbackText.Contains('[bool]$targetExists')) {
+    throw "Rollback must authorize verified replacement of a protected existing target."
+}
+
+if ($rollbackText -notlike '*existingUndo*' -or
+    $rollbackText -notlike '*Using existing undo backup:*') {
+    throw "Rollback regression: exact existing undo backups are not reused."
+}
+
 $required = @(
     "src\SierraHistoryBridge.ps1",
     "src\ScidBridge.cs",

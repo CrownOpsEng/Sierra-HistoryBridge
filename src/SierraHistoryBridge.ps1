@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.26"
+$Version = "0.0.27"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -3466,6 +3466,9 @@ function Invoke-RithmicRollbackManager(
             -PathType Leaf
 
     $alreadyMatches = $false
+    $targetHash = $null
+    $targetLength = 0L
+    $existingUndo = $null
 
     if ($targetExists) {
         try {
@@ -3486,6 +3489,34 @@ function Invoke-RithmicRollbackManager(
         }
         catch {
             $alreadyMatches = $false
+            $targetHash = $null
+            $targetLength = 0L
+        }
+
+        if ($targetHash) {
+            $existingUndo =
+                @(
+                    $backups |
+                    Where-Object {
+                        $_.Kind -eq "rollback" -and
+                        $_.TargetName -ieq
+                            $selection.TargetName -and
+                        [long]$_.OriginalBytes -eq
+                            $targetLength -and
+                        [string]$_.Sha256 -ieq
+                            $targetHash
+                    } |
+                    Select-Object -First 1
+                )
+
+            if ($existingUndo.Count -gt 0) {
+                $existingUndo =
+                    $existingUndo[0]
+            }
+            else {
+                $existingUndo =
+                    $null
+            }
         }
     }
 
@@ -3506,9 +3537,13 @@ function Invoke-RithmicRollbackManager(
         return 0
     }
 
-    if ($targetExists) {
+    if ($targetExists -and $existingUndo) {
         Write-Host (
-            "  Safety: current target will be preserved as a new manual rollback first.")
+            "  Safety: current target already has a verified rollback backup.")
+    }
+    elseif ($targetExists) {
+        Write-Host (
+            "  Safety: current target will be preserved before replacement.")
     }
     else {
         Write-Host (
@@ -3522,13 +3557,14 @@ function Invoke-RithmicRollbackManager(
         "INFO" `
         "PLAN" `
         (
-            "operation=Rollback; kind={0}; backup={1}; target={2}; original_bytes={3}; target_exists={4}; target_already_matches={5}" -f
+            "operation=Rollback; kind={0}; backup={1}; target={2}; original_bytes={3}; target_exists={4}; target_already_matches={5}; existing_undo={6}" -f
             $selection.Kind,
             $selection.ArchivePath,
             $selection.TargetPath,
             $selection.OriginalBytes,
             $targetExists,
-            $alreadyMatches)
+            $alreadyMatches,
+            $(if ($existingUndo) { $existingUndo.ArchivePath } else { "none" }))
 
     if ($DryRun) {
         Write-Host
@@ -3574,27 +3610,42 @@ function Invoke-RithmicRollbackManager(
             $ResolvedDataFolder
 
     $undoArchive = $null
+    $undoReused = $false
 
     if ($targetExists) {
         Write-Host
-        Write-Host (
-            "Preserving current target before rollback...")
 
-        $undoArchive =
-            New-RithmicUndoArchive `
-                $selection `
-                $ResolvedDataFolder
+        if ($existingUndo) {
+            $undoArchive =
+                $existingUndo.ArchivePath
 
-        Write-Host (
-            "Undo backup: $undoArchive")
+            $undoReused =
+                $true
+
+            Write-Host (
+                "Using existing undo backup: $undoArchive")
+        }
+        else {
+            Write-Host (
+                "Preserving current target before rollback...")
+
+            $undoArchive =
+                New-RithmicUndoArchive `
+                    $selection `
+                    $ResolvedDataFolder
+
+            Write-Host (
+                "Undo backup: $undoArchive")
+        }
 
         Write-UtilityLog `
             "INFO" `
             "UNDO" `
             (
-                "target={0}; backup={1}; status=OK" -f
+                "target={0}; backup={1}; reused={2}; status=OK" -f
                 $selection.TargetPath,
-                $undoArchive)
+                $undoArchive,
+                $undoReused)
     }
 
     $status =
@@ -3616,7 +3667,7 @@ function Invoke-RithmicRollbackManager(
                 [string]$selection.Sha256,
                 [long]$selection.OriginalWriteTicks,
                 [bool]$isScid,
-                $false)
+                [bool]$targetExists)
 
         [void](Invalidate-BridgeStateForRithmicTarget `
             $selection.TargetPath `
@@ -3629,11 +3680,14 @@ function Invoke-RithmicRollbackManager(
             "INFO" `
             "ROLLBACK" `
             (
-                "target={0}; backup={1}; restored_bytes={2}; sha256={3}; state_invalidated=true; status=OK" -f
+                "target={0}; backup={1}; restored_bytes={2}; sha256={3}; replace_existing={4}; undo_backup={5}; undo_reused={6}; state_invalidated=true; status=OK" -f
                 $selection.TargetName,
                 $selection.ArchivePath,
                 $result.RestoredBytes,
-                $selection.Sha256)
+                $selection.Sha256,
+                $targetExists,
+                $(if ($undoArchive) { $undoArchive } else { "none" }),
+                $undoReused)
     }
     catch {
         [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -3681,9 +3735,10 @@ function Invoke-RithmicRollbackManager(
         "INFO" `
         "SUMMARY" `
         (
-            "operation=Rollback; target={0}; selected_backup_retained=true; undo_backup={1}" -f
+            "operation=Rollback; target={0}; selected_backup_retained=true; undo_backup={1}; undo_reused={2}" -f
             $selection.TargetName,
-            $(if ($undoArchive) { $undoArchive } else { "none" }))
+            $(if ($undoArchive) { $undoArchive } else { "none" }),
+            $undoReused)
 
     return 0
 }
