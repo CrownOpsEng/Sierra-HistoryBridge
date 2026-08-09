@@ -1,148 +1,112 @@
 # Troubleshooting
 
-## Explorer says "Application not found"
+## Setup cannot find Sierra Chart Data
 
-Re-run:
+Run the bridge directly with:
+
+```text
+run.cmd
+```
+
+Enter the Sierra Chart Data folder when prompted, then run Repair to store the
+correct location.
+
+## Explorer commands do not appear
+
+Run:
 
 ```text
 repair.cmd
 ```
 
-or:
+For an all-users installation, approve the administrator prompt.
 
-```text
-setup.cmd
-```
+On Windows 11 check **Show more options**.
 
-and choose **Repair / update**.
+Explorer commands are intentionally scoped to the configured Data and Archive
+paths.
 
-The repair process rewrites the Explorer integration to point directly to the installed Windows PowerShell executable and installed bridge script.
+## Sierra Chart is running during archive, restore, or rollback
 
-## The Explorer command is missing
+Close every Sierra Chart instance and press Enter in the bridge window.
 
-Run a repair.
+These operations move or replace files that Sierra Chart may have open.
 
-On Windows 11, also check **Show more options** in the context menu.
+## A live SCID cannot be updated
 
-## The wrong Sierra Chart folder is selected
+Use the live-file prompt to:
 
-Run the bridge directly with `run.cmd` and enter the correct Sierra Chart `Data` folder when prompted.
+- disconnect Sierra Chart and close the affected chartbooks
+- close Sierra Chart
+- skip the live SCID and continue
+- cancel
 
-The selected folder is remembered.
+A skipped SCID remains eligible on the next run.
 
-## A symbol group is "unverified"
+## Full validation takes a long time
 
-At least one SC Data source and Rithmic target in that root/exchange group need overlapping timestamps.
+Full validation scans complete SCID files.
 
-Example:
+When prompted, choose No to defer those SCIDs and continue without changing
+them.
 
-```text
-NQU26-CME.scid
-NQU6.CME.scid
-```
+## Source changed during validation or conversion
 
-After a scale is verified, it is remembered for the rest of that symbol group.
+The bridge defers the file when source or target metadata changes during a
+safety-sensitive operation.
 
-## Sierra Chart is open
+Allow the SC Data download or Rithmic write activity to finish, then run Update
+again.
 
-The bridge can scan while Sierra Chart is running, but target files are not replaced while Sierra Chart is open.
+## Insufficient disk space
 
-Close every Sierra Chart instance and continue when prompted.
+SCID conversion requires a full temporary output plus a safety reserve.
 
-## A conversion fails
+Use Storage Report and free space on the Sierra Data drive or move persistent
+Archive/Logs to another drive.
 
-Check:
+## Recovery staging contains files
 
-```text
-SierraChart\Data\SCID_Bridge_Logs
-```
+A file in `SCID_Bridge_Backups` can indicate an interrupted or failed
+replacement.
 
-The previous Rithmic target should remain available as:
+Do not delete it until the corresponding target and operation log have been
+reviewed.
 
-```text
-SierraChart\Data\SCID_Bridge_Backups\<target>.bak
-```
+## Empty archive directory cannot be removed
 
-## Setup, repair, or uninstall fails
+The bridge retries empty-folder cleanup and can defer cleanup until the current
+process exits.
 
-Check:
+Check the matching `cleanup-*.log` if the folder remains.
 
-```text
-%LOCALAPPDATA%\SierraHistoryBridge\setup.log
-```
+A folder that remains locked after the cleanup retry is being held by another
+process.
 
-For an all-users installation, rerun setup and approve the administrator prompt.
+## A rolled-back target changes on the next Update
 
-## Reset remembered settings
+Rollback restores the selected Rithmic backup; it does not disable normal
+bridge management.
 
-Uninstall the application and choose to remove saved application settings.
+The rollback invalidates saved state intentionally. The next Update evaluates
+the restored target against current SC Data.
 
-You can also manually remove:
+## Historical Daily zero-volume rows
 
-```text
-%LOCALAPPDATA%\SierraHistoryBridge\config.json
-%LOCALAPPDATA%\SierraHistoryBridge\state.json
-```
+The bridge preserves source rows exactly.
 
+Zero-volume rows in early Historical Daily data are reported as source-data
+notes. They are not synthesized or silently altered.
 
+## Reporting an integrity problem
 
+Collect:
 
-## Setup reports a C# compiler or assembly-reference error
+- Sierra History Bridge version
+- Windows version
+- Sierra Chart version
+- source and target filenames
+- relevant bridge/preflight/utility log
+- whether Sierra Chart was open
 
-Use the current v0.0.25 package and rerun `setup.cmd`.
-
-The installed SCID engine is compiled with the stock Windows PowerShell 5.1
-`Add-Type -Path` behavior. The converter does not require custom compiler
-parameters, unsafe compilation, LINQ, or optional framework references.
-
-If a compiler error still appears, attach `%LOCALAPPDATA%\SierraHistoryBridge\setup.log`.
-
-
-## Zero-volume warnings in very early NQ Daily history
-
-Do not edit these rows merely to remove Sierra Chart warnings. The bridge treats
-zero-volume Daily rows as source-data quality information and preserves the
-original file exactly.
-
-For continuous back-adjusted history reaching the beginning of E-mini
-Nasdaq-100 trading, Sierra Chart can report zero-volume or missing-date
-conditions because the required early Daily history is incomplete. Reducing the
-continuous chart's loaded history avoids using those dates, but keeping the
-full historical files is valid when the limitation is understood.
-
-
-## CLEANUP WARNING: folder is in use
-
-If this occurs while restoring from File Explorer, older builds could have
-started PowerShell with its working directory inside the selected archive's
-year folder. The bridge was therefore the process preventing its own cleanup.
-
-Current builds move both PowerShell's provider location and the process current
-directory to the Sierra Data base before archive/restore and again before
-pruning. Simply having the folder visible in File Explorer normally does not
-require closing Explorer.
-
-
-## Folder remains locked after restore
-
-If immediate cleanup reports `CLEANUP DEFERRED`, press Enter to close the bridge
-window. A detached helper then retries for up to 30 seconds.
-
-Check the printed `cleanup-*.log` path. If it says `REMOVED`, the lock was tied
-to the original process/context-menu lifetime. If it says `FAILED after parent
-exit`, another process still owns the directory; that log is the useful next
-diagnostic artifact.
-
-Archive, Restore, and Storage now also have their own timestamped operation logs
-in the configured Logs folder.
-
-
-## Rollback target is changed again by Update
-
-Rollback intentionally invalidates bridge state for the restored Rithmic target.
-A later normal Update can therefore determine that SC Data should be applied
-again. This is expected: rollback restores a previous Rithmic state; it does not
-disable future bridge management.
-
-If you want to inspect/use the rolled-back target first, do so before running
-the next normal Update.
+Do not include credentials or unrelated trading records.

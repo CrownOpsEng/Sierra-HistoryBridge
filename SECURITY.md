@@ -1,6 +1,7 @@
 # Security and data integrity
 
-Sierra History Bridge modifies local Sierra Chart market-data files. Data integrity is the primary safety concern.
+Sierra History Bridge modifies local Sierra Chart market-data files. Data
+integrity is the primary safety requirement.
 
 ## Reporting a vulnerability
 
@@ -9,33 +10,42 @@ private vulnerability reporting][private-report]. Do not open a public issue
 when a report contains an unpatched vulnerability, private data, credentials,
 or information that would make exploitation easier.
 
-## Recovery design
+## File replacement
 
-For an existing Rithmic target, conversion is written to a temporary file first. The output is validated before the existing target is replaced, and the previous target is retained as a rolling backup.
+A target is not replaced until temporary output has been written, durably
+flushed, and validated.
 
-## Report a data-integrity problem
+Where rollback evidence is required, the existing Rithmic target is preserved
+in a verified compressed backup.
 
-Include:
+## Archive and restore
 
-- Sierra History Bridge version
-- Windows version
-- Sierra Chart version
-- source and target filenames
-- the latest bridge log
-- the setup log if installation integration is involved
-- whether Sierra Chart was open
-- the smallest copied dataset that reproduces the issue, if it can be shared safely
+Archive files are verified by decompression, byte count, and SHA-256 before the
+source is removed.
 
-Do not include brokerage credentials, account secrets, or unrelated trading records.
+Restore verifies the selected archive and restored output.
 
-## Recovery files
+## Rithmic rollback
 
-Bridge backups are stored under:
+Rollback preserves a different current target as a verified manual undo backup
+before replacement.
 
-```text
-SierraChart\Data\SCID_Bridge_Backups
-```
+The selected rollback backup is retained.
 
-Restore a backup only with Sierra Chart closed.
+## Sensitive information
+
+Do not place brokerage credentials, account secrets, API keys, or unrelated
+trading records in issue reports, logs, or test fixtures.
+
+## Reporting a non-sensitive integrity problem
+
+For an integrity problem, record:
+
+- application version
+- Windows and Sierra Chart versions
+- source/target filenames
+- relevant logs
+- Sierra Chart connection/open state
+- the smallest copied dataset that reproduces the problem
 
 [private-report]: https://github.com/CrownOpsEng/Sierra-HistoryBridge/security/advisories/new

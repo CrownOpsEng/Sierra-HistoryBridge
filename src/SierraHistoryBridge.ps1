@@ -17,11 +17,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.25"
+$Version = "0.0.26"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
 $StatePath = Join-Path $AppDataDirectory "state.json"
+$StateSchemaVersion = 1
 $SourceDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConverterSource = Join-Path $SourceDirectory "ScidBridge.cs"
 
@@ -29,16 +30,18 @@ New-Item -ItemType Directory -Force -Path $AppDataDirectory | Out-Null
 
 $script:DeferredCleanupDirectories = @()
 $script:CleanupDataFolder = $null
-$script:UtilityTranscriptActive = $false
 $script:UtilityLogPath = $null
+$script:UtilityOperation = $null
+$script:UtilityStartedAt = $null
+$script:EarlyUpdateDiagnostics =
+    New-Object System.Collections.Generic.List[string]
 
 function Show-Banner {
     Clear-Host
     Write-Host "================================================================"
     Write-Host " Sierra History Bridge v$Version"
     Write-Host "================================================================"
-    Write-Host "Updates Rithmic-named Sierra Chart intraday and daily files with"
-    Write-Host "SC Data history while preserving newer Rithmic records."
+    Write-Host "Maintains Rithmic history from Sierra Chart SC Data sources."
     Write-Host
 }
 
@@ -353,6 +356,45 @@ function Get-BridgePaths([string]$ResolvedDataFolder) {
     }
 }
 
+function Format-LogRecord(
+    [string]$Level,
+    [string]$Event,
+    [string]$Message) {
+
+    $timestamp =
+        Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+
+    return (
+        "{0} | {1,-5} | {2,-12} | {3}" -f
+        $timestamp,
+        $Level.ToUpperInvariant(),
+        $Event.ToUpperInvariant(),
+        $Message)
+}
+
+function Write-UtilityLog(
+    [string]$Level,
+    [string]$Event,
+    [string]$Message) {
+
+    if ([string]::IsNullOrWhiteSpace(
+        $script:UtilityLogPath)) {
+        return
+    }
+
+    try {
+        Add-Content `
+            -LiteralPath $script:UtilityLogPath `
+            -Value (
+                Format-LogRecord `
+                    $Level `
+                    $Event `
+                    $Message) `
+            -Encoding UTF8
+    }
+    catch { }
+}
+
 function Start-UtilityOperationLog(
     [string]$Operation,
     [string]$ResolvedDataFolder) {
@@ -371,35 +413,47 @@ function Start-UtilityOperationLog(
         Out-Null
 
     $stamp =
-        (Get-Date).ToString(
-            "yyyyMMdd-HHmmss")
-
-    $safeOperation =
-        $Operation.ToLowerInvariant()
+        Get-Date -Format "yyyyMMdd-HHmmss"
 
     $logPath =
         Join-Path `
             $bridgePaths.Logs `
             ("{0}-{1}.log" -f
-                $safeOperation,
+                $Operation.ToLowerInvariant(),
                 $stamp)
 
     try {
-        Start-Transcript `
-            -Path $logPath `
-            -Force |
-            Out-Null
+        $script:UtilityLogPath =
+            $logPath
 
-        $script:UtilityTranscriptActive = $true
-        $script:UtilityLogPath = $logPath
+        $script:UtilityOperation =
+            $Operation
+
+        $script:UtilityStartedAt =
+            Get-Date
+
+        Format-LogRecord `
+            "INFO" `
+            "START" `
+            (
+                "operation={0}; version={1}; data={2}" -f
+                $Operation,
+                $Version,
+                $ResolvedDataFolder) |
+            Set-Content `
+                -LiteralPath $logPath `
+                -Encoding UTF8
 
         Write-Host "Log:       $logPath"
 
         return $logPath
     }
     catch {
+        $script:UtilityLogPath =
+            $null
+
         Write-Host (
-            "LOG WARNING: could not start operation log: " +
+            "Log warning: {0}" -f
             $_.Exception.Message) `
             -ForegroundColor Yellow
 
@@ -407,19 +461,47 @@ function Start-UtilityOperationLog(
     }
 }
 
-function Stop-UtilityOperationLog {
-    if (-not $script:UtilityTranscriptActive) {
+function Stop-UtilityOperationLog(
+    [int]$ExitCode) {
+
+    if ([string]::IsNullOrWhiteSpace(
+        $script:UtilityLogPath)) {
         return
     }
 
-    try {
-        Stop-Transcript |
-            Out-Null
-    }
-    catch { }
+    $elapsed =
+        if ($script:UtilityStartedAt) {
+            ((Get-Date) -
+                $script:UtilityStartedAt).TotalSeconds
+        }
+        else {
+            0
+        }
 
-    $script:UtilityTranscriptActive = $false
+    Write-UtilityLog `
+        $(if ($ExitCode -eq 0) {
+            "INFO"
+        }
+        else {
+            "ERROR"
+        }) `
+        "END" `
+        (
+            "operation={0}; exit_code={1}; elapsed_seconds={2:0.000}" -f
+            $script:UtilityOperation,
+            $ExitCode,
+            $elapsed)
+
+    $script:UtilityLogPath =
+        $null
+
+    $script:UtilityOperation =
+        $null
+
+    $script:UtilityStartedAt =
+        $null
 }
+
 
 function Add-DeferredDirectoryCleanup(
     [string]$Directory,
@@ -507,6 +589,19 @@ $parentPid = __PARENT_PID__
 $payload64 = "__PAYLOAD64__"
 $log64 = "__LOG64__"
 
+function New-CleanupLogLine(
+    [string]$Level,
+    [string]$Event,
+    [string]$Message) {
+
+    return (
+        "{0} | {1,-5} | {2,-12} | {3}" -f
+        (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"),
+        $Level.ToUpperInvariant(),
+        $Event.ToUpperInvariant(),
+        $Message)
+}
+
 $payloadJson =
     [Text.Encoding]::Unicode.GetString(
         [Convert]::FromBase64String(
@@ -525,13 +620,13 @@ $items =
 
 $lines = @()
 $lines +=
-    "Sierra History Bridge deferred cleanup"
-$lines +=
-    "Started UTC: " +
-    (Get-Date).ToUniversalTime().ToString("o")
-$lines +=
-    "Waiting for parent PID: " +
-    $parentPid
+    New-CleanupLogLine `
+        "INFO" `
+        "START" `
+        (
+            "parent_pid={0}; queued_paths={1}" -f
+            $parentPid,
+            $items.Count)
 
 try {
     Wait-Process `
@@ -550,10 +645,6 @@ foreach ($item in $items) {
     $root =
         [IO.Path]::GetFullPath(
             [string]$item.ProtectedRoot).TrimEnd('\')
-
-    $lines +=
-        "Cleanup root: " +
-        $root
 
     while (
         -not $current.Equals(
@@ -595,8 +686,13 @@ foreach ($item in $items) {
 
         if ($remaining.Count -gt 0) {
             $lines +=
-                "KEEP non-empty: " +
-                $current
+                New-CleanupLogLine `
+                    "INFO" `
+                    "KEEP" `
+                    (
+                        "path={0}; reason=non_empty; items={1}" -f
+                        $current,
+                        $remaining.Count)
             break
         }
 
@@ -627,16 +723,23 @@ foreach ($item in $items) {
 
         if (-not $deleted) {
             $lines +=
-                "FAILED after parent exit: " +
-                $current +
-                " | " +
-                $lastError
+                New-CleanupLogLine `
+                    "ERROR" `
+                    "REMOVE" `
+                    (
+                        "path={0}; attempts=150; error={1}" -f
+                        $current,
+                        $lastError)
             break
         }
 
         $lines +=
-            "REMOVED: " +
-            $current
+            New-CleanupLogLine `
+                "INFO" `
+                "REMOVE" `
+                (
+                    "path={0}; status=OK" -f
+                    $current)
 
         $parent =
             Split-Path `
@@ -655,8 +758,10 @@ foreach ($item in $items) {
 }
 
 $lines +=
-    "Finished UTC: " +
-    (Get-Date).ToUniversalTime().ToString("o")
+    New-CleanupLogLine `
+        "INFO" `
+        "END" `
+        "status=complete"
 
 try {
     $directory =
@@ -721,8 +826,7 @@ catch { }
 
     Write-Host
     Write-Host (
-        "Cleanup deferred until this window closes. " +
-        "A helper will retry for up to 30 seconds.") `
+        "Cleanup deferred: locked empty folders will be retried after exit.") `
         -ForegroundColor Yellow
     Write-Host "Cleanup log: $logPath"
 
@@ -1051,19 +1155,21 @@ function Get-ScidArchivePaths(
     $archiveRoot =
         $bridgePaths.Archive
 
-    $sourceStem =
-        [IO.Path]::GetFileNameWithoutExtension(
-            $Candidate.SourceName)
-
     $baselineDirectory =
         Join-Path `
-            (Join-Path $archiveRoot "Rithmic_Baselines") `
-            $sourceStem
+            $archiveRoot `
+            "Rithmic_Baselines"
 
     $rollbackDirectory =
         Join-Path `
-            (Join-Path $archiveRoot "Rollbacks") `
-            $sourceStem
+            $archiveRoot `
+            "Rollbacks"
+
+    $flatName =
+        $Candidate.SourceName +
+        "__" +
+        $Candidate.TargetName +
+        ".gz"
 
     return [pscustomobject]@{
         ArchiveRoot = $archiveRoot
@@ -1071,12 +1177,12 @@ function Get-ScidArchivePaths(
         BaselineArchive =
             Join-Path `
                 $baselineDirectory `
-                ($Candidate.TargetName + ".gz")
+                $flatName
         RollbackDirectory = $rollbackDirectory
         RollbackArchive =
             Join-Path `
                 $rollbackDirectory `
-                ($Candidate.TargetName + ".gz")
+                $flatName
     }
 }
 
@@ -1120,10 +1226,13 @@ function Read-ScidArchiveMeta([string]$ArchivePath) {
             $values[$key] = $value
         }
 
-        if (-not $values.ContainsKey("original_bytes") -or
+        if (-not $values.ContainsKey("original_name") -or
+            -not $values.ContainsKey("original_bytes") -or
             -not $values.ContainsKey("records") -or
             -not $values.ContainsKey("first_datetime") -or
-            -not $values.ContainsKey("last_datetime")) {
+            -not $values.ContainsKey("last_datetime") -or
+            -not $values.ContainsKey("original_write_ticks") -or
+            -not $values.ContainsKey("sha256")) {
 
             return $null
         }
@@ -1138,21 +1247,11 @@ function Read-ScidArchiveMeta([string]$ArchivePath) {
             LastDateTime =
                 [long]$values["last_datetime"]
             OriginalWriteTicks =
-                if ($values.ContainsKey(
-                    "original_write_ticks")) {
-                    [long]$values[
-                        "original_write_ticks"]
-                }
-                else {
-                    0L
-                }
+                [long]$values[
+                    "original_write_ticks"]
             Sha256 =
-                if ($values.ContainsKey("sha256")) {
-                    [string]$values["sha256"]
-                }
-                else {
-                    ""
-                }
+                [string]$values[
+                    "sha256"]
         }
     }
     catch {
@@ -1436,14 +1535,14 @@ function Read-FileArchiveMeta([string]$ArchivePath) {
 
         if (-not $values.ContainsKey("original_name") -or
             -not $values.ContainsKey("original_bytes") -or
+            -not $values.ContainsKey("original_write_ticks") -or
             -not $values.ContainsKey("sha256")) {
             return $null
         }
 
-        $writeTicks = 0L
-        if ($values.ContainsKey("original_write_ticks")) {
-            $writeTicks = [long]$values["original_write_ticks"]
-        }
+        $writeTicks =
+            [long]$values[
+                "original_write_ticks"]
 
         return [pscustomobject]@{
             OriginalName = [string]$values["original_name"]
@@ -1610,15 +1709,6 @@ function Invoke-SourceArchiveManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
 
-    $layoutMigration =
-        Convert-LegacyScDataArchiveLayout `
-            $ResolvedDataFolder
-
-    if ($layoutMigration.Moved -gt 0) {
-        Write-Host (
-            "Archive layout: flattened {0} legacy archive file(s)." -f
-            $layoutMigration.Moved)
-    }
 
     Set-Location `
         -LiteralPath $ResolvedDataFolder
@@ -1707,7 +1797,7 @@ function Invoke-SourceArchiveManager(
         catch {
             $validationWarnings++
             Write-Host (
-                "  SKIP {0} | validation warning: {1}" -f
+                "  Skip {0} | validation failed" -f
                 $item.Name,
                 $_.Exception.Message) -ForegroundColor Yellow
         }
@@ -1774,6 +1864,19 @@ function Invoke-SourceArchiveManager(
         (Format-StorageBytes $disk))
     Write-Host "  Archives keep the exact original filename plus .gz and are verified before source deletion."
 
+    Write-UtilityLog `
+        "INFO" `
+        "PLAN" `
+        (
+            "operation=Archive; files={0}; contracts={1}; first_contract={2:yyyy-MM}; last_contract={3:yyyy-MM}; logical_bytes={4}; disk_bytes={5}; zero_volume_daily_files={6}" -f
+            $selection.Count,
+            $contractCount,
+            $firstMonth,
+            $lastMonth,
+            $logical,
+            $disk,
+            $zeroVolumeFiles)
+
     if ($zeroVolumeFiles -gt 0) {
         Write-Host (
             "  Daily data note: {0} selected DLY file(s) contain zero-volume records; they will be preserved exactly." -f
@@ -1801,7 +1904,7 @@ function Invoke-SourceArchiveManager(
 
     foreach ($item in $selection) {
         $archivePath = Get-SourceArchivePath $item $ResolvedDataFolder
-        $status = "ARCHIVE $($item.Name)"
+        $status = "Archive $($item.Name)"
 
         try {
             [SierraHistoryBridge.ScidBridge]::UpdateStatusLine($status)
@@ -1828,16 +1931,33 @@ function Invoke-SourceArchiveManager(
             $archived++
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | OK")
+
+            Write-UtilityLog `
+                "INFO" `
+                "ARCHIVE" `
                 (
-                    "{0} | OK | {1} -> {2}" -f
-                    $status,
-                    (Format-StorageBytes $result.OriginalBytes),
-                    (Format-StorageBytes $result.ArchiveBytes)))
+                    "file={0}; type={1}; original_bytes={2}; archive_bytes={3}; sha256={4}; status=OK" -f
+                    $item.Name,
+                    $item.Extension,
+                    $result.OriginalBytes,
+                    $result.ArchiveBytes,
+                    $result.Sha256)
         }
         catch {
             $failed++
+
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "$status | FAILED | $($_.Exception.Message)")
+                "$status | FAILED")
+
+            Write-UtilityLog `
+                "ERROR" `
+                "ARCHIVE" `
+                (
+                    "file={0}; type={1}; status=FAILED; error={2}" -f
+                    $item.Name,
+                    $item.Extension,
+                    $_.Exception.Message)
         }
     }
 
@@ -1849,14 +1969,24 @@ function Invoke-SourceArchiveManager(
 
     Write-Host
     Write-Host (
-        "Archive done: {0} archived | {1} failed | raw {2} -> archive {3} | {4} empty folder(s) removed" -f
+        "Archive: {0} archived | {1} failed | {2} -> {3}" -f
         $archived,
         $failed,
         (Format-StorageBytes $rawBytes),
-        (Format-StorageBytes $archiveBytes),
-        $emptyDirectoriesRemoved)
+        (Format-StorageBytes $archiveBytes))
 
     Show-StorageDelta $before $after
+
+    Write-UtilityLog `
+        $(if ($failed -eq 0) { "INFO" } else { "ERROR" }) `
+        "SUMMARY" `
+        (
+            "operation=Archive; archived={0}; failed={1}; source_bytes={2}; archive_bytes={3}; empty_folders_removed={4}" -f
+            $archived,
+            $failed,
+            $rawBytes,
+            $archiveBytes,
+            $emptyDirectoriesRemoved)
 
     if ($failed -gt 0) {
         return 2
@@ -2050,7 +2180,7 @@ function Remove-EmptyParentChain(
         }
         catch {
             Write-Host (
-                "  CLEANUP WARNING: could not move working directory away from " +
+                "  Cleanup warning: could not move working directory away from " +
                 $current +
                 " | " +
                 $_.Exception.Message) `
@@ -2086,8 +2216,7 @@ function Remove-EmptyParentChain(
 
                     if ($queued) {
                         Write-Host (
-                            "  CLEANUP DEFERRED: empty folder is still in use; " +
-                            "it will be retried after this window closes: " +
+                            "  Cleanup deferred: " +
                             $current) `
                             -ForegroundColor Yellow
                     }
@@ -2264,7 +2393,7 @@ function Remove-EmptyBridgeDirectories(
         }
         catch {
             Write-Host (
-                "  CLEANUP WARNING: could not remove empty folder: " +
+                "  Cleanup warning: could not remove empty folder: " +
                 $resolvedRoot +
                 " | " +
                 $_.Exception.Message) `
@@ -2301,156 +2430,6 @@ function Invoke-BridgeDirectoryHousekeeping(
 }
 
 
-function Convert-LegacyScDataArchiveLayout(
-    [string]$DataFolder) {
-
-    $bridgePaths =
-        Get-BridgePaths $DataFolder
-
-    $root =
-        Join-Path `
-            $bridgePaths.Archive `
-            "SC_Data"
-
-    if (-not (
-        Test-Path `
-            -LiteralPath $root `
-            -PathType Container)) {
-
-        return [pscustomobject]@{
-            Moved = 0
-            Conflicts = 0
-            EmptyDirectories = 0
-        }
-    }
-
-    $rootFull =
-        [IO.Path]::GetFullPath(
-            $root).TrimEnd('\')
-
-    $moved = 0
-    $conflicts = 0
-    $prunedDirectories = 0
-
-    $nestedArchives =
-        @(
-            Get-ChildItem `
-                -LiteralPath $rootFull `
-                -Recurse `
-                -File `
-                -Filter "*.gz" `
-                -ErrorAction SilentlyContinue |
-            Where-Object {
-                -not $_.DirectoryName.Equals(
-                    $rootFull,
-                    [StringComparison]::OrdinalIgnoreCase)
-            }
-        )
-
-    foreach ($archive in $nestedArchives) {
-        $destination =
-            Join-Path `
-                $rootFull `
-                $archive.Name
-
-        $sourceMeta =
-            $archive.FullName + ".meta"
-
-        $destinationMeta =
-            $destination + ".meta"
-
-        if (Test-Path `
-            -LiteralPath $destination `
-            -PathType Leaf) {
-
-            $same = $false
-
-            try {
-                $same =
-                    (Get-Item -LiteralPath $destination).Length -eq
-                        $archive.Length -and
-                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
-                        $destination) -eq
-                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
-                        $archive.FullName)
-            }
-            catch {
-                $same = $false
-            }
-
-            if (-not $same) {
-                $conflicts++
-                Write-Host (
-                    "  ARCHIVE LAYOUT WARNING: flat destination already exists with different data: " +
-                    $destination) `
-                    -ForegroundColor Yellow
-                continue
-            }
-
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $archive.FullName `
-                $DataFolder)
-
-            if (Test-Path `
-                -LiteralPath $sourceMeta `
-                -PathType Leaf) {
-
-                if (-not (
-                    Test-Path `
-                        -LiteralPath $destinationMeta `
-                        -PathType Leaf)) {
-
-                    Move-Item `
-                        -LiteralPath $sourceMeta `
-                        -Destination $destinationMeta `
-                        -Force
-                }
-                else {
-                    [void](Remove-BridgeOwnedFileAndPrune `
-                        $sourceMeta `
-                        $DataFolder)
-                }
-            }
-
-            $moved++
-            continue
-        }
-
-        Move-Item `
-            -LiteralPath $archive.FullName `
-            -Destination $destination `
-            -Force
-
-        if (Test-Path `
-            -LiteralPath $sourceMeta `
-            -PathType Leaf) {
-
-            Move-Item `
-                -LiteralPath $sourceMeta `
-                -Destination $destinationMeta `
-                -Force
-        }
-
-        $moved++
-
-        $prunedDirectories +=
-            Remove-EmptyParentChain `
-                $archive.DirectoryName `
-                $rootFull
-    }
-
-    $prunedDirectories +=
-        Remove-EmptyBridgeDirectories `
-            $rootFull `
-            -PreserveRoot
-
-    return [pscustomobject]@{
-        Moved = $moved
-        Conflicts = $conflicts
-        EmptyDirectories = $prunedDirectories
-    }
-}
-
 function Get-ArchivedSourceFiles([string]$DataFolder) {
     $bridgePaths =
         Get-BridgePaths $DataFolder
@@ -2472,7 +2451,6 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
     foreach ($archive in @(
         Get-ChildItem `
             -LiteralPath $root `
-            -Recurse `
             -File `
             -Filter "*.gz" `
             -ErrorAction SilentlyContinue)) {
@@ -2480,7 +2458,7 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
         $meta = Read-FileArchiveMeta $archive.FullName
         if (-not $meta) {
             Write-Host (
-                "  ARCHIVE WARNING: metadata missing or invalid: {0}" -f
+                "  Archive warning: invalid metadata: {0}" -f
                 $archive.FullName) -ForegroundColor Yellow
             continue
         }
@@ -2599,29 +2577,6 @@ function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
 
-    $selectedPathBeforeMigration = $null
-    $selectedNameBeforeMigration = $null
-
-    if ($SelectedFile) {
-        $selectedPathBeforeMigration =
-            [IO.Path]::GetFullPath(
-                $SelectedFile.Trim().Trim('"'))
-
-        $selectedNameBeforeMigration =
-            [IO.Path]::GetFileName(
-                $selectedPathBeforeMigration)
-    }
-
-    $layoutMigration =
-        Convert-LegacyScDataArchiveLayout `
-            $ResolvedDataFolder
-
-    if ($layoutMigration.Moved -gt 0) {
-        Write-Host (
-            "Archive layout: flattened {0} legacy archive file(s)." -f
-            $layoutMigration.Moved)
-    }
-
     Set-Location `
         -LiteralPath $ResolvedDataFolder
 
@@ -2638,42 +2593,23 @@ function Invoke-SourceRestoreManager(
     }
 
     if ($SelectedFile) {
+        $selectedPath =
+            [IO.Path]::GetFullPath(
+                $SelectedFile.Trim().Trim('"'))
+
         $selection =
             @(
                 $archives |
                 Where-Object {
                     $_.ArchivePath.Equals(
-                        $selectedPathBeforeMigration,
+                        $selectedPath,
                         [StringComparison]::OrdinalIgnoreCase)
                 }
             )
 
-        if ($selection.Count -eq 0 -and
-            $layoutMigration.Moved -gt 0 -and
-            $selectedNameBeforeMigration) {
-
-            $selection =
-                @(
-                    $archives |
-                    Where-Object {
-                        [IO.Path]::GetFileName(
-                            $_.ArchivePath).Equals(
-                                $selectedNameBeforeMigration,
-                                [StringComparison]::OrdinalIgnoreCase)
-                    }
-                )
-        }
-
-        if ($selection.Count -gt 1) {
+        if ($selection.Count -ne 1) {
             throw (
-                "More than one archive matches the selected filename after " +
-                "legacy layout migration. Resolve the duplicate archives before restoring.")
-        }
-
-        if ($selection.Count -eq 0) {
-            throw (
-                "The selected file is not a recognized Sierra History Bridge " +
-                "SC Data archive.")
+                "The selected file is not a recognized SC Data archive.")
         }
     }
     else {
@@ -2719,6 +2655,17 @@ function Invoke-SourceRestoreManager(
         (Format-StorageBytes $compressedBytes),
         (Format-StorageBytes $rawBytes))
     Write-Host "  Successfully restored archives are removed so the same data is not stored twice."
+
+    Write-UtilityLog `
+        "INFO" `
+        "PLAN" `
+        (
+            "operation=Restore; files={0}; first_contract={1:yyyy-MM}; last_contract={2:yyyy-MM}; archive_bytes={3}; restored_bytes={4}" -f
+            $selection.Count,
+            $firstMonth,
+            $lastMonth,
+            $compressedBytes,
+            $rawBytes)
 
     $conflicts = @()
     $alreadyPresent = @()
@@ -2797,9 +2744,24 @@ function Invoke-SourceRestoreManager(
                     -IgnoreMissing
 
             $deduplicated++
+
+            Write-UtilityLog `
+                "INFO" `
+                "RESTORE" `
+                (
+                    "file={0}; status=ALREADY_CURRENT; archive_removed=true" -f
+                    $item.OriginalName)
         }
         catch {
             $failed++
+
+            Write-UtilityLog `
+                "ERROR" `
+                "RESTORE" `
+                (
+                    "file={0}; status=FAILED; phase=deduplicate; error={1}" -f
+                    $item.OriginalName,
+                    $_.Exception.Message)
         }
     }
 
@@ -2815,13 +2777,18 @@ function Invoke-SourceRestoreManager(
 
             $conflictDirectory =
                 Join-Path `
-                    (Join-Path `
-                        $bridgePaths.Archive `
-                        "Restore_Conflicts") `
-                    $conflictStamp
+                    $bridgePaths.Archive `
+                    "Restore_Conflicts"
 
             $conflictArchive =
-                Join-Path $conflictDirectory ($item.OriginalName + ".gz")
+                Join-Path `
+                    $conflictDirectory `
+                    (
+                        $conflictStamp +
+                        "__" +
+                        $item.OriginalName +
+                        ".gz"
+                    )
 
             if ($item.Extension -eq "scid") {
                 [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
@@ -2839,18 +2806,35 @@ function Invoke-SourceRestoreManager(
             }
 
             $pending += $item
+
+            Write-UtilityLog `
+                "WARN" `
+                "CONFLICT" `
+                (
+                    "file={0}; existing_destination_preserved={1}" -f
+                    $item.OriginalName,
+                    $conflictArchive)
         }
         catch {
             $failed++
+
             Write-Host (
-                "  FAILED conflict preservation: {0} | {1}" -f
-                $item.OriginalName,
-                $_.Exception.Message) -ForegroundColor Red
+                "  Conflict preservation failed: {0}" -f
+                $item.OriginalName) `
+                -ForegroundColor Red
+
+            Write-UtilityLog `
+                "ERROR" `
+                "CONFLICT" `
+                (
+                    "file={0}; status=FAILED; error={1}" -f
+                    $item.OriginalName,
+                    $_.Exception.Message)
         }
     }
 
     foreach ($item in $pending) {
-        $status = "RESTORE $($item.OriginalName)"
+        $status = "Restore $($item.OriginalName)"
         try {
             [SierraHistoryBridge.ScidBridge]::UpdateStatusLine($status)
 
@@ -2879,12 +2863,32 @@ function Invoke-SourceRestoreManager(
             $restored++
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "$status | OK | $(Format-StorageBytes $result.RestoredBytes)")
+                "$status | OK")
+
+            Write-UtilityLog `
+                "INFO" `
+                "RESTORE" `
+                (
+                    "file={0}; type={1}; restored_bytes={2}; sha256={3}; archive_removed=true; status=OK" -f
+                    $item.OriginalName,
+                    $item.Extension,
+                    $result.RestoredBytes,
+                    $item.Sha256)
         }
         catch {
             $failed++
+
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                "$status | FAILED | $($_.Exception.Message)")
+                "$status | FAILED")
+
+            Write-UtilityLog `
+                "ERROR" `
+                "RESTORE" `
+                (
+                    "file={0}; type={1}; status=FAILED; error={2}" -f
+                    $item.OriginalName,
+                    $item.Extension,
+                    $_.Exception.Message)
         }
     }
 
@@ -2896,20 +2900,115 @@ function Invoke-SourceRestoreManager(
 
     Write-Host
     Write-Host (
-        "Restore done: {0} restored | {1} already present/deduplicated | {2} conflict(s) skipped | {3} failed | {4} empty folder(s) removed" -f
+        "Restore: {0} restored | {1} already current | {2} conflict(s) skipped | {3} failed" -f
         $restored,
         $deduplicated,
         $skippedConflicts,
-        $failed,
-        $prunedDirectories)
+        $failed)
 
     Show-StorageDelta $before $after
+
+    Write-UtilityLog `
+        $(if ($failed -eq 0) { "INFO" } else { "ERROR" }) `
+        "SUMMARY" `
+        (
+            "operation=Restore; restored={0}; already_current={1}; conflicts_skipped={2}; failed={3}; empty_folders_removed={4}" -f
+            $restored,
+            $deduplicated,
+            $skippedConflicts,
+            $failed,
+            $prunedDirectories)
 
     if ($failed -gt 0) {
         return 2
     }
 
     return 0
+}
+
+function Get-RithmicTargetNameFromBackupArchive(
+    [string]$ArchivePath,
+    $Meta) {
+
+    if ($Meta -and
+        $Meta.OriginalName) {
+
+        $candidate =
+            [IO.Path]::GetFileName(
+                [string]$Meta.OriginalName)
+
+        if ($candidate -eq
+            [string]$Meta.OriginalName) {
+
+            $rithmicPattern =
+                [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+            if ($rithmicPattern.IsMatch(
+                    $candidate)) {
+
+                return $candidate
+            }
+        }
+    }
+
+    $name =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    if ($name.EndsWith(
+        ".gz",
+        [StringComparison]::OrdinalIgnoreCase)) {
+
+        $name =
+            $name.Substring(
+                0,
+                $name.Length - 3)
+    }
+
+    $separator =
+        $name.LastIndexOf(
+            "__",
+            [StringComparison]::Ordinal)
+
+    if ($separator -ge 0 -and
+        $separator + 2 -lt $name.Length) {
+
+        return $name.Substring(
+            $separator + 2)
+    }
+
+    return $name
+}
+
+function Get-ScDataSourceNameFromBaselineArchive(
+    [string]$ArchivePath) {
+
+    $name =
+        [IO.Path]::GetFileName(
+            $ArchivePath)
+
+    if ($name.EndsWith(
+        ".gz",
+        [StringComparison]::OrdinalIgnoreCase)) {
+
+        $name =
+            $name.Substring(
+                0,
+                $name.Length - 3)
+    }
+
+    $separator =
+        $name.IndexOf(
+            "__",
+            [StringComparison]::Ordinal)
+
+    if ($separator -le 0) {
+        return $null
+    }
+
+    return $name.Substring(
+        0,
+        $separator)
 }
 
 function Read-GzipArchiveMeta(
@@ -2959,7 +3058,11 @@ function Read-GzipArchiveMeta(
         }
 
         if (-not $values.ContainsKey(
+                "original_name") -or
+            -not $values.ContainsKey(
                 "original_bytes") -or
+            -not $values.ContainsKey(
+                "original_write_ticks") -or
             -not $values.ContainsKey(
                 "sha256")) {
 
@@ -2967,24 +3070,8 @@ function Read-GzipArchiveMeta(
         }
 
         $originalName =
-            if ($values.ContainsKey(
-                "original_name")) {
-
-                [string]$values[
-                    "original_name"]
-            }
-            elseif ($ArchivePath.EndsWith(
-                ".gz",
-                [StringComparison]::OrdinalIgnoreCase)) {
-
-                [IO.Path]::GetFileName(
-                    $ArchivePath.Substring(
-                        0,
-                        $ArchivePath.Length - 3))
-            }
-            else {
-                $null
-            }
+            [string]$values[
+                "original_name"]
 
         return [pscustomobject]@{
             OriginalName =
@@ -2993,15 +3080,8 @@ function Read-GzipArchiveMeta(
                 [long]$values[
                     "original_bytes"]
             OriginalWriteTicks =
-                if ($values.ContainsKey(
-                    "original_write_ticks")) {
-
-                    [long]$values[
-                        "original_write_ticks"]
-                }
-                else {
-                    0L
-                }
+                [long]$values[
+                    "original_write_ticks"]
             Sha256 =
                 [string]$values[
                     "sha256"]
@@ -3063,13 +3143,6 @@ function Get-RithmicBackupArchives(
                     Join-Path `
                         $bridgePaths.Archive `
                         "Rollbacks"
-            },
-            [pscustomobject]@{
-                Kind = "legacy"
-                Path =
-                    Join-Path `
-                        $bridgePaths.Archive `
-                        "Legacy_Backups"
             }
         )
 
@@ -3089,7 +3162,6 @@ function Get-RithmicBackupArchives(
         foreach ($archive in @(
             Get-ChildItem `
                 -LiteralPath $root.Path `
-                -Recurse `
                 -File `
                 -Filter "*.gz" `
                 -ErrorAction SilentlyContinue)) {
@@ -3105,12 +3177,11 @@ function Get-RithmicBackupArchives(
             }
 
             $targetName =
-                [IO.Path]::GetFileName(
-                    [string]$meta.OriginalName)
+                Get-RithmicTargetNameFromBackupArchive `
+                    $archive.FullName `
+                    $meta
 
-            if ($targetName -ne
-                    [string]$meta.OriginalName -or
-                -not $rithmicPattern.IsMatch(
+            if (-not $rithmicPattern.IsMatch(
                     $targetName)) {
                 continue
             }
@@ -3223,6 +3294,8 @@ function Invalidate-BridgeStateForRithmicTarget(
         Save-JsonFile `
             $StatePath `
             ([pscustomobject]@{
+                schema_version =
+                    $StateSchemaVersion
                 sources =
                     (Convert-HashtableToObject `
                         $table)
@@ -3253,18 +3326,19 @@ function New-RithmicUndoArchive(
 
     $directory =
         Join-Path `
-            (Join-Path `
-                (Join-Path `
-                    $bridgePaths.Archive `
-                    "Rollbacks") `
-                "Manual") `
-            $stamp
+            $bridgePaths.Archive `
+            "Rollbacks"
 
     $archivePath =
         Join-Path `
             $directory `
-            ($Backup.TargetName +
-                ".gz")
+            (
+                "manual-" +
+                $stamp +
+                "__" +
+                $Backup.TargetName +
+                ".gz"
+            )
 
     if ($Backup.Extension -eq "scid") {
         [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
@@ -3323,7 +3397,7 @@ function Invoke-RithmicRollbackManager(
 
         if ($matches.Count -ne 1) {
             throw (
-                "The selected file is not a recognized Rithmic baseline/rollback backup.")
+                "The selected file is not a recognized Rithmic backup.")
         }
 
         $selection =
@@ -3444,6 +3518,18 @@ function Invoke-RithmicRollbackManager(
     Write-Host (
         "  Backup retention: selected backup is kept after rollback.")
 
+    Write-UtilityLog `
+        "INFO" `
+        "PLAN" `
+        (
+            "operation=Rollback; kind={0}; backup={1}; target={2}; original_bytes={3}; target_exists={4}; target_already_matches={5}" -f
+            $selection.Kind,
+            $selection.ArchivePath,
+            $selection.TargetPath,
+            $selection.OriginalBytes,
+            $targetExists,
+            $alreadyMatches)
+
     if ($DryRun) {
         Write-Host
         Write-Host "Dry run: no files were changed."
@@ -3501,10 +3587,18 @@ function Invoke-RithmicRollbackManager(
 
         Write-Host (
             "Undo backup: $undoArchive")
+
+        Write-UtilityLog `
+            "INFO" `
+            "UNDO" `
+            (
+                "target={0}; backup={1}; status=OK" -f
+                $selection.TargetPath,
+                $undoArchive)
     }
 
     $status =
-        "ROLLBACK $($selection.TargetName)"
+        "Rollback $($selection.TargetName)"
 
     try {
         [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
@@ -3529,18 +3623,30 @@ function Invoke-RithmicRollbackManager(
             $selection.Extension)
 
         [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+            "$status | OK")
+
+        Write-UtilityLog `
+            "INFO" `
+            "ROLLBACK" `
             (
-                "{0} | OK | {1}" -f
-                $status,
-                (Format-StorageBytes `
-                    $result.RestoredBytes)))
+                "target={0}; backup={1}; restored_bytes={2}; sha256={3}; state_invalidated=true; status=OK" -f
+                $selection.TargetName,
+                $selection.ArchivePath,
+                $result.RestoredBytes,
+                $selection.Sha256)
     }
     catch {
         [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+            "$status | FAILED")
+
+        Write-UtilityLog `
+            "ERROR" `
+            "ROLLBACK" `
             (
-                "{0} | FAILED | {1}" -f
-                $status,
-                $_.Exception.Message))
+                "target={0}; backup={1}; status=FAILED; error={2}" -f
+                $selection.TargetName,
+                $selection.ArchivePath,
+                $_.Exception.Message)
 
         throw
     }
@@ -3571,6 +3677,14 @@ function Invoke-RithmicRollbackManager(
         $before `
         $after
 
+    Write-UtilityLog `
+        "INFO" `
+        "SUMMARY" `
+        (
+            "operation=Rollback; target={0}; selected_backup_retained=true; undo_backup={1}" -f
+            $selection.TargetName,
+            $(if ($undoArchive) { $undoArchive } else { "none" }))
+
     return 0
 }
 
@@ -3585,7 +3699,11 @@ function Get-RithmicBaselineArchives(
             $bridgePaths.Archive `
             "Rithmic_Baselines"
 
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+    if (-not (
+        Test-Path `
+            -LiteralPath $root `
+            -PathType Container)) {
+
         return @()
     }
 
@@ -3594,7 +3712,6 @@ function Get-RithmicBaselineArchives(
     foreach ($archive in @(
         Get-ChildItem `
             -LiteralPath $root `
-            -Recurse `
             -File `
             -Filter "*.scid.gz" `
             -ErrorAction SilentlyContinue)) {
@@ -3607,16 +3724,23 @@ function Get-RithmicBaselineArchives(
             continue
         }
 
-        $sourceStem =
-            $archive.Directory.Name
-
         $sourceName =
-            $sourceStem + ".scid"
+            Get-ScDataSourceNameFromBaselineArchive `
+                $archive.FullName
 
         $targetName =
-            $archive.Name.Substring(
-                0,
-                $archive.Name.Length - 3)
+            Get-RithmicTargetNameFromBackupArchive `
+                $archive.FullName `
+                (Read-GzipArchiveMeta `
+                    $archive.FullName)
+
+        if ([string]::IsNullOrWhiteSpace(
+                $sourceName) -or
+            [string]::IsNullOrWhiteSpace(
+                $targetName)) {
+
+            continue
+        }
 
         $sourceMatch =
             [regex]::Match(
@@ -3633,27 +3757,37 @@ function Get-RithmicBaselineArchives(
 
         $items +=
             [pscustomobject]@{
-                ArchivePath = $archive.FullName
-                MetadataPath = $archive.FullName + ".meta"
-                SourceName = $sourceName
+                ArchivePath =
+                    $archive.FullName
+                MetadataPath =
+                    $archive.FullName +
+                    ".meta"
+                SourceName =
+                    $sourceName
                 SourcePath =
                     Join-Path `
                         $DataFolder `
                         $sourceName
-                TargetName = $targetName
+                TargetName =
+                    $targetName
                 TargetPath =
                     Join-Path `
                         $DataFolder `
                         $targetName
-                Group = $group
-                ArchiveBytes = [long]$archive.Length
-                Meta = $meta
+                Group =
+                    $group
+                ArchiveBytes =
+                    [long]$archive.Length
+                Meta =
+                    $meta
             }
     }
 
     return @(
         $items |
-        Sort-Object SourceName, TargetName
+        Sort-Object `
+            SourceName,
+            TargetName
     )
 }
 
@@ -3686,13 +3820,21 @@ function Invoke-VerifiedBaselineCleanup(
         (Format-StorageBytes $totalBytes))
 
     Write-Host (
-        "These are the original independent Rithmic files kept only for cross-feed validation.")
+        "Independent Rithmic baselines used for cross-feed validation.")
+
+    Write-UtilityLog `
+        "INFO" `
+        "BASELINES" `
+        (
+            "count={0}; archive_bytes={1}" -f
+            $baselines.Count,
+            $totalBytes)
 
     if ($Ask -and -not $Yes) {
         Write-Host (
             "Removing them requires one final full source-vs-baseline validation.")
         Write-Host (
-            "Only STRONG, fully covered, current pairs are deleted; anything uncertain is kept.")
+            "Only fully covered STRONG matches are removed.")
 
         $answer =
             Read-Host "Verify and remove eligible Rithmic baselines? [y/N]"
@@ -3718,7 +3860,7 @@ function Invoke-VerifiedBaselineCleanup(
 
     foreach ($item in $baselines) {
         $status =
-            "VERIFY BASELINE $($item.SourceName) <-> $($item.TargetName)"
+            "Baseline $($item.TargetName)"
 
         try {
             if (-not (
@@ -3732,19 +3874,38 @@ function Invoke-VerifiedBaselineCleanup(
 
                 $kept++
                 Write-Host (
-                    "  KEEP {0} | source or target is not currently available" -f
+                    "  Keep {0} | source or target unavailable" -f
                     $item.TargetName) `
                     -ForegroundColor Yellow
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "source={0}; target={1}; status=KEPT; reason=source_or_target_unavailable" -f
+                        $item.SourceName,
+                        $item.TargetName)
+
                 continue
             }
 
             if (-not $scales.ContainsKey($item.Group)) {
                 $kept++
                 Write-Host (
-                    "  KEEP {0} | no verified price scale for {1}" -f
+                    "  Keep {0} | no verified price scale for {1}" -f
                     $item.TargetName,
                     $item.Group) `
                     -ForegroundColor Yellow
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "source={0}; target={1}; status=KEPT; reason=missing_price_scale; group={2}" -f
+                        $item.SourceName,
+                        $item.TargetName,
+                        $item.Group)
+
                 continue
             }
 
@@ -3763,9 +3924,18 @@ function Invoke-VerifiedBaselineCleanup(
 
                 $kept++
                 Write-Host (
-                    "  KEEP {0} | SC Data does not fully cover the original Rithmic baseline" -f
+                    "  Keep {0} | SC Data does not fully cover baseline" -f
                     $item.TargetName) `
                     -ForegroundColor Yellow
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "source={0}; target={1}; status=KEPT; reason=incomplete_source_coverage" -f
+                        $item.SourceName,
+                        $item.TargetName)
+
                 continue
             }
 
@@ -3778,9 +3948,18 @@ function Invoke-VerifiedBaselineCleanup(
             if (-not $currentPair) {
                 $kept++
                 Write-Host (
-                    "  KEEP {0} | current Rithmic-named target does not match the converted SC Data source" -f
+                    "  Keep {0} | target does not match converted SC Data" -f
                     $item.TargetName) `
                     -ForegroundColor Yellow
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "source={0}; target={1}; status=KEPT; reason=current_target_mismatch" -f
+                        $item.SourceName,
+                        $item.TargetName)
+
                 continue
             }
 
@@ -3808,17 +3987,39 @@ function Invoke-VerifiedBaselineCleanup(
 
             if (-not $safeToRemove) {
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                    "$status | KEEP | $grade")
+                    "$status | Keep | $grade")
 
                 $kept++
+
+                Write-UtilityLog `
+                    "WARN" `
+                    "BASELINE" `
+                    (
+                        "source={0}; target={1}; status=KEPT; reason=validation_grade; grade={2}; source_out_of_order={3}; target_out_of_order={4}" -f
+                        $item.SourceName,
+                        $item.TargetName,
+                        $grade,
+                        $validation.SourceOutOfOrderRecords,
+                        $validation.TargetOutOfOrderRecords)
+
                 continue
             }
 
             if ($DryRun) {
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                    "$status | VERIFIED | dry run")
+                    "$status | Verified | dry run")
 
                 $kept++
+
+                Write-UtilityLog `
+                    "INFO" `
+                    "BASELINE" `
+                    (
+                        "source={0}; target={1}; status=VERIFIED; action=dry_run; grade={2}" -f
+                        $item.SourceName,
+                        $item.TargetName,
+                        $grade)
+
                 continue
             }
 
@@ -3842,18 +4043,35 @@ function Invoke-VerifiedBaselineCleanup(
             $reclaimed += $bytes
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | REMOVED")
+
+            Write-UtilityLog `
+                "INFO" `
+                "BASELINE" `
                 (
-                    "$status | VERIFIED + REMOVED | reclaimed {0}" -f
-                    (Format-StorageBytes $bytes)))
+                    "source={0}; target={1}; status=REMOVED; archive_bytes={2}; grade={3}" -f
+                    $item.SourceName,
+                    $item.TargetName,
+                    $bytes,
+                    $grade)
         }
         catch {
             $failed++
 
             try {
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                    "$status | FAILED | $($_.Exception.Message)")
+                    "$status | FAILED")
             }
             catch { }
+
+            Write-UtilityLog `
+                "ERROR" `
+                "BASELINE" `
+                (
+                    "source={0}; target={1}; status=FAILED; error={2}" -f
+                    $item.SourceName,
+                    $item.TargetName,
+                    $_.Exception.Message)
         }
     }
 
@@ -3863,12 +4081,22 @@ function Invoke-VerifiedBaselineCleanup(
 
     Write-Host
     Write-Host (
-        "Baseline cleanup: {0} removed | {1} kept | {2} failed | reclaimed {3} | {4} empty folder(s) removed" -f
+        "Baseline cleanup: {0} removed | {1} kept | {2} failed | reclaimed {3}" -f
         $removed,
         $kept,
         $failed,
-        (Format-StorageBytes $reclaimed),
-        $prunedDirectories)
+        (Format-StorageBytes $reclaimed))
+
+    Write-UtilityLog `
+        $(if ($failed -eq 0) { "INFO" } else { "ERROR" }) `
+        "BASELINES" `
+        (
+            "removed={0}; kept={1}; failed={2}; reclaimed_bytes={3}; empty_folders_removed={4}" -f
+            $removed,
+            $kept,
+            $failed,
+            $reclaimed,
+            $prunedDirectories)
 
     if ($failed -gt 0) {
         return 2
@@ -3878,15 +4106,6 @@ function Invoke-VerifiedBaselineCleanup(
 }
 
 function Invoke-StorageReport([string]$ResolvedDataFolder) {
-    $layoutMigration =
-        Convert-LegacyScDataArchiveLayout `
-            $ResolvedDataFolder
-
-    if ($layoutMigration.Moved -gt 0) {
-        Write-Host (
-            "Archive layout: flattened {0} legacy archive file(s)." -f
-            $layoutMigration.Moved)
-    }
 
     $snapshot = Get-StorageSnapshot $ResolvedDataFolder
 
@@ -3921,8 +4140,31 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
     Write-Host
     Write-Host "Configured storage:"
     Write-Host "  Archive:  $($snapshot.ArchivePath)"
-    Write-Host "  Recovery: $($snapshot.RecoveryPath)"
+    Write-Host "  Recovery staging: $($snapshot.RecoveryPath)"
     Write-Host "  Logs:     $($snapshot.LogPath)"
+
+    Write-UtilityLog `
+        "INFO" `
+        "SNAPSHOT" `
+        (
+            "sources_logical={0}; sources_disk={1}; rithmic_logical={2}; rithmic_disk={3}; archive_logical={4}; archive_disk={5}; recovery_logical={6}; recovery_disk={7}; logs_logical={8}; logs_disk={9}; other_logical={10}; other_disk={11}; data_logical={12}; data_disk={13}; tracked_logical={14}; tracked_disk={15}; free_bytes={16}" -f
+            $snapshot.SourcesLogical,
+            $snapshot.SourcesDisk,
+            $snapshot.RithmicLogical,
+            $snapshot.RithmicDisk,
+            $snapshot.ArchiveLogical,
+            $snapshot.ArchiveDisk,
+            $snapshot.RecoveryLogical,
+            $snapshot.RecoveryDisk,
+            $snapshot.LogsLogical,
+            $snapshot.LogsDisk,
+            $snapshot.OtherLogical,
+            $snapshot.OtherDisk,
+            $snapshot.DataLogical,
+            $snapshot.DataDisk,
+            $snapshot.TotalLogical,
+            $snapshot.TotalDisk,
+            $snapshot.Free)
 
     $rithmicBackups =
         Get-RithmicBackupArchives `
@@ -3945,13 +4187,6 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
                 }
             ).Count
 
-        $legacyBackupCount =
-            @(
-                $rithmicBackups |
-                Where-Object {
-                    $_.Kind -eq "legacy"
-                }
-            ).Count
 
         $rithmicBackupBytes =
             [long]((
@@ -3962,10 +4197,9 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
 
         Write-Host
         Write-Host (
-            "Rithmic backups: {0} baseline | {1} rollback | {2} legacy | {3} on disk" -f
+            "Rithmic backups: {0} baseline | {1} rollback | {2} on disk" -f
             $baselineBackupCount,
             $rollbackBackupCount,
-            $legacyBackupCount,
             (Format-StorageBytes `
                 $rithmicBackupBytes))
     }
@@ -4004,6 +4238,7 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
 }
 
 function Invoke-BridgeStorageCleanup([string]$DataFolder) {
+
     $bridgePaths =
         Get-BridgePaths $DataFolder
 
@@ -4014,13 +4249,10 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
         $bridgePaths.Archive
 
     $reclaimed = 0L
-    $pruned = 0
-    $compressed = 0
     $staleTemps = 0
     $warnings = 0
 
-    # Reclaim abandoned full-size conversion files first. This can provide
-    # enough headroom to compress legacy backups on a nearly full drive.
+    # Reclaim abandoned conversion/output files before scanning market data.
     $cutoff =
         (Get-Date).ToUniversalTime().AddHours(-1)
 
@@ -4091,124 +4323,30 @@ function Invoke-BridgeStorageCleanup([string]$DataFolder) {
         }
     }
 
-    if (Test-Path `
-        -LiteralPath $backupDirectory `
-        -PathType Container) {
+    $emptyDirectories =
+        Invoke-BridgeDirectoryHousekeeping `
+            $DataFolder
 
-        $backupFiles =
+    $recoveryFiles =
+        if (Test-Path `
+            -LiteralPath $backupDirectory `
+            -PathType Container) {
+
             @(
                 Get-ChildItem `
                     -LiteralPath $backupDirectory `
                     -File `
                     -ErrorAction SilentlyContinue
-            )
-
-        foreach ($backup in $backupFiles) {
-            if ($backup.Name -like
-                "*.rithmic-baseline.bak") {
-
-                # Baselines are handled when their source contract is scanned
-                # so they can be placed under the correct two-digit contract
-                # archive and immediately reused for preflight validation.
-                continue
-            }
-
-            if ($backup.Name -like "*.scid.bak") {
-                $targetName =
-                    $backup.Name.Substring(
-                        0,
-                        $backup.Name.Length - 4)
-
-                # A legacy .scid.bak can be the original Rithmic file from an
-                # older bridge build. Preserve it instead of assuming it is a
-                # disposable rolling backup.
-                $legacyStamp =
-                    $backup.LastWriteTimeUtc.ToString(
-                        "yyyyMMdd-HHmmss")
-
-                $legacyDirectory =
-                    Join-Path `
-                        (Join-Path $archiveRoot "Legacy_Backups") `
-                        $legacyStamp
-
-                $archivePath =
-                    Join-Path `
-                        $legacyDirectory `
-                        ($targetName + ".gz")
-
-                try {
-                    $result =
-                        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
-                            $backup.FullName,
-                            $archivePath,
-                            $true,
-                            $false)
-
-                    $reclaimed +=
-                        [long]$result.OriginalBytes -
-                        [long]$result.ArchiveBytes
-
-                    $compressed++
-                }
-                catch {
-                    $warnings++
-                }
-
-                continue
-            }
-
-            if ($backup.Name -like "*.dly.bak") {
-                $targetName =
-                    $backup.Name.Substring(
-                        0,
-                        $backup.Name.Length - 4)
-
-                $legacyStamp =
-                    $backup.LastWriteTimeUtc.ToString(
-                        "yyyyMMdd-HHmmss")
-
-                $legacyDirectory =
-                    Join-Path `
-                        (Join-Path $archiveRoot "Legacy_Backups") `
-                        $legacyStamp
-
-                $archivePath =
-                    Join-Path `
-                        $legacyDirectory `
-                        ($targetName + ".gz")
-
-                try {
-                    $result =
-                        [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
-                            $backup.FullName,
-                            $archivePath,
-                            $true,
-                            $false)
-
-                    $reclaimed +=
-                        [long]$result.OriginalBytes -
-                        [long]$result.ArchiveBytes
-
-                    $compressed++
-                }
-                catch {
-                    $warnings++
-                }
-
-                continue
-            }
+            ).Count
         }
-    }
-
-    $emptyDirectories =
-        Invoke-BridgeDirectoryHousekeeping `
-            $DataFolder
+        else {
+            0
+        }
 
     return [pscustomobject]@{
         ReclaimedBytes = $reclaimed
-        PrunedBackups = $pruned
-        CompressedBackups = $compressed
         StaleTemps = $staleTemps
+        RecoveryFiles = $recoveryFiles
         EmptyDirectories = $emptyDirectories
         Warnings = $warnings
     }
@@ -4248,7 +4386,7 @@ function Finalize-ScidBackupStorage(
 
                 [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
                     (
-                        "ARCHIVE {0} | original Rithmic baseline" -f
+                        "Baseline {0}" -f
                         $Candidate.TargetName))
 
                 $result =
@@ -4285,7 +4423,7 @@ function Finalize-ScidBackupStorage(
 
                     [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
                         (
-                            "ARCHIVE {0} | rollback" -f
+                            "Rollback backup {0}" -f
                             $Candidate.TargetName))
 
                     $result =
@@ -4410,24 +4548,12 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
             $backupDirectory `
             $baselineName
 
-    $legacyBaselinePath =
-        Join-Path `
-            $backupDirectory `
-            ($Candidate.TargetName +
-                ".rithmic-baseline.bak")
-
     $rawBaselinePath =
         if (Test-Path `
             -LiteralPath $baselinePath `
             -PathType Leaf) {
 
             $baselinePath
-        }
-        elseif (Test-Path `
-            -LiteralPath $legacyBaselinePath `
-            -PathType Leaf) {
-
-            $legacyBaselinePath
         }
         else {
             $null
@@ -4436,7 +4562,7 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
     if ($rawBaselinePath) {
         try {
             $status =
-                "ARCHIVE {0} | Rithmic baseline" -f
+                "Baseline {0}" -f
                 $Candidate.TargetName
 
             [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
@@ -4450,11 +4576,19 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
                     $false)
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "$status | OK")
+
+            $script:EarlyUpdateDiagnostics.Add(
                 (
-                    "{0} | {1:N0} MB -> {2:N0} MB" -f
-                    $status,
-                    ($archiveResult.OriginalBytes / 1MB),
-                    ($archiveResult.ArchiveBytes / 1MB)))
+                    Format-LogRecord `
+                        "INFO" `
+                        "BASELINE" `
+                        (
+                            "target={0}; original_bytes={1}; archive_bytes={2}; sha256={3}; status=OK" -f
+                            $Candidate.TargetName,
+                            $archiveResult.OriginalBytes,
+                            $archiveResult.ArchiveBytes,
+                            $archiveResult.Sha256)))
 
             $archiveMeta =
                 Read-ScidArchiveMeta `
@@ -4473,10 +4607,17 @@ function Get-ScidValidationReference($Candidate, [string]$DataFolder) {
         }
         catch {
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                "Baseline $($Candidate.TargetName) | WARNING")
+
+            $script:EarlyUpdateDiagnostics.Add(
                 (
-                    "ARCHIVE {0} | WARNING | {1}" -f
-                    $Candidate.TargetName,
-                    $_.Exception.Message))
+                    Format-LogRecord `
+                        "WARN" `
+                        "BASELINE" `
+                        (
+                            "target={0}; status=WARNING; error={1}" -f
+                            $Candidate.TargetName,
+                            $_.Exception.Message)))
         }
 
         if (Test-Path `
@@ -4680,9 +4821,23 @@ function Get-ScaleTable($Config) {
 function Get-StateTable($State) {
     $table = @{}
 
-    if ($State.sources) {
-        foreach ($property in $State.sources.PSObject.Properties) {
-            $table[$property.Name] = $property.Value
+    if ($null -eq $State -or
+        -not $State.PSObject.Properties["schema_version"] -or
+        [int]$State.schema_version -ne
+            $StateSchemaVersion -or
+        -not $State.sources) {
+
+        return $table
+    }
+
+    foreach ($property in
+        $State.sources.PSObject.Properties) {
+
+        if ($property.Value -is
+            [pscustomobject]) {
+
+            $table[$property.Name] =
+                $property.Value
         }
     }
 
@@ -4725,36 +4880,6 @@ function Get-TargetStatus([string]$TargetPath) {
     }
 }
 
-function Test-LegacyScidSignatureEquivalent(
-    [string]$LegacySignature,
-    [string]$CurrentSignature) {
-
-    if ([string]::IsNullOrWhiteSpace($LegacySignature) -or
-        [string]::IsNullOrWhiteSpace($CurrentSignature) -or
-        -not $CurrentSignature.StartsWith("v2|")) {
-        return $false
-    }
-
-    $oldParts = $LegacySignature.Split('|')
-    $newParts = $CurrentSignature.Split('|')
-
-    if ($oldParts.Count -ne 3 -or
-        $newParts.Count -lt 5) {
-        return $false
-    }
-
-    try {
-        # Legacy: size | LastWriteTimeUtc.Ticks | last SCID timestamp
-        # v2:     v2 | size | first timestamp | last timestamp | quick hash
-        return (
-            [long]$oldParts[0] -eq [long]$newParts[1] -and
-            [long]$oldParts[2] -eq [long]$newParts[3])
-    }
-    catch {
-        return $false
-    }
-}
-
 function Update-ScidStateMetadata(
     $StateEntry,
     $Candidate,
@@ -4762,7 +4887,7 @@ function Update-ScidStateMetadata(
     $TargetStatus) {
 
     if ($null -eq $StateEntry -or
-        $StateEntry -is [string]) {
+        $StateEntry -isnot [pscustomobject]) {
 
         $StateEntry = [pscustomobject]@{}
     }
@@ -4811,9 +4936,7 @@ function Test-ProcessedTargetStillValid(
     [string]$SourceSignature,
     $TargetStatus) {
 
-    # Older pre-release state stored only the source signature. It cannot prove
-    # that the target file still contains the converted output, so reprocess it.
-    if ($StateEntry -is [string]) {
+    if ($StateEntry -isnot [pscustomobject]) {
         return $false
     }
 
@@ -4825,10 +4948,7 @@ function Test-ProcessedTargetStillValid(
     $savedSignature =
         [string]$StateEntry.source_signature
 
-    if ($savedSignature -ne $SourceSignature -and
-        -not (Test-LegacyScidSignatureEquivalent `
-            $savedSignature `
-            $SourceSignature)) {
+    if ($savedSignature -ne $SourceSignature) {
         return $false
     }
 
@@ -5016,6 +5136,8 @@ function Convert-HashtableToObject([hashtable]$Table) {
 }
 
 function Invoke-SierraHistoryBridge {
+    $script:EarlyUpdateDiagnostics.Clear()
+
     Show-Banner
 
     if (-not (Test-Path -LiteralPath $ConverterSource)) {
@@ -5046,15 +5168,28 @@ function Invoke-SierraHistoryBridge {
             $resolvedDataFolder
 
     Write-Host (
-        "      Storage: {0} free | Data {1} logical / {2} disk | reclaimed {3} | pruned {4} backup(s) | compressed {5} backup(s) | removed {6} stale temp(s) / {7} empty folder(s)" -f
+        "      Storage: {0} free | {1} on disk" -f
         (Format-StorageBytes $freeAfterCleanup),
-        (Format-StorageBytes $storageAfterCleanup.TotalLogical),
-        (Format-StorageBytes $storageAfterCleanup.TotalDisk),
-        (Format-StorageBytes $storageCleanup.ReclaimedBytes),
-        $storageCleanup.PrunedBackups,
-        $storageCleanup.CompressedBackups,
-        $storageCleanup.StaleTemps,
-        $storageCleanup.EmptyDirectories)
+        (Format-StorageBytes $storageAfterCleanup.DataDisk))
+
+    if ($storageCleanup.StaleTemps -gt 0 -or
+        $storageCleanup.EmptyDirectories -gt 0 -or
+        $storageCleanup.ReclaimedBytes -gt 0) {
+
+        Write-Host (
+            "      Cleanup: {0} stale temp | {1} empty folder | {2} reclaimed" -f
+            $storageCleanup.StaleTemps,
+            $storageCleanup.EmptyDirectories,
+            (Format-StorageBytes `
+                $storageCleanup.ReclaimedBytes))
+    }
+
+    if ($storageCleanup.RecoveryFiles -gt 0) {
+        Write-Host (
+            "      Recovery staging: {0} file(s)" -f
+            $storageCleanup.RecoveryFiles) `
+            -ForegroundColor Yellow
+    }
 
     if ($storageCleanup.Warnings -gt 0) {
         Write-Host (
@@ -5362,7 +5497,7 @@ function Invoke-SierraHistoryBridge {
         $windowEnd.ToString("yyyy-MM"))
 
     Write-Host (
-        "      Policy: 5y Sierra history + 3mo rollover buffer + 6mo forward buffer")
+        "      Window: 5y history + 3mo rollover + 6mo forward")
 
     $dailyZeroVolumeSources =
         @(
@@ -5407,7 +5542,7 @@ function Invoke-SierraHistoryBridge {
             $dailySourceError.DailyError) -ForegroundColor Yellow
     }
 
-    Write-Host "      Scale verification:"
+    Write-Host "      Price scale:"
 
     $scales = Get-ScaleTable $config
 
@@ -5436,7 +5571,7 @@ function Invoke-SierraHistoryBridge {
                 $verified = $true
 
                 Write-Host (
-                    "        {0,-12} x{1:g} verified SCID | {2} <-> {3} | {4} samples" -f
+                    "        {0,-12} x{1:g} SCID | {2} <-> {3} | {4} samples" -f
                     $group,
                     $inference.Factor,
                     $scidPair.SourceName,
@@ -5508,24 +5643,8 @@ function Invoke-SierraHistoryBridge {
     $stateTable = Get-StateTable $state
     $stateDirty = $false
 
-    # Remove obsolete DLY-only state entries once the same contract has a
-    # SCID-owned state entry. Current state keeps SCID and DLY metadata together.
-    foreach ($stateKey in @($stateTable.Keys)) {
-        if (-not $stateKey.EndsWith(
-            ".dly",
-            [StringComparison]::OrdinalIgnoreCase)) {
-            continue
-        }
-
-        $scidKey = [IO.Path]::ChangeExtension($stateKey, ".scid")
-        if ($stateTable.ContainsKey($scidKey)) {
-            $stateTable.Remove($stateKey)
-            $stateDirty = $true
-        }
-    }
-
-    # Surface sources which were present on a previous run but disappeared.
-    # This is informational and never deletes or rewrites the surviving target.
+    # Surface a source disappearance recorded by saved state.
+    # This is informational and never changes the surviving target.
     foreach ($candidate in $candidates) {
         if (-not $candidate.HasScid) {
             continue
@@ -5546,7 +5665,7 @@ function Invoke-SierraHistoryBridge {
             $expectedDaily = [IO.Path]::ChangeExtension($candidate.Source, ".dly")
 
             Write-Host (
-                "      SOURCE CHANGE: {0} was present on a previous run but is missing now; existing target left unchanged." -f
+                "      Source change: {0} is missing; existing target left unchanged." -f
                 [IO.Path]::GetFileName($expectedDaily)) -ForegroundColor Yellow
         }
     }
@@ -5851,11 +5970,8 @@ function Invoke-SierraHistoryBridge {
                     $dailySignature `
                     $dailyTargetStatus)
 
-            # Older builds used modification time in the DLY signature. A
-            # completed SCID download, Sierra maintenance, or a file copy can
-            # therefore make the source look changed even when its Daily rows
-            # are identical. If the saved signature does not match, compare
-            # the actual Daily data before deciding to rewrite the target.
+            # If state is missing or stale, compare the actual Daily source
+            # and target before deciding that a rewrite is necessary.
             if (-not $dailyCurrent -and
                 -not $Force -and
                 $dailyTargetStatus.Exists -and
@@ -6079,7 +6195,7 @@ function Invoke-SierraHistoryBridge {
 
                 try {
                     $validationPrefix =
-                        "VALIDATE {0} <-> {1}" -f
+                        "Validate {0} <-> {1}" -f
                         (Get-CandidateSourceDisplay $candidate),
                         (Get-CandidateTargetDisplay $candidate)
 
@@ -6106,7 +6222,7 @@ function Invoke-SierraHistoryBridge {
                                 $validationPrefix)
                     }
 
-                    [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
                         "$validationPrefix | OK")
 
                     $candidate.ScidPairGrade =
@@ -6129,7 +6245,7 @@ function Invoke-SierraHistoryBridge {
                 }
                 catch {
                     [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                        "VALIDATE $(Get-CandidateSourceDisplay $candidate) | DEFERRED | $($_.Exception.Message)")
+                        "Validate $(Get-CandidateSourceDisplay $candidate) | DEFERRED")
 
                     $candidate.ScidDeferred = $true
                     $candidate.ScidSkipped = $true
@@ -6147,7 +6263,7 @@ function Invoke-SierraHistoryBridge {
 
                 try {
                     $fileValidationPrefix =
-                        "VALIDATE {0}" -f
+                        "Validate {0}" -f
                         (Get-CandidateSourceDisplay $candidate)
 
                     $candidate.ScidFileValidation =
@@ -6155,7 +6271,7 @@ function Invoke-SierraHistoryBridge {
                             $candidate.Source,
                             $fileValidationPrefix)
 
-                    [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+                    [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
                         "$fileValidationPrefix | OK")
 
                     $candidate.Records =
@@ -6174,7 +6290,7 @@ function Invoke-SierraHistoryBridge {
                 }
                 catch {
                     [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                        "VALIDATE $(Get-CandidateSourceDisplay $candidate) | DEFERRED | $($_.Exception.Message)")
+                        "Validate $(Get-CandidateSourceDisplay $candidate) | DEFERRED")
 
                     $candidate.ScidDeferred = $true
                     $candidate.ScidSkipped = $true
@@ -6340,32 +6456,55 @@ function Invoke-SierraHistoryBridge {
             New-Object System.Collections.Generic.List[string]
 
         $preflightOutput.Add(
-            "Sierra History Bridge v$Version - SCID preflight")
+            (
+                Format-LogRecord `
+                    "INFO" `
+                    "START" `
+                    (
+                        "operation=Preflight; version={0}; data={1}" -f
+                        $Version,
+                        $resolvedDataFolder)))
+
         $preflightOutput.Add(
-            "Data folder: $resolvedDataFolder")
-        $preflightOutput.Add(
-            "Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-        $preflightOutput.Add(
-            "Strong-match thresholds: coverage >=99%, volume/sec >=98%, last-price >=99%, aggregate-volume-diff <=0.5%")
-        $preflightOutput.Add("")
+            (
+                Format-LogRecord `
+                    "INFO" `
+                    "THRESHOLDS" `
+                    "strong_coverage_pct=99; strong_volume_match_pct=98; strong_last_price_match_pct=99; max_aggregate_volume_diff_pct=0.5"))
 
         foreach ($line in $preflightLines) {
-            $preflightOutput.Add($line)
+            $preflightOutput.Add(
+                (
+                    Format-LogRecord `
+                        "INFO" `
+                        "CHECK" `
+                        $line))
         }
+
+        $preflightOutput.Add(
+            (
+                Format-LogRecord `
+                    "INFO" `
+                    "SUMMARY" `
+                    (
+                        "checks={0}; decisions={1}" -f
+                        $preflightLines.Count,
+                        $decisionCandidates.Count)))
 
         $preflightOutput |
             Set-Content `
                 -LiteralPath $preflightLogPath `
                 -Encoding UTF8
 
+        [SierraHistoryBridge.ScidBridge]::ClearStatusLine()
+
         Write-Host
-        Write-Host "SCID preflight validation:"
+        Write-Host (
+            "Preflight: {0} SCID check(s) | {1} decision(s)" -f
+            $preflightLines.Count,
+            $decisionCandidates.Count)
 
-        foreach ($line in $preflightLines) {
-            Write-Host "  $line"
-        }
-
-        Write-Host "  Report: $preflightLogPath"
+        Write-Host "  Log: $preflightLogPath"
     }
 
     if ($decisionCandidates.Count -gt 0) {
@@ -6552,10 +6691,10 @@ function Invoke-SierraHistoryBridge {
                     if ($candidate.ScidValidationReference -and
                         $candidate.ScidValidationReference.Independent) {
 
-                        "SCID cross-feed validated replace"
+                        "SCID replace"
                     }
                     else {
-                        "SCID replace [managed consistency check]"
+                        "SCID replace"
                     }
                 }
             }
@@ -6589,7 +6728,7 @@ function Invoke-SierraHistoryBridge {
         }
 
         Write-Host (
-            "  UPDATE  {0} -> {1} | {2} | {3}" -f
+            "  Update  {0} -> {1} | {2} | {3}" -f
             (Get-CandidateSourceDisplay $candidate),
             (Get-CandidateTargetDisplay $candidate),
             $scidPlan,
@@ -6607,7 +6746,7 @@ function Invoke-SierraHistoryBridge {
             $candidate.StateKey) {
 
             Write-Host (
-                "  DEFER   {0} -> {1} | SCID | {2}" -f
+                "  Defer   {0} -> {1} | SCID | {2}" -f
                 (Get-CandidateSourceDisplay $candidate),
                 (Get-CandidateTargetDisplay $candidate),
                 $candidate.ScidDeferReason) `
@@ -6617,7 +6756,7 @@ function Invoke-SierraHistoryBridge {
 
     foreach ($item in $retire) {
         $action =
-            if ($item.RemoveTarget) { "RETIRE" } else { "STATE" }
+            if ($item.RemoveTarget) { "Retire" } else { "State" }
 
         $dailyNote =
             if ($item.RemoveDailyTarget) { " + DLY" } else { "" }
@@ -6635,7 +6774,13 @@ function Invoke-SierraHistoryBridge {
         if ($stateDirty) {
             Save-JsonFile `
                 $StatePath `
-                (Convert-HashtableToObject $stateTable)
+                ([pscustomobject]@{
+                    schema_version =
+                        $StateSchemaVersion
+                    sources =
+                        (Convert-HashtableToObject `
+                            $stateTable)
+                })
         }
 
         Write-Host
@@ -6883,6 +7028,9 @@ function Invoke-SierraHistoryBridge {
             "Sierra Chart can remain open.")
     }
 
+    $liveValidationLogEntries =
+        New-Object System.Collections.Generic.List[string]
+
     $liveValidationCandidates =
         @(
             $ready |
@@ -6909,7 +7057,7 @@ function Invoke-SierraHistoryBridge {
                     }
 
                 $validationPrefix =
-                    "VALIDATE LIVE {0} <-> {1}" -f
+                    "Validate live {0} <-> {1}" -f
                     (Get-CandidateSourceDisplay $candidate),
                     (Get-CandidateTargetDisplay $candidate)
 
@@ -6924,6 +7072,23 @@ function Invoke-SierraHistoryBridge {
                     Get-ScidPairGrade `
                         $candidate.ScidValidation
 
+                $liveValidationLogEntries.Add(
+                    (
+                        Format-LogRecord `
+                            "INFO" `
+                            "LIVE-CHECK" `
+                            (
+                                "source={0}; target={1}; grade={2}; coverage_pct={3}; volume_match_pct={4}; last_price_match_pct={5}; aggregate_volume_diff_pct={6}; source_out_of_order={7}; target_out_of_order={8}" -f
+                                $candidate.SourceName,
+                                $candidate.TargetName,
+                                $candidate.ScidPairGrade,
+                                $candidate.ScidValidation.CommonCoveragePercent,
+                                $candidate.ScidValidation.VolumeMatchPercent,
+                                $candidate.ScidValidation.LastPriceMatchPercent,
+                                $candidate.ScidValidation.AggregateVolumeDifferencePercent,
+                                $candidate.ScidValidation.SourceOutOfOrderRecords,
+                                $candidate.ScidValidation.TargetOutOfOrderRecords)))
+
                 $candidate.Records =
                     [long]$candidate.ScidValidation.SourceRecords
                 $candidate.First =
@@ -6935,7 +7100,8 @@ function Invoke-SierraHistoryBridge {
                 $candidate.ModifiedTicks =
                     [long]$candidate.ScidValidation.SourceWriteTimeUtcTicks
                 $candidate.Signature =
-                    "$($candidate.Size)|$($candidate.ModifiedTicks)|$($candidate.Last)"
+                    [SierraHistoryBridge.ScidBridge]::GetQuickSignature(
+                        $candidate.Source)
 
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
                     "$validationPrefix | $($candidate.ScidPairGrade)")
@@ -6978,6 +7144,16 @@ function Invoke-SierraHistoryBridge {
                         if ($deferredScid -notcontains $candidate) {
                             $deferredScid += $candidate
                         }
+
+                        $liveValidationLogEntries.Add(
+                            (
+                                Format-LogRecord `
+                                    "WARN" `
+                                    "LIVE-CHECK" `
+                                    (
+                                        "source={0}; target={1}; action=DEFER; reason=validation_review" -f
+                                        $candidate.SourceName,
+                                        $candidate.TargetName)))
                     }
                     elseif ($liveChoice -eq "3") {
                         Write-Host "Cancelled. No files were changed."
@@ -6998,10 +7174,20 @@ function Invoke-SierraHistoryBridge {
                 }
 
                 Write-Host (
-                    "  DEFER {0}: {1}" -f
-                    (Get-CandidateTargetDisplay $candidate),
-                    $_.Exception.Message) `
+                    "  Defer {0} | validation failed" -f
+                    (Get-CandidateTargetDisplay $candidate)) `
                     -ForegroundColor Yellow
+
+                $liveValidationLogEntries.Add(
+                    (
+                        Format-LogRecord `
+                            "WARN" `
+                            "LIVE-CHECK" `
+                            (
+                                "source={0}; target={1}; action=DEFER; error={2}" -f
+                                $candidate.SourceName,
+                                $candidate.TargetName,
+                                $_.Exception.Message)))
             }
         }
 
@@ -7021,6 +7207,9 @@ function Invoke-SierraHistoryBridge {
     $retiredTargets = 0
     $retiredState = 0
     $retireWarnings = 0
+
+    $retireLogEntries =
+        New-Object System.Collections.Generic.List[string]
 
     foreach ($item in $retire) {
         if ($item.RemoveTarget) {
@@ -7057,17 +7246,38 @@ function Invoke-SierraHistoryBridge {
                     }
 
                 Write-Host (
-                    "  RETIRED {0} | {1} | source {2}" -f
+                    "  Retired {0} | {1}" -f
                     (Get-CompactName $item.TargetName),
-                    $retiredTypes,
-                    (Get-CompactName $item.SourceName))
+                    $retiredTypes)
+
+                $retireLogEntries.Add(
+                    (
+                        Format-LogRecord `
+                            "INFO" `
+                            "RETIRE" `
+                            (
+                                "source={0}; target={1}; files={2}; status=OK" -f
+                                $item.SourceName,
+                                $item.TargetName,
+                                $retiredTypes)))
             }
             catch {
                 $retireWarnings++
                 Write-Host (
-                    "  RETIRE WARNING {0} | {1}" -f
-                    (Get-CompactName $item.TargetName),
-                    $_.Exception.Message) -ForegroundColor Yellow
+                    "  Retire warning {0}" -f
+                    (Get-CompactName $item.TargetName)) `
+                    -ForegroundColor Yellow
+
+                $retireLogEntries.Add(
+                    (
+                        Format-LogRecord `
+                            "WARN" `
+                            "RETIRE" `
+                            (
+                                "source={0}; target={1}; status=FAILED; error={2}" -f
+                                $item.SourceName,
+                                $item.TargetName,
+                                $_.Exception.Message)))
             }
         }
         elseif ($item.Reason -eq "managed intraday target already missing" -or
@@ -7080,9 +7290,20 @@ function Invoke-SierraHistoryBridge {
         else {
             $retireWarnings++
             Write-Host (
-                "  RETIRE SKIPPED {0} | {1}" -f
-                (Get-CompactName $item.TargetName),
-                $item.Reason) -ForegroundColor Yellow
+                "  Retire skipped {0}" -f
+                (Get-CompactName $item.TargetName)) `
+                -ForegroundColor Yellow
+
+            $retireLogEntries.Add(
+                (
+                    Format-LogRecord `
+                        "WARN" `
+                        "RETIRE" `
+                        (
+                            "source={0}; target={1}; status=SKIPPED; reason={2}" -f
+                            $item.SourceName,
+                            $item.TargetName,
+                            $item.Reason)))
         }
     }
 
@@ -7098,26 +7319,77 @@ function Invoke-SierraHistoryBridge {
     $logPath = Join-Path $logDirectory "bridge-$timestamp.log"
     $log = New-Object System.Collections.Generic.List[string]
 
-    $log.Add("Sierra History Bridge v$Version")
-    $log.Add("Data folder: $resolvedDataFolder")
-    $log.Add("Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    $log.Add("")
+    $log.Add(
+        (
+            Format-LogRecord `
+                "INFO" `
+                "START" `
+                (
+                    "operation=Update; version={0}; data={1}; ready={2}; deferred={3}; unchanged={4}; retire={5}" -f
+                    $Version,
+                    $resolvedDataFolder,
+                    $ready.Count,
+                    $deferredScid.Count,
+                    $unchanged,
+                    $retire.Count)))
+
+    $log.Add(
+        (
+            Format-LogRecord `
+                "INFO" `
+                "STORAGE" `
+                (
+                    "free_bytes={0}; data_logical={1}; data_disk={2}; stale_temp_removed={3}; empty_folders_removed={4}; recovery_files={5}; reclaimed_bytes={6}" -f
+                    $freeAfterCleanup,
+                    $storageAfterCleanup.DataLogical,
+                    $storageAfterCleanup.DataDisk,
+                    $storageCleanup.StaleTemps,
+                    $storageCleanup.EmptyDirectories,
+                    $storageCleanup.RecoveryFiles,
+                    $storageCleanup.ReclaimedBytes)))
 
     if ($preflightLogPath) {
-        $log.Add("Preflight report: $preflightLogPath")
-        $log.Add("")
+        $log.Add(
+            (
+                Format-LogRecord `
+                    "INFO" `
+                    "PREFLIGHT" `
+                    (
+                        "report={0}; checks={1}; decisions={2}" -f
+                        $preflightLogPath,
+                        $preflightLines.Count,
+                        $decisionCandidates.Count)))
     }
 
-    if ($preflightLines.Count -gt 0) {
-        $log.Add("SCID preflight validation:")
-        foreach ($line in $preflightLines) {
-            $log.Add("  $line")
-        }
-        $log.Add("")
+    foreach ($line in $preflightLines) {
+        $log.Add(
+            (
+                Format-LogRecord `
+                    "INFO" `
+                    "PREFLIGHT" `
+                    $line))
+    }
+
+    foreach ($entry in $script:EarlyUpdateDiagnostics) {
+        $log.Add(
+            $entry)
+    }
+
+    foreach ($entry in $liveValidationLogEntries) {
+        $log.Add(
+            $entry)
+    }
+
+    foreach ($entry in $retireLogEntries) {
+        $log.Add(
+            $entry)
     }
 
     # Create the log before file updates begin.
-    $log | Set-Content -LiteralPath $logPath -Encoding UTF8
+    $log |
+        Set-Content `
+            -LiteralPath $logPath `
+            -Encoding UTF8
 
     $updated = 0
     $failed = 0
@@ -7167,7 +7439,7 @@ function Invoke-SierraHistoryBridge {
                         $statusPrefix)
 
                 [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
-                    "$statusPrefix | VERIFY SCID")
+                    "$statusPrefix | Verify SCID")
 
                 $targetMeta =
                     [SierraHistoryBridge.ScidBridge]::GetMeta(
@@ -7190,8 +7462,13 @@ function Invoke-SierraHistoryBridge {
                     $warningFiles++
 
                     $storageEntry =
-                        "STORAGE WARNING $($candidate.TargetName): " +
-                        $storageResult.Warning
+                        Format-LogRecord `
+                            "WARN" `
+                            "STORAGE" `
+                            (
+                                "file={0}; status=WARNING; error={1}" -f
+                                $candidate.TargetName,
+                                $storageResult.Warning)
 
                     $log.Add($storageEntry)
                     Add-Content `
@@ -7203,8 +7480,13 @@ function Invoke-SierraHistoryBridge {
                     $storageResult.Pruned) {
 
                     $storageEntry =
-                        "STORAGE $($candidate.TargetName) reclaimed_bytes=" +
-                        $storageResult.SavedBytes
+                        Format-LogRecord `
+                            "INFO" `
+                            "STORAGE" `
+                            (
+                                "file={0}; reclaimed_bytes={1}" -f
+                                $candidate.TargetName,
+                                $storageResult.SavedBytes)
 
                     $log.Add($storageEntry)
                     Add-Content `
@@ -7224,7 +7506,7 @@ function Invoke-SierraHistoryBridge {
 
             if ($candidate.DailyNeeded) {
                 [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
-                    "$statusPrefix | UPDATE DLY")
+                    "$statusPrefix | Update DLY")
 
                 $dailyResult =
                     [SierraHistoryBridge.DailyBridge]::Sync(
@@ -7254,8 +7536,13 @@ function Invoke-SierraHistoryBridge {
 
                     if ($dailySaved -gt 0) {
                         $storageEntry =
-                            "STORAGE $($candidate.DailyTargetName) reclaimed_bytes=" +
-                            $dailySaved
+                            Format-LogRecord `
+                                "INFO" `
+                                "STORAGE" `
+                                (
+                                    "file={0}; reclaimed_bytes={1}" -f
+                                    $candidate.DailyTargetName,
+                                    $dailySaved)
 
                         $log.Add($storageEntry)
                         Add-Content `
@@ -7268,8 +7555,13 @@ function Invoke-SierraHistoryBridge {
                     $warningFiles++
 
                     $storageEntry =
-                        "STORAGE WARNING $($candidate.DailyTargetName): " +
-                        $_.Exception.Message
+                        Format-LogRecord `
+                            "WARN" `
+                            "STORAGE" `
+                            (
+                                "file={0}; status=WARNING; error={1}" -f
+                                $candidate.DailyTargetName,
+                                $_.Exception.Message)
 
                     $log.Add($storageEntry)
                     Add-Content `
@@ -7365,10 +7657,6 @@ function Invoke-SierraHistoryBridge {
                             $previousState.PSObject.Properties["scid_managed_by_bridge"]) {
                             [bool]$previousState.scid_managed_by_bridge
                         }
-                        elseif ($previousState -and
-                            $previousState.source_signature) {
-                            $true
-                        }
                         else {
                             $false
                         }
@@ -7431,75 +7719,45 @@ function Invoke-SierraHistoryBridge {
                 New-Object System.Collections.Generic.List[string]
 
             if ($candidate.ScidDeferred) {
-                $statusParts.Add("SCID deferred")
+                $statusParts.Add(
+                    "SCID deferred")
             }
             elseif ($candidate.ScidSkipped) {
-                $statusParts.Add("SCID skipped")
+                $statusParts.Add(
+                    "SCID skipped")
             }
             elseif ($scidResult) {
-                if ($scidResult.TailRecords -gt 0) {
-                    $mergeLabel =
-                        if ($candidate.ScidTemporaryMerge) {
-                            "temporary-merge"
-                        }
-                        else {
-                            "live-merge"
-                        }
-
-                    $scidStatus =
-                        "SCID {0} source={1:N0} used={2:N0} + Rithmic={3:N0} -> out={4:N0}" -f
-                        $mergeLabel,
-                        $scidResult.SourceRecords,
-                        $scidResult.SourceRecordsWritten,
-                        $scidResult.TailRecords,
-                        $scidResult.OutputRecords
-
-                    $statusParts.Add($scidStatus)
+                if ($candidate.ScidTemporaryMerge) {
+                    $statusParts.Add(
+                        "SCID temporary merge")
+                }
+                elseif ($scidResult.TailRecords -gt 0) {
+                    $statusParts.Add(
+                        "SCID live merge")
                 }
                 else {
-                    $scidStatus =
-                        "SCID replace src={0:N0} -> out={1:N0}" -f
-                        $scidResult.SourceRecords,
-                        $scidResult.OutputRecords
-
-                    $statusParts.Add($scidStatus)
+                    $statusParts.Add(
+                        "SCID updated")
                 }
             }
             elseif ($targetMeta) {
-                $scidStatus =
-                    "SCID current={0:N0}" -f
-                    $targetMeta.Records
-
-                $statusParts.Add($scidStatus)
-            }
-            else {
-                $statusParts.Add("SCID none")
+                $statusParts.Add(
+                    "SCID current")
             }
 
             if ($dailyResult) {
-                $dailyStatus =
-                    "DLY src={0:N0} applied={1:N0} kept={2:N0} replaced={3:N0} -> out={4:N0}" -f
-                    $dailyResult.SourceRecords,
-                    $dailyResult.SourceAppliedRecords,
-                    $dailyResult.PreservedTargetRecords,
-                    $dailyResult.ReplacedOrDroppedTargetRecords,
-                    $dailyResult.OutputRecords
-
-                $statusParts.Add($dailyStatus)
+                $statusParts.Add(
+                    "DLY updated")
             }
             elseif ($dailyTargetMeta) {
-                $dailyStatus =
-                    "DLY current={0:N0}" -f
-                    $dailyTargetMeta.Records
-
-                $statusParts.Add($dailyStatus)
-            }
-            else {
-                $statusParts.Add("DLY none")
+                $statusParts.Add(
+                    "DLY current")
             }
 
             $elapsed =
-                if ($scidResult -and $dailyResult) {
+                if ($scidResult -and
+                    $dailyResult) {
+
                     $scidResult.ElapsedSeconds +
                     $dailyResult.ElapsedSeconds
                 }
@@ -7516,14 +7774,14 @@ function Invoke-SierraHistoryBridge {
             $finalStatus =
                 "{0} | OK | {1} | {2:0.0}s" -f
                 $statusPrefix,
-                ($statusParts -join " | "),
+                ($statusParts -join " + "),
                 $elapsed
 
             if ($scidResult -and
                 $scidResult.OutOfOrderRecords -gt 0) {
+
                 $finalStatus +=
-                    " | WARN:{0}" -f
-                    $scidResult.OutOfOrderRecords
+                    " | warning"
             }
 
             [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
@@ -7541,31 +7799,37 @@ function Invoke-SierraHistoryBridge {
                         "replace"
                     }
 
-                $entry =
-                    "SCID OK $($candidate.SourceName) -> $($candidate.TargetName) " +
-                    "mode=$scidMode " +
-                    "scale=x$($scales[$candidate.Group]) " +
-                    "source_records=$($scidResult.SourceRecords) " +
-                    "source_records_written=$($scidResult.SourceRecordsWritten) " +
-                    "newer_rithmic_records=$($scidResult.TailRecords) " +
-                    "handoff_datetime=$($scidResult.HandoffDateTime) " +
-                    "handoff_verified_trade_seconds=$($scidResult.HandoffVerifiedTradeSeconds) " +
-                    "output_records=$($scidResult.OutputRecords) " +
-                    "target_bytes=$($targetMeta.Length) " +
-                    "conversion_seconds=$($scidResult.ConversionSeconds) " +
-                    "flush_seconds=$($scidResult.FlushSeconds) " +
-                    "validation_seconds=$($scidResult.ValidationSeconds) " +
-                    "replace_seconds=$($scidResult.ReplaceSeconds) " +
-                    "elapsed=$($scidResult.ElapsedSeconds)"
+                $entryMessage =
+                    "source=$($candidate.SourceName); target=$($candidate.TargetName); " +
+                    "mode=$scidMode; " +
+                    "scale=x$($scales[$candidate.Group]); " +
+                    "source_records=$($scidResult.SourceRecords); " +
+                    "source_records_written=$($scidResult.SourceRecordsWritten); " +
+                    "rithmic_tail_records=$($scidResult.TailRecords); " +
+                    "handoff_datetime=$($scidResult.HandoffDateTime); " +
+                    "handoff_verified_trade_seconds=$($scidResult.HandoffVerifiedTradeSeconds); " +
+                    "output_records=$($scidResult.OutputRecords); " +
+                    "target_bytes=$($targetMeta.Length); " +
+                    "conversion_seconds=$($scidResult.ConversionSeconds); " +
+                    "flush_seconds=$($scidResult.FlushSeconds); " +
+                    "validation_seconds=$($scidResult.ValidationSeconds); " +
+                    "replace_seconds=$($scidResult.ReplaceSeconds); " +
+                    "elapsed_seconds=$($scidResult.ElapsedSeconds)"
 
                 if ($candidate.ScidValidation) {
-                    $entry +=
-                        " preflight_grade=$($candidate.ScidPairGrade)" +
-                        " preflight_coverage_pct=$($candidate.ScidValidation.CommonCoveragePercent)" +
-                        " preflight_volume_match_pct=$($candidate.ScidValidation.VolumeMatchPercent)" +
-                        " preflight_last_price_match_pct=$($candidate.ScidValidation.LastPriceMatchPercent)" +
-                        " preflight_aggregate_volume_diff_pct=$($candidate.ScidValidation.AggregateVolumeDifferencePercent)"
+                    $entryMessage +=
+                        "; preflight_grade=$($candidate.ScidPairGrade)" +
+                        "; preflight_coverage_pct=$($candidate.ScidValidation.CommonCoveragePercent)" +
+                        "; preflight_volume_match_pct=$($candidate.ScidValidation.VolumeMatchPercent)" +
+                        "; preflight_last_price_match_pct=$($candidate.ScidValidation.LastPriceMatchPercent)" +
+                        "; preflight_aggregate_volume_diff_pct=$($candidate.ScidValidation.AggregateVolumeDifferencePercent)"
                 }
+
+                $entry =
+                    Format-LogRecord `
+                        "INFO" `
+                        "SCID" `
+                        $entryMessage
 
                 $log.Add($entry)
                 Add-Content -LiteralPath $logPath -Value $entry -Encoding UTF8
@@ -7585,12 +7849,17 @@ function Invoke-SierraHistoryBridge {
                         $scidResult.LargestBackwardMicroseconds / 1000000.0
 
                     $warning =
-                        "SCID WARNING $($candidate.SourceName): " +
-                        "out_of_order=$($scidResult.OutOfOrderRecords) " +
-                        "first_index=$($scidResult.FirstOutOfOrderIndex) " +
-                        "prior=$prior offending=$offending " +
-                        "largest_backward_seconds=$backSeconds " +
-                        "action=preserved_record_order"
+                        Format-LogRecord `
+                            "WARN" `
+                            "SCID" `
+                            (
+                                "source={0}; out_of_order_records={1}; first_index={2}; prior={3}; offending={4}; largest_backward_seconds={5}; action=preserve_record_order" -f
+                                $candidate.SourceName,
+                                $scidResult.OutOfOrderRecords,
+                                $scidResult.FirstOutOfOrderIndex,
+                                $prior,
+                                $offending,
+                                $backSeconds)
 
                     $log.Add($warning)
                     Add-Content -LiteralPath $logPath -Value $warning -Encoding UTF8
@@ -7599,15 +7868,21 @@ function Invoke-SierraHistoryBridge {
 
             if ($dailyResult) {
                 $dailyEntry =
-                    "DLY OK $($candidate.DailySourceName) -> $($candidate.DailyTargetName) " +
-                    "scale=x$($scales[$candidate.Group]) " +
-                    "source_records=$($dailyResult.SourceRecords) " +
-                    "source_applied=$($dailyResult.SourceAppliedRecords) " +
-                    "target_records_preserved=$($dailyResult.PreservedTargetRecords) " +
-                    "target_records_replaced_or_dropped=$($dailyResult.ReplacedOrDroppedTargetRecords) " +
-                    "latest_source_date_preserved_from_target=$($dailyResult.PreservedLatestSourceDate) " +
-                    "output_records=$($dailyResult.OutputRecords) " +
-                    "elapsed=$($dailyResult.ElapsedSeconds)"
+                    Format-LogRecord `
+                        "INFO" `
+                        "DLY" `
+                        (
+                            "source={0}; target={1}; scale=x{2}; source_records={3}; source_applied={4}; target_records_preserved={5}; target_records_replaced_or_dropped={6}; latest_source_date_preserved_from_target={7}; output_records={8}; elapsed_seconds={9}" -f
+                            $candidate.DailySourceName,
+                            $candidate.DailyTargetName,
+                            $scales[$candidate.Group],
+                            $dailyResult.SourceRecords,
+                            $dailyResult.SourceAppliedRecords,
+                            $dailyResult.PreservedTargetRecords,
+                            $dailyResult.ReplacedOrDroppedTargetRecords,
+                            $dailyResult.PreservedLatestSourceDate,
+                            $dailyResult.OutputRecords,
+                            $dailyResult.ElapsedSeconds)
 
                 $log.Add($dailyEntry)
                 Add-Content -LiteralPath $logPath -Value $dailyEntry -Encoding UTF8
@@ -7632,12 +7907,17 @@ function Invoke-SierraHistoryBridge {
                 $runtimeDeferred++
 
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                    "$statusPrefix | DEFERRED | $compactError")
+                    "$statusPrefix | DEFERRED")
 
                 $entry =
-                    "DEFERRED $(Get-CandidateSourceDisplay $candidate) -> " +
-                    "$(Get-CandidateTargetDisplay $candidate): " +
-                    $_.Exception.Message
+                    Format-LogRecord `
+                        "WARN" `
+                        "DEFER" `
+                        (
+                            "source={0}; target={1}; error={2}" -f
+                            (Get-CandidateSourceDisplay $candidate),
+                            (Get-CandidateTargetDisplay $candidate),
+                            $_.Exception.Message)
 
                 $log.Add($entry)
                 Add-Content `
@@ -7649,13 +7929,17 @@ function Invoke-SierraHistoryBridge {
                 $warningFiles++
 
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                    "$statusPrefix | OK | reporting warning: $compactError")
+                    "$statusPrefix | OK | log warning")
 
                 $entry =
-                    "REPORTING WARNING " +
-                    "$(Get-CandidateSourceDisplay $candidate) -> " +
-                    "$(Get-CandidateTargetDisplay $candidate): " +
-                    $_.Exception.Message
+                    Format-LogRecord `
+                        "WARN" `
+                        "REPORTING" `
+                        (
+                            "source={0}; target={1}; error={2}" -f
+                            (Get-CandidateSourceDisplay $candidate),
+                            (Get-CandidateTargetDisplay $candidate),
+                            $_.Exception.Message)
 
                 $log.Add($entry)
                 Add-Content `
@@ -7667,12 +7951,17 @@ function Invoke-SierraHistoryBridge {
                 $failed++
 
                 [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
-                    "$statusPrefix | FAILED | $compactError")
+                    "$statusPrefix | FAILED")
 
                 $entry =
-                    "ERROR $(Get-CandidateSourceDisplay $candidate) -> " +
-                    "$(Get-CandidateTargetDisplay $candidate): " +
-                    $_.Exception.Message
+                    Format-LogRecord `
+                        "ERROR" `
+                        "UPDATE" `
+                        (
+                            "source={0}; target={1}; error={2}" -f
+                            (Get-CandidateSourceDisplay $candidate),
+                            (Get-CandidateTargetDisplay $candidate),
+                            $_.Exception.Message)
 
                 $log.Add($entry)
                 Add-Content `
@@ -7682,8 +7971,12 @@ function Invoke-SierraHistoryBridge {
 
                 if ($_.ScriptStackTrace) {
                     $stackEntry =
-                        "STACK " +
-                        ($_.ScriptStackTrace -replace "[\r\n]+", " | ")
+                        Format-LogRecord `
+                            "ERROR" `
+                            "STACK" `
+                            ($_.ScriptStackTrace -replace "[
+
+]+", " | ")
 
                     $log.Add($stackEntry)
                     Add-Content `
@@ -7696,8 +7989,12 @@ function Invoke-SierraHistoryBridge {
                     $_.InvocationInfo.PositionMessage) {
 
                     $positionEntry =
-                        "POSITION " +
-                        ($_.InvocationInfo.PositionMessage -replace "[\r\n]+", " | ")
+                        Format-LogRecord `
+                            "ERROR" `
+                            "POSITION" `
+                            ($_.InvocationInfo.PositionMessage -replace "[
+
+]+", " | ")
 
                     $log.Add($positionEntry)
                     Add-Content `
@@ -7710,16 +8007,35 @@ function Invoke-SierraHistoryBridge {
     }
 
     Save-JsonFile $StatePath ([pscustomobject]@{
+        schema_version = $StateSchemaVersion
         sources = (Convert-HashtableToObject $stateTable)
     })
 
-    $log | Set-Content -LiteralPath $logPath -Encoding UTF8
-
     $updateStopwatch.Stop()
+
+    $log.Add(
+        (
+            Format-LogRecord `
+                $(if ($failed -eq 0) { "INFO" } else { "ERROR" }) `
+                "SUMMARY" `
+                (
+                    "updated={0}; retired={1}; failed={2}; unchanged={3}; warnings={4}; runtime_deferred={5}; elapsed_seconds={6:0.000}" -f
+                    $updated,
+                    $retiredTargets,
+                    $failed,
+                    $unchanged,
+                    ($warningFiles + $retireWarnings),
+                    $runtimeDeferred,
+                    $updateStopwatch.Elapsed.TotalSeconds)))
+
+    $log |
+        Set-Content `
+            -LiteralPath $logPath `
+            -Encoding UTF8
 
     Write-Host
     Write-Host (
-        "Done: {0} updated | {1} retired | {2} failed | {3} unchanged | {4} warning file(s) | {5:0.0}s" -f
+        "Complete: {0} updated | {1} retired | {2} failed | {3} unchanged | {4} warning(s) | {5:0.0}s" -f
         $updated,
         $retiredTargets,
         $failed,
@@ -7744,7 +8060,7 @@ function Invoke-SierraHistoryBridge {
     Write-Host
     Write-Host "Log:      $logPath"
     Write-Host "Archive:  $archiveDirectory"
-    Write-Host "Recovery: $backupDirectory"
+    Write-Host "Recovery staging: $backupDirectory"
     Write-Host (
         "Free:     {0}" -f
         (Format-StorageBytes $freeAtEnd))
@@ -7772,7 +8088,7 @@ function Invoke-SierraHistoryBridge {
             "Archive option: {0} older SC Data contract(s) are outside the bridge window and remain available to Sierra." -f
             $olderSourceContracts.Count)
         Write-Host (
-            "Use Archive Historical Data / archive.cmd when you want to compress selected source contracts. Restoring returns the exact original filenames.")
+            "Use Archive SC Data or archive.cmd to move selected source contracts offline.")
     }
 
     switch ($sierraHandling) {
@@ -7846,6 +8162,7 @@ function Invoke-SierraHistoryUtilityMode {
         $Mode `
         $resolvedDataFolder)
 
+
     switch ($Mode) {
         "Archive" {
             return Invoke-SourceArchiveManager `
@@ -7888,12 +8205,19 @@ try {
 }
 catch {
     Write-Host
-    Write-Host "ERROR" -ForegroundColor Red
+    Write-Host "Error" -ForegroundColor Red
     Write-Host $_.Exception.Message
+
+    Write-UtilityLog `
+        "ERROR" `
+        "ERROR" `
+        $_.Exception.ToString()
+
     $exitCode = 1
 }
 finally {
-    Stop-UtilityOperationLog
+    Stop-UtilityOperationLog `
+        $exitCode
 
     if ($script:DeferredCleanupDirectories.Count -gt 0) {
         try {
@@ -7901,7 +8225,7 @@ finally {
         }
         catch {
             Write-Host (
-                "CLEANUP WARNING: could not start deferred cleanup helper: " +
+                "Cleanup warning: could not start deferred cleanup helper: " +
                 $_.Exception.Message) `
                 -ForegroundColor Yellow
         }

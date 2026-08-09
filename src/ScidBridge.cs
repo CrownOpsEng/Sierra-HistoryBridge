@@ -1934,7 +1934,7 @@ namespace SierraHistoryBridge
 
                         UpdateStatusLine(
                             statusPrefix +
-                            " | VALIDATE " +
+                            " | Validate " +
                             percent.ToString() + "%");
                     }
                 }
@@ -2027,7 +2027,7 @@ namespace SierraHistoryBridge
 
                         UpdateStatusLine(
                             statusPrefix +
-                            " | VALIDATE " +
+                            " | Validate " +
                             percent.ToString() + "%");
                     }
 
@@ -2277,7 +2277,7 @@ namespace SierraHistoryBridge
 
                         UpdateStatusLine(
                             statusPrefix +
-                            " | VALIDATE " +
+                            " | Validate " +
                             percent.ToString() + "%");
                     }
 
@@ -2563,11 +2563,31 @@ namespace SierraHistoryBridge
             LastStatusLength = clearTo;
         }
 
+        public static void ClearStatusLine()
+        {
+            if (Console.IsOutputRedirected)
+            {
+                LastStatusLength = 0;
+                return;
+            }
+
+            if (LastStatusLength > 0)
+            {
+                Console.Write(
+                    "\r" +
+                    new String(' ', LastStatusLength) +
+                    "\r");
+
+                Console.Out.Flush();
+            }
+
+            LastStatusLength = 0;
+        }
+
         public static void CompleteStatusLine(string line)
         {
-            // Final result lines are never truncated: they contain exact record
-            // totals used for verification. A very narrow console may wrap the
-            // line, but no verification data is discarded.
+            // Final result lines are kept intact. Detailed metrics belong in
+            // the operation log rather than the console status line.
             line = line ?? String.Empty;
 
             if (Console.IsOutputRedirected)
@@ -2609,7 +2629,7 @@ namespace SierraHistoryBridge
 
             UpdateStatusLine(
                 String.Format(
-                    "{0} | CONVERT {1,3}% | {2:0}/{3:0} MB | {4:0} MB/s",
+                    "{0} | Convert {1,3}% | {2:0}/{3:0} MB | {4:0} MB/s",
                     statusPrefix,
                     Math.Min(100, percent),
                     completedMb,
@@ -3005,7 +3025,7 @@ namespace SierraHistoryBridge
 
                     UpdateStatusLine(
                         statusPrefix +
-                        " | FLUSHING | writing cached data to disk");
+                        " | Flush");
 
                     DateTime flushStarted = DateTime.UtcNow;
                     output.Flush(true);
@@ -3060,7 +3080,7 @@ namespace SierraHistoryBridge
 
                 UpdateStatusLine(
                     statusPrefix +
-                    " | VALIDATE | checking converted SCID");
+                    " | Verify");
 
                 DateTime validationStarted = DateTime.UtcNow;
 
@@ -3129,7 +3149,7 @@ namespace SierraHistoryBridge
 
                 UpdateStatusLine(
                     statusPrefix +
-                    " | REPLACE | updating Rithmic target");
+                    " | Replace");
 
                 DateTime replaceStarted = DateTime.UtcNow;
 

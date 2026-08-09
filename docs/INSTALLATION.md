@@ -1,163 +1,100 @@
-# Installation and maintenance
+# Installation
 
-## Recommended installation
+## Requirements
 
-Run:
+- Windows
+- Sierra Chart
+- Windows PowerShell 5.1
+- a Sierra Chart Data folder containing SC Data and/or Rithmic history files
+
+## Install
+
+Extract the release and run:
 
 ```text
 setup.cmd
 ```
 
-For most users, choose:
+Choose:
+
+- current user — installs under `%LOCALAPPDATA%\Programs\Sierra History Bridge`
+- all users — installs under `%ProgramFiles%\Sierra History Bridge`
+
+Setup can create Start Menu shortcuts and registers the application in Windows
+Installed apps.
+
+## Configured folders
+
+Setup records four locations:
+
+- **Data** — Sierra Chart Data folder
+- **Archive** — persistent compressed archives
+- **Recovery** — temporary replacement/recovery staging
+- **Logs** — operation logs
+
+Default storage locations are under the Sierra Chart Data folder:
 
 ```text
-Current user
+SCID_Bridge_Archive
+SCID_Bridge_Backups
+SCID_Bridge_Logs
 ```
 
-This installs the program under the user's local Programs directory and avoids administrator elevation.
+Archive, Recovery, and Logs may be placed on other drives.
 
-Choose **All users** only when the application should be installed for every Windows user on the machine. That installation goes under `Program Files` and requires administrator approval.
+## Explorer integration
 
-## Start Menu shortcuts
+The installer creates scoped Explorer commands.
 
-Setup asks whether to create a Start Menu / All apps folder.
+Configured Sierra Data folder:
 
-When enabled, the folder contains:
+- **Update History**
+- **Storage Report**
 
-- **Sierra History Bridge**
-- **Sierra History Bridge Documentation**
-- **Repair Sierra History Bridge**
-- **Uninstall Sierra History Bridge**
+SC Data `.scid` and `.dly` files directly in the Data folder:
 
-The shortcuts are optional. File Explorer integration and the Windows Installed apps entry are created regardless.
+- **Archive SC Data**
 
-## File Explorer integration
+Verified `.gz` files in `SCID_Bridge_Archive\SC_Data`:
 
-Setup installs scoped Explorer commands rather than a global folder-background
-menu:
+- **Restore SC Data**
 
-- right-click the configured Sierra Data folder: **Update Sierra history from
-  SC Data** and **Sierra History Bridge storage report**
-- right-click a two-digit-year SC Data `.scid` or `.dly` file directly in the
-  configured Data folder: **Archive SC Data source**
-- right-click a `.gz` file under the configured `SC_Data` archive:
-  **Restore Sierra history archive**
-- right-click a recognized `.gz` under `Rithmic_Baselines`, `Rollbacks`, or
-  `Legacy_Backups`: **Rollback Rithmic data**
+Verified `.gz` files in `Rithmic_Baselines` and `Rollbacks`:
 
-On Windows 11, commands may appear under **Show more options**, depending on the
-Explorer configuration.
+- **Rollback Rithmic**
 
+On Windows 11 these entries may appear under **Show more options**.
 
-## Windows Installed apps entry
+## Start Menu
 
-Setup registers Sierra History Bridge with Windows so it appears in:
+When enabled, the Start Menu folder contains:
 
-```text
-Settings → Apps → Installed apps
-```
-
-The registration includes:
-
-- display name and version
-- publisher
-- install location
-- uninstall command
-- quiet uninstall command
-- repair/modify command for Windows interfaces that honor it
-- estimated installed size
+- Sierra History Bridge
+- Archive SC Data
+- Restore SC Data
+- Rollback Rithmic
+- Storage Report
+- Sierra History Bridge Documentation
+- Repair Sierra History Bridge
+- Uninstall Sierra History Bridge
 
 ## Repair
 
-Repair recopies the application and documentation from the clean repair payload stored under:
-
-```text
-<install folder>\setup\payload.zip
-```
-
-It then validates the PowerShell application, compiles the SCID conversion engine, rebuilds Explorer integration, recreates Start Menu shortcuts according to the saved preference, and refreshes the Installed apps registration.
-
-Ways to repair:
+Run:
 
 ```text
 repair.cmd
 ```
 
-or rerun:
+or run `setup.cmd` and choose Repair.
 
-```text
-setup.cmd
-```
-
-and choose **Repair / update**.
-
-If Start Menu shortcuts were enabled, a Repair shortcut is also available there.
+Repair reinstalls the packaged application files and Explorer/Start Menu
+integration while preserving current settings and state.
 
 ## Uninstall
 
-Use any of:
+Use Windows Settings → Apps → Installed apps, run `uninstall.cmd`, or use the
+Start Menu shortcut.
 
-```text
-uninstall.cmd
-```
-
-the Start Menu uninstall shortcut, or:
-
-```text
-Settings → Apps → Installed apps → Sierra History Bridge → Uninstall
-```
-
-Uninstall removes:
-
-- installed program files
-- Explorer context-menu entries
-- Start Menu shortcuts
-- Installed apps registration
-
-It asks whether to remove saved application settings/state.
-
-The following are intentionally left alone:
-
-```text
-SierraChart\Data\SCID_Bridge_Backups
-SierraChart\Data\SCID_Bridge_Logs
-```
-
-They are recovery/history files inside the user's Sierra Chart data directory.
-
-## Storage layout
-
-### Program files
-
-Current user:
-
-```text
-%LOCALAPPDATA%\Programs\Sierra History Bridge
-```
-
-All users:
-
-```text
-%ProgramFiles%\Sierra History Bridge
-```
-
-### Mutable per-user state
-
-```text
-%LOCALAPPDATA%\SierraHistoryBridge
-```
-
-This contains:
-
-- `config.json` — remembered Sierra Chart Data folder and verified symbol-group scales
-- `state.json` — processed-source signatures
-- `setup.log` — setup/repair/uninstall diagnostics
-
-### Sierra Chart-generated bridge data
-
-Inside the selected Sierra Chart Data directory:
-
-```text
-SCID_Bridge_Backups
-SCID_Bridge_Logs
-```
+Uninstall can remove the saved application settings/state. Archive, Recovery,
+and Log folders are not deleted automatically.

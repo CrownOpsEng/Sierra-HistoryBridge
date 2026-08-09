@@ -113,7 +113,7 @@ if ($appText -match '(?s)\.Add\(\s*"[^"]+"\s*-f\s*[\r\n ]+\$[^)]*,') {
     throw "Formatting regression: a comma-separated -f expression is being passed directly to .Add(...)."
 }
 
-if ($appText -notmatch 'REPORTING WARNING') {
+if ($appText -notmatch '"REPORTING"') {
     throw "Reporting-safety regression: committed updates are not protected from reporting failures."
 }
 
@@ -139,9 +139,18 @@ $dailySignatureText =
         $dailySignatureStart,
         $dailySignatureEnd - $dailySignatureStart)
 
-if ($dailySignatureText -match 'DailyModifiedTicks|LastWriteTimeUtc' -or
-    $dailySignatureText -notmatch 'Get-FileHash') {
-    throw "Historical Daily source signature must use content hashing only."
+if ($dailySignatureText -match 'ModifiedTicks|LastWriteTime|\.Ticks') {
+    throw "Historical Daily source signature must not use modification time."
+}
+
+foreach ($dailySignatureToken in @(
+    'Get-FileHash',
+    '-Algorithm SHA256',
+    'sha256:'
+)) {
+    if ($dailySignatureText -notlike "*$dailySignatureToken*") {
+        throw "Historical Daily source-signature requirement is missing: $dailySignatureToken"
+    }
 }
 
 foreach ($dailyDirtyToken in @(
@@ -188,7 +197,7 @@ foreach ($preflightToken in @(
     'ValidatePair',
     'ValidateFile',
     'Get-ScidPairGrade',
-    'SCID preflight validation',
+    'Test-ScidPreflightSnapshotCurrent',
     'temporary-merge',
     'Keep the Rithmic target and defer',
     'SOURCE_CHANGED_DURING_VALIDATION',
@@ -276,7 +285,7 @@ foreach ($contextToken in @(
     'SystemFileAssociations\.scid',
     'SystemFileAssociations\.dly',
     'SystemFileAssociations\.gz',
-    'Sierra History Bridge storage report',
+    'Storage Report',
     'Configure-UserPaths'
 )) {
     if ($appText -notlike "*$contextToken*" -and
@@ -293,7 +302,7 @@ if ($setupText -match 'Directory\\Background\\shell\\\$ProductKey"\s*`?\r?\n\s*C
 foreach ($dirtyCheckToken in @(
     'GetQuickSignature',
     'QuickConvertedPairMatches',
-    'Test-LegacyScidSignatureEquivalent',
+    '$StateSchemaVersion = 1',
     'full SCID validation skipped by user',
     'Run full SCID validation now?'
 )) {
@@ -344,46 +353,51 @@ foreach ($cwdCleanupToken in @(
 }
 
 
-foreach ($deferredCleanupToken in @(
-    'Add-DeferredDirectoryCleanup',
-    'Start-DeferredDirectoryCleanupWorker',
-    'CLEANUP DEFERRED:',
-    'cleanup-{0}.log',
+foreach ($loggingToken in @(
+    'Format-LogRecord',
+    'Write-UtilityLog',
     'Start-UtilityOperationLog',
-    'Start-Transcript',
-    'Stop-Transcript'
+    'Start-DeferredDirectoryCleanupWorker',
+    'cleanup-{0}.log'
 )) {
-    if ($appText -notlike "*$deferredCleanupToken*") {
-        throw "Deferred-cleanup/logging regression: missing $deferredCleanupToken"
+    if ($appText -notlike "*$loggingToken*") {
+        throw "Logging regression: missing $loggingToken"
     }
 }
 
+if ($appText -match 'Start-Transcript|Stop-Transcript') {
+    throw "Logging regression: PowerShell transcript logging was reintroduced."
+}
 
 foreach ($flatArchiveToken in @(
-    'Convert-LegacyScDataArchiveLayout',
-    'Archive layout: flattened',
-    '($SourceFile.Name + ".gz")'
+    'Get-SourceArchivePath',
+    'Get-RithmicTargetNameFromBackupArchive',
+    'Get-ScDataSourceNameFromBaselineArchive',
+    'Rithmic_Baselines',
+    'Rollbacks',
+    'Restore_Conflicts'
 )) {
     if ($appText -notlike "*$flatArchiveToken*") {
-        throw "Flat SC_Data archive regression: missing $flatArchiveToken"
+        throw "Flat archive regression: missing $flatArchiveToken"
     }
 }
 
-if ($appText -match '\$safeGroup\s*=') {
-    throw "Flat SC_Data archive regression: group/year archive layout was reintroduced."
+if ($appText -notmatch '\$StateSchemaVersion\s*=\s*1') {
+    throw "State regression: schema version 1 is not defined."
 }
 
+if ($appText -notmatch 'schema_version\s*=\s*\$StateSchemaVersion') {
+    throw "State regression: state saves are not schema-versioned."
+}
 
 foreach ($rollbackToken in @(
     'Invoke-RithmicRollbackManager',
     'Get-RithmicBackupArchives',
     'New-RithmicUndoArchive',
     'Invalidate-BridgeStateForRithmicTarget',
-    'Rollback Rithmic data',
     'Selected backup retained'
 )) {
-    if ($appText -notlike "*$rollbackToken*" -and
-        $setupText -notlike "*$rollbackToken*") {
+    if ($appText -notlike "*$rollbackToken*") {
         throw "Rithmic rollback regression: missing $rollbackToken"
     }
 }
@@ -416,15 +430,85 @@ if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "rollback.cmd") -PathType 
     throw "Rithmic rollback regression: rollback.cmd is missing."
 }
 
-foreach ($finalReleaseToken in @(
-    'selectedNameBeforeMigration',
+foreach ($menuText in @(
+    'Update History',
+    'Storage Report',
+    'Archive SC Data',
+    'Restore SC Data',
+    'Rollback Rithmic'
+)) {
+    if ($setupText -notlike "*$menuText*") {
+        throw "Explorer-menu regression: missing concise menu text: $menuText"
+    }
+}
+
+foreach ($storageToken in @(
     'DataLogical',
     'DataDisk',
     'Tracked total'
 )) {
-    if ($appText -notlike "*$finalReleaseToken*") {
-        throw "Final-release regression: missing $finalReleaseToken"
+    if ($appText -notlike "*$storageToken*") {
+        throw "Storage-report regression: missing $storageToken"
     }
+}
+
+$archivePathFunctionStart =
+    $appText.IndexOf('function Get-ScidArchivePaths')
+
+$archivePathFunctionEnd =
+    $appText.IndexOf('function Read-ScidArchiveMeta')
+
+$archivePathFunction =
+    $appText.Substring(
+        $archivePathFunctionStart,
+        $archivePathFunctionEnd - $archivePathFunctionStart)
+
+if ($archivePathFunction -like '*$sourceStem*' -or
+    $archivePathFunction -like '*FullYear*') {
+    throw "Flat archive regression: nested Rithmic archive paths were reintroduced."
+}
+
+if ($appText -match 'Join-Path\s+`\s*\r?\n\s+\$directory\s+`\s*\r?\n\s+"Manual"') {
+    throw "Flat archive regression: a Manual rollback subdirectory was reintroduced."
+}
+
+$licenseText =
+    Get-Content `
+        -LiteralPath (Join-Path $RepoRoot "LICENSE") `
+        -Raw
+
+if ($licenseText -notmatch 'Mozilla Public License Version 2.0' -or
+    $licenseText -notmatch '2.1. Grants') {
+    throw "License regression: the official MPL 2.0 text is missing."
+}
+
+foreach ($licenseReference in @(
+    "README.md",
+    "README.txt",
+    "CONTRIBUTING.md"
+)) {
+    $licenseReferenceText =
+        Get-Content -LiteralPath (Join-Path $RepoRoot $licenseReference) -Raw
+
+    if ($licenseReferenceText -notmatch 'Mozilla Public License 2.0') {
+        throw "License regression: $licenseReference does not identify MPL 2.0."
+    }
+}
+
+foreach ($sourceFile in @(
+    Get-ChildItem -LiteralPath (Join-Path $RepoRoot "src") -File -Recurse
+    Get-ChildItem -LiteralPath (Join-Path $RepoRoot "scripts") -File -Recurse
+    Get-ChildItem -LiteralPath (Join-Path $RepoRoot "tests") -File -Recurse
+    Get-ChildItem -LiteralPath $RepoRoot -File -Filter "*.cmd"
+)) {
+    $sourceText = Get-Content -LiteralPath $sourceFile.FullName -Raw
+    if ($sourceText -notmatch 'SPDX-License-Identifier: MPL-2.0') {
+        throw "License regression: missing MPL SPDX notice in $($sourceFile.FullName)."
+    }
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "docs\RELEASE.md"))) {
+    throw "Documentation regression: release guide is missing."
 }
 
 $required = @(
@@ -445,6 +529,7 @@ $required = @(
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "docs\RELEASE.md",
     "LICENSE",
     "VERSION"
 )

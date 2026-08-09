@@ -21,8 +21,8 @@ $ErrorActionPreference = "Stop"
 
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
-$Publisher = "Sierra History Bridge contributors"
-$Version = "0.0.25"
+$Publisher = "Sierra History Bridge"
+$Version = "0.0.26"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -30,9 +30,21 @@ $SetupLog = Join-Path $UserDataRoot "setup.log"
 
 New-Item -ItemType Directory -Path $UserDataRoot -Force | Out-Null
 
-function Write-SetupLog([string]$Message) {
-    $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -LiteralPath $SetupLog -Value "[$stamp] $Message" -Encoding UTF8
+function Write-SetupLog(
+    [string]$Message,
+    [string]$Level = "INFO") {
+
+    $stamp =
+        Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+
+    Add-Content `
+        -LiteralPath $SetupLog `
+        -Value (
+            "{0} | {1,-5} | SETUP | {2}" -f
+            $stamp,
+            $Level.ToUpperInvariant(),
+            $Message) `
+        -Encoding UTF8
 }
 
 function Show-Header {
@@ -133,19 +145,6 @@ function Get-ExistingInstallation {
                 }
             }
             catch { }
-        }
-    }
-
-    # Development builds before v0.0.25 stored program files below the mutable
-    # application-data folder. Detect them so setup can migrate cleanly.
-    $legacyApp = Join-Path $UserDataRoot "app"
-    if (Test-Path -LiteralPath (Join-Path $legacyApp "SierraHistoryBridge.ps1")) {
-        return [pscustomobject]@{
-            Scope = "CurrentUser"
-            InstallLocation = $legacyApp
-            Version = "development"
-            StartMenuShortcuts = $false
-            Legacy = $true
         }
     }
 
@@ -361,7 +360,7 @@ function Configure-UserPaths([bool]$IsRepair) {
         Write-Host "Configured Sierra folders:"
         Write-Host "  Data:     $currentData"
         Write-Host "  Archive:  $currentArchive"
-        Write-Host "  Recovery: $currentRecovery"
+        Write-Host "  Recovery staging: $currentRecovery"
         Write-Host "  Logs:     $currentLogs"
 
         $answer =
@@ -425,7 +424,7 @@ function Configure-UserPaths([bool]$IsRepair) {
             Write-Host
             $answer =
                 Read-Host (
-                    "Customize archive, recovery, or log folders? [y/N]")
+                    "Customize archive, recovery staging, or log folders? [y/N]")
 
             $customize =
                 $answer.Trim().ToLowerInvariant() -in @("y", "yes")
@@ -801,7 +800,7 @@ function New-InstalledRepairPayload([string]$InstallDirectory) {
     }
 }
 
-function Test-InstalledPayload([string]$InstallDirectory) {
+function Test-PayloadRuntime([string]$InstallDirectory) {
     $mainScript = Join-Path $InstallDirectory "app\SierraHistoryBridge.ps1"
     $converter = Join-Path $InstallDirectory "app\ScidBridge.cs"
     $setupScript = Join-Path $InstallDirectory "setup\Setup.ps1"
@@ -826,7 +825,7 @@ function Test-InstalledPayload([string]$InstallDirectory) {
         $parseColumn = $firstParseError.Extent.StartColumnNumber
 
         throw (
-            "The installed application script did not pass PowerShell syntax validation " +
+            "The package application script did not pass PowerShell syntax validation " +
             "at line $parseLine, column $parseColumn`: " +
             $firstParseError.Message)
     }
@@ -840,24 +839,40 @@ function Remove-ExplorerIntegration([string]$InstallScope) {
     $classesRoot =
         Get-ClassesRegistryRoot $InstallScope
 
-    foreach ($path in @(
-        "$classesRoot\Directory\shell\$ProductKey",
-        "$classesRoot\Directory\shell\$ProductKey.Update",
-        "$classesRoot\Directory\shell\$ProductKey.Storage",
-        "$classesRoot\Directory\Background\shell\$ProductKey",
-        "$classesRoot\SystemFileAssociations\.scid\shell\$ProductKey.Archive",
-        "$classesRoot\SystemFileAssociations\.dly\shell\$ProductKey.Archive",
-        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore",
-        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.RollbackBaseline",
-        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.RollbackCurrent",
-        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.RollbackLegacy"
-    )) {
-        if (Test-Path -LiteralPath $path) {
-            Remove-Item `
-                -LiteralPath $path `
-                -Recurse `
-                -Force `
-                -ErrorAction SilentlyContinue
+    $shellRoots =
+        @(
+            "$classesRoot\Directory\shell",
+            "$classesRoot\Directory\Background\shell",
+            "$classesRoot\SystemFileAssociations\.scid\shell",
+            "$classesRoot\SystemFileAssociations\.dly\shell",
+            "$classesRoot\SystemFileAssociations\.gz\shell"
+        )
+
+    foreach ($root in $shellRoots) {
+        if (-not (
+            Test-Path `
+                -LiteralPath $root)) {
+            continue
+        }
+
+        foreach ($key in @(
+            Get-ChildItem `
+                -LiteralPath $root `
+                -ErrorAction SilentlyContinue)) {
+
+            if ($key.PSChildName.Equals(
+                    $ProductKey,
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                $key.PSChildName.StartsWith(
+                    $ProductKey + ".",
+                    [StringComparison]::OrdinalIgnoreCase)) {
+
+                Remove-Item `
+                    -LiteralPath $key.PSPath `
+                    -Recurse `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            }
         }
     }
 }
@@ -898,8 +913,7 @@ function Install-ExplorerIntegration(
         $dataFolder +
         '"'
 
-    # AQS starts-with comparison. This applies to file items; unlike
-    # Directory\Background, static file verbs support AppliesTo filtering.
+    # AQS starts-with comparison scopes static file verbs to configured roots.
     $sourceArchiveFolder =
         Join-Path $archiveFolder "SC_Data"
 
@@ -917,14 +931,14 @@ function Install-ExplorerIntegration(
 
     New-ExplorerVerb `
         "$classesRoot\Directory\shell\$ProductKey.Update" `
-        "Update Sierra history from SC Data" `
+        "Update History" `
         ($baseCommand + ' -Mode Update -Interactive') `
         $icon `
         $folderAppliesTo
 
     New-ExplorerVerb `
         "$classesRoot\Directory\shell\$ProductKey.Storage" `
-        "Sierra History Bridge storage report" `
+        "Storage Report" `
         ($baseCommand + ' -Mode Storage -Interactive') `
         "$env:SystemRoot\System32\shell32.dll,4" `
         $folderAppliesTo
@@ -938,7 +952,7 @@ function Install-ExplorerIntegration(
 
         New-ExplorerVerb `
             "$classesRoot\SystemFileAssociations\$extension\shell\$ProductKey.Archive" `
-            "Archive SC Data source" `
+            "Archive SC Data" `
             ($baseCommand + ' -Mode Archive -SelectedFile "%1" -Interactive') `
             "$env:SystemRoot\System32\shell32.dll,46" `
             $sourceFileAppliesTo
@@ -946,7 +960,7 @@ function Install-ExplorerIntegration(
 
     New-ExplorerVerb `
         "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore" `
-        "Restore Sierra history archive" `
+        "Restore SC Data" `
         ($baseCommand + ' -Mode Restore -SelectedFile "%1" -Interactive') `
         "$env:SystemRoot\System32\shell32.dll,167" `
         $archiveFileAppliesTo
@@ -960,10 +974,6 @@ function Install-ExplorerIntegration(
         [pscustomobject]@{
             Key = "$ProductKey.RollbackCurrent"
             Path = Join-Path $archiveFolder "Rollbacks"
-        },
-        [pscustomobject]@{
-            Key = "$ProductKey.RollbackLegacy"
-            Path = Join-Path $archiveFolder "Legacy_Backups"
         }
     )) {
         $rollbackAppliesTo =
@@ -975,7 +985,7 @@ function Install-ExplorerIntegration(
 
         New-ExplorerVerb `
             "$classesRoot\SystemFileAssociations\.gz\shell\$($rollbackScope.Key)" `
-            "Rollback Rithmic data" `
+            "Rollback Rithmic" `
             ($baseCommand + ' -Mode Rollback -SelectedFile "%1" -Interactive') `
             "$env:SystemRoot\System32\shell32.dll,167" `
             $rollbackAppliesTo
@@ -1039,23 +1049,23 @@ function Install-StartMenuShortcuts(
         -IconLocation "$PowerShellExe,0"
 
     New-Shortcut `
-        -ShortcutPath (Join-Path $directory "Archive Historical Data.lnk") `
+        -ShortcutPath (Join-Path $directory "Archive SC Data.lnk") `
         -TargetPath $PowerShellExe `
         -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Archive -Interactive') `
         -WorkingDirectory $InstallDirectory `
-        -Description "Compress selected SC Data source files for offline archival." `
+        -Description "Archive selected SC Data files with verified compression." `
         -IconLocation "$env:SystemRoot\System32\shell32.dll,46"
 
     New-Shortcut `
-        -ShortcutPath (Join-Path $directory "Restore Historical Data.lnk") `
+        -ShortcutPath (Join-Path $directory "Restore SC Data.lnk") `
         -TargetPath $PowerShellExe `
         -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Restore -Interactive') `
         -WorkingDirectory $InstallDirectory `
-        -Description "Restore archived SC Data source files to Sierra Chart." `
+        -Description "Restore verified SC Data archives to Sierra Chart." `
         -IconLocation "$env:SystemRoot\System32\shell32.dll,167"
 
     New-Shortcut `
-        -ShortcutPath (Join-Path $directory "Rollback Rithmic Data.lnk") `
+        -ShortcutPath (Join-Path $directory "Rollback Rithmic.lnk") `
         -TargetPath $PowerShellExe `
         -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Rollback -Interactive') `
         -WorkingDirectory $InstallDirectory `
@@ -1149,7 +1159,7 @@ function Register-Uninstaller(
         UninstallString = $uninstallString
         QuietUninstallString = $quietUninstallString
         ModifyPath = $modifyPath
-        Comments = "Updates Rithmic-named Sierra Chart intraday files with SC Data historical records."
+        Comments = "Maintains Rithmic Sierra Chart history from SC Data sources."
         EstimatedSize = (Get-DirectorySizeKb $InstallDirectory)
         StartMenuShortcuts = $(if ($CreateStartMenu) { 1 } else { 0 })
         InstallScope = $InstallScope
@@ -1179,17 +1189,6 @@ function Remove-UninstallerRegistration([string]$InstallScope) {
     }
 }
 
-function Remove-LegacyDevelopmentFiles {
-    $legacyApp = Join-Path $UserDataRoot "app"
-    $legacyRuntime = Join-Path $UserDataRoot "runtime"
-
-    foreach ($path in @($legacyApp, $legacyRuntime)) {
-        if (Test-Path -LiteralPath $path) {
-            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
 function Invoke-InstallOrRepair(
     [string]$InstallScope,
     [bool]$CreateStartMenu,
@@ -1210,11 +1209,32 @@ function Invoke-InstallOrRepair(
     Write-Host "  Program files: $installDirectory"
     Write-Host "  User settings: $UserDataRoot"
 
+    $validationDirectory =
+        Join-Path `
+            $env:TEMP `
+            ("SierraHistoryBridge-Validate-" +
+                [guid]::NewGuid().ToString("N"))
+
     try {
-        $payload = Resolve-PayloadRoot $ResolvedSourceRoot $installDirectory
-        Copy-ApplicationPayload $payload.Root $installDirectory
-        Test-InstalledPayload $installDirectory
-        New-InstalledRepairPayload $installDirectory
+        $payload =
+            Resolve-PayloadRoot `
+                $ResolvedSourceRoot `
+                $installDirectory
+
+        # Validate the exact package payload before touching the installed app.
+        Copy-ApplicationPayload `
+            $payload.Root `
+            $validationDirectory
+
+        Test-PayloadRuntime `
+            $validationDirectory
+
+        Copy-ApplicationPayload `
+            $payload.Root `
+            $installDirectory
+
+        New-InstalledRepairPayload `
+            $installDirectory
 
         $settings =
             Configure-UserPaths $IsRepair
@@ -1227,19 +1247,16 @@ function Invoke-InstallOrRepair(
         Install-StartMenuShortcuts $InstallScope $installDirectory $CreateStartMenu
         Register-Uninstaller $InstallScope $installDirectory $CreateStartMenu
 
-        Remove-LegacyDevelopmentFiles
-
         Write-SetupLog "$($(if ($IsRepair) { 'Repair' } else { 'Install' })) completed: scope=$InstallScope path=$installDirectory"
 
         Write-Host
         Write-Host "Completed successfully." -ForegroundColor Green
         Write-Host
-        Write-Host "File Explorer:"
-        Write-Host "  Right-click the configured Sierra Data folder for Update or Storage."
-        Write-Host "  Right-click .scid/.dly source files in that folder to archive them."
-        Write-Host "  Right-click SC_Data .gz archives to restore them."
-        Write-Host "  Right-click Rithmic backup .gz files to roll back their targets."
-        Write-Host "  The bridge does not add a global blank-space menu to unrelated folders."
+        Write-Host "Explorer commands:"
+        Write-Host "  Data folder: Update History, Storage Report"
+        Write-Host "  SC Data files: Archive SC Data"
+        Write-Host "  SC Data archives: Restore SC Data"
+        Write-Host "  Rithmic backups: Rollback Rithmic"
         Write-Host
         Write-Host "Windows Settings:"
         Write-Host "  $ProductName is registered under Installed apps for standard removal."
@@ -1247,9 +1264,9 @@ function Invoke-InstallOrRepair(
             Write-Host
             Write-Host "Start Menu / All apps:"
             Write-Host "  $ProductName"
-            Write-Host "  Archive Historical Data"
-            Write-Host "  Restore Historical Data"
-            Write-Host "  Rollback Rithmic Data"
+            Write-Host "  Archive SC Data"
+            Write-Host "  Restore SC Data"
+            Write-Host "  Rollback Rithmic"
             Write-Host "  Storage Report"
             Write-Host "  Repair $ProductName"
             Write-Host "  Uninstall $ProductName"
@@ -1257,9 +1274,24 @@ function Invoke-InstallOrRepair(
         }
     }
     finally {
+        if (Test-Path `
+            -LiteralPath $validationDirectory) {
+
+            Remove-Item `
+                -LiteralPath $validationDirectory `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+
         if ($payload -and $payload.Temporary -and
             (Test-Path -LiteralPath $payload.Root)) {
-            Remove-Item -LiteralPath $payload.Root -Recurse -Force -ErrorAction SilentlyContinue
+
+            Remove-Item `
+                -LiteralPath $payload.Root `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
         }
     }
 }
@@ -1317,15 +1349,6 @@ function Invoke-Uninstall([string]$InstallScope, [string]$InstallDirectory) {
     Remove-UninstallerRegistration $InstallScope
 
     $removeData = Ask-RemoveUserData
-
-    # Remove legacy setup/runtime material from earlier development builds.
-    $legacyApp = Join-Path $UserDataRoot "app"
-    $legacyRuntime = Join-Path $UserDataRoot "runtime"
-    foreach ($legacy in @($legacyApp, $legacyRuntime)) {
-        if (Test-Path -LiteralPath $legacy) {
-            Remove-Item -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
 
     if ($removeData) {
         foreach ($file in @("config.json", "state.json")) {
@@ -1453,9 +1476,9 @@ try {
 }
 catch {
     $exitCode = 1
-    Write-SetupLog "ERROR: $($_.Exception.ToString())"
+    Write-SetupLog $_.Exception.ToString() "ERROR"
     Write-Host
-    Write-Host "SETUP ERROR" -ForegroundColor Red
+    Write-Host "Setup error" -ForegroundColor Red
     Write-Host $_.Exception.Message
     Write-Host
     Write-Host "Setup log:"

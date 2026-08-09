@@ -1,391 +1,210 @@
 # Technical design
 
-## Data files
+## Symbol mapping
 
-Sierra Chart uses separate files for intraday and Historical Daily data:
-
-```text
-.scid   intraday data
-.dly    Historical Daily data
-```
-
-SCID and Historical Daily sources are discovered independently and joined by
-futures root, delivery month, two-digit year, and exchange. Either source type
-can exist without the other.
-
-## SCID conversion
-
-The converter expects Sierra Chart's documented SCID layout:
+SC Data futures filenames use a two-digit year:
 
 ```text
-56-byte header
-40-byte records
+NQU26-CME.scid
 ```
 
-Each record contains:
+Rithmic filenames use one year digit:
 
 ```text
-DateTime
-Open
-High
-Low
-Close
-NumTrades
-TotalVolume
-BidVolume
-AskVolume
+NQU6.CME.scid
 ```
 
-For single-trade records, `Open` can contain Sierra control values instead of a
-price. `Open` is scaled only when positive. Zero and negative values are kept
+The bridge only creates Rithmic aliases inside a rolling window that remains
+within one decade.
+
+## Managed window
+
+The contract window is:
+
+```text
+5 years usable history
++ 3 months rollover buffer
++ 6 months forward buffer
+```
+
+When two SC Data contracts would map to the same one-digit Rithmic filename,
+the newest eligible contract owns that alias.
+
+Unmanaged Rithmic files are never retired.
+
+## SCID format
+
+Sierra Chart SCID files use a 56-byte header and 40-byte records.
+
+The conversion preserves:
+
+- SCDateTimeMS timestamp
+- trade/high/low/close semantics
+- NumTrades
+- TotalVolume
+- BidVolume
+- AskVolume
+- Sierra special Open/control markers
+
+Only positive price fields are scaled. Control-marker values are preserved
 bit-for-bit.
 
-The price scale is verified from overlapping SC Data and Rithmic files and
-stored per root/exchange group.
+## Price scale
 
-SC Data supplies records through the end of the source history. Rithmic records
-sufficiently newer than the source are retained. A short timestamp guard removes
-the normal overlap near the source boundary.
+The raw-price multiplier is not stored in the SCID header.
 
-SCID output is written to a temporary file, flushed, checked, and then moved
-into place. Existing targets receive a rolling backup.
+The bridge infers and stores a scale for each root/exchange group from
+overlapping SCID or Historical Daily source/target files. A saved scale is used
+only after it has been established from actual overlapping data.
 
-If a source timestamp moves backward, record order is preserved. The condition
-is counted and written to the run log; timestamps are not sorted or rewritten.
+## Historical SCID replacement
 
-## Historical Daily processing
+A historical target is rebuilt from the SC Data source.
 
-Historical Daily files use the documented fields:
+The temporary output is:
 
-```text
-Date, Open, High, Low, Close, Volume, OpenInterest
-```
+1. written separately
+2. durably flushed
+3. structurally validated
+4. checked against expected records
+5. atomically published
 
-The daily processor validates the header, field count, numeric values, and
-strictly increasing dates. Prices use the same verified scale as the matching
-SCID contract.
+The source and target metadata are rechecked around validation/conversion. A
+changing file is deferred.
 
-Daily files are merged by date:
+## Live-sensitive SCID handling
 
-1. SC Data supplies the output through its latest date.
-2. If the Rithmic target contains the same latest date, that target row is
-   retained for that date.
-3. Target rows strictly newer than the latest SC Data date are retained.
-4. Older target-only rows are not retained.
-5. The result is sorted by date.
+A current target may contain Rithmic records newer than the SC Data source.
 
-The latest-date rule avoids replacing an actively updating Rithmic daily row
-with a less-current Historical Daily row. When SC Data advances, the previous
-date is replaced normally on the next run.
+When required, the bridge verifies at least three consecutive active seconds by
+total volume, bid/ask volume, and scaled last price before selecting a handoff:
 
-Daily output is written to a temporary file, flushed, checked, and then moved
-into place. Existing `.dly` targets receive `.dly.bak` backups.
+- SC Data owns records before the handoff second
+- Rithmic owns the handoff second and everything newer
 
-## Processed-file state
+The target is not changed when this strict half-open boundary cannot be proven.
 
-SCID and Historical Daily state are tracked independently for each contract.
-Either file can update without forcing the other to be rewritten.
+## Historical Daily handling
 
-Saved checks include source signatures, target paths, record counts, and first
-and last timestamps/dates. A deleted, truncated, or recreated target is
-processed again.
+Historical Daily files are text/CSV.
 
-## Rolling Rithmic history window
+For each update:
 
-The default managed range is:
+- SC Data supplies rows through its latest date
+- the existing Rithmic row for that same latest date may be retained
+- Rithmic dates newer than the source are retained
+- older target-only dates are dropped
 
-```text
-current month - 5 years - 3 months
-through
-current month + 6 months
-```
+Daily state uses a SHA-256 source signature and verified target metadata.
 
-The three-month older buffer exceeds Sierra Chart's documented two-month
-contract-transition range. The six-month forward buffer allows nearby future
-contracts to be staged before rollover.
+## State
 
-SC Data files outside the range remain unchanged. Bridge-managed Rithmic files
-that leave the range are retired only after saved target metadata is checked.
+`state.json` uses schema version 1.
 
-## Windows installation
+SCID state records:
 
-Setup supports current-user and all-users installation. Program files and
-mutable per-user state are stored separately.
+- source content fingerprint
+- target path
+- minimum target record count
+- first target timestamp
+- minimum target last timestamp
+- whether the SCID target is bridge-managed
 
-The C# engine is compiled with the standard Windows PowerShell 5.1 `Add-Type`
-path and does not require custom compiler options, LINQ, or unsafe code.
+Daily state records the corresponding Daily source signature and target
+metadata.
 
+Unsupported or malformed state is ignored and rebuilt from the current files.
 
-## Independent source discovery
+### SCID dirty check
 
-The scanner builds the managed contract set from both SC Data naming forms:
+The SCID fingerprint contains:
 
-```text
-<root><month><YY>-<exchange>.scid
-<root><month><YY>-<exchange>.dly
-```
+- byte length
+- first timestamp
+- last timestamp
+- deterministic sampled SHA-256
 
-The history window is applied to the combined contract set. Historical Daily
-contracts are therefore included even when intraday history has not been
-downloaded for the same delivery month.
+If saved state is missing, a fast distributed converted-pair check can confirm
+that an existing target already matches the source without forcing a rewrite.
 
-Price scale can be proven from either an overlapping SCID pair or an overlapping
-Historical Daily pair. A previously proven scale for the same root/exchange can
-also be reused.
+## Preflight validation
 
-## Old Rithmic files
+When an existing historical Rithmic SCID is available, the bridge compares the
+source and independent reference using one-second aggregation.
 
-Unmanaged Rithmic files are not removed.
+A STRONG match requires:
 
-When a one-digit Rithmic symbol is reused by a newer decade, the eligible source
-replaces the old target content. SCID conversion keeps only target records newer
-than the source boundary. Historical Daily processing keeps only the latest
-overlapping date and target dates newer than the source boundary.
+- common coverage ≥ 99%
+- exact per-second volume ≥ 98%
+- last-price agreement ≥ 99%
+- aggregate volume difference ≤ 0.5%
 
+The report also records bid/ask volume, source/target richness, ordering, and
+coverage notes.
 
-## Live-file handling
+A baseline captured from the original Rithmic target remains independent
+cross-feed evidence. A bridge-managed target is labeled as managed consistency,
+not independent cross-feed validation.
 
-Sierra Chart opens SCID files with shared read/write access and can buffer
-streaming data before flushing it to disk. Replacing a file that can still
-receive streaming writes therefore requires a different policy from replacing
-an expired historical contract.
+## Persistent archives
 
-A pending SCID update is classified as live-sensitive when any of the following
-is true:
-
-- the SC Data source ends within the last seven days
-- the existing Rithmic target ends within the last seven days
-
-The seven-day interval is a safety margin for weekends and exchange holidays.
-It is not used to decide contract rollover or trading eligibility.
-
-When Sierra Chart is running, live-sensitive SCID replacement requires either:
-
-- disconnecting the data feed and closing the affected chartbooks, or
-- closing Sierra Chart
-
-The user can instead skip those SCID files and continue with independent
-Historical Daily or expired-contract updates.
-
-Historical files are attempted while Sierra Chart remains open. If an open file
-handle prevents replacement, the operation fails without replacing the target
-and the user can close the affected chart/chartbook and retry.
-
-After a successful historical replacement, **Chart > Reload and Recalculate**
-causes an already-open chart to reread its chart-data file.
-
-
-
-## Historical Daily change detection
-
-Historical Daily and SCID change detection are independent.
-
-Because `.dly` files are small, the source Daily file uses a SHA-256 content
-signature. File modification time is not used to decide whether a Daily target
-needs to be rewritten.
-
-If saved state is missing or comes from an older bridge version, the bridge
-performs a semantic comparison between the SC Data source and the Rithmic
-target using the verified price scale and the normal Daily merge rules. If the
-target already represents the expected result, the state is refreshed without
-rewriting the `.dly` file.
-
-This prevents an SCID download, file copy, or timestamp-only change from causing
-an unrelated Historical Daily update.
-
-
-## SCID source authority and live handoff
-
-Historical contracts use source-only replacement:
+Market-data archives are flat inside their semantic category.
 
 ```text
-SC Data source -> scale conversion -> Rithmic-named target
+SC_Data\
+Rithmic_Baselines\
+Rollbacks\
+Restore_Conflicts\
 ```
 
-No target records are retained. Record count and file length must match the
-source exactly.
-
-A live-sensitive contract can preserve a genuinely newer target segment. Raw
-microsecond timestamps are not compared across feeds. The target must extend
-into a later whole second, or contain greater total volume when both feeds end
-in the same second. The trailing overlap must then contain at least three
-consecutive active seconds with matching total, bid, and ask volume plus scaled
-last price.
+Rithmic baseline and automatic rollback filenames include both source and
+target identities:
 
 ```text
-SC Data: timestamps < handoff second
-Rithmic: timestamps >= handoff second
+NQH22-CME.scid__NQH2.CME.scid.gz
 ```
 
-The selected second is a strict half-open boundary. If the boundary cannot be
-verified, or either side is non-monotonic, the target is not changed.
+This prevents one-digit-year ambiguity without directory partitioning.
 
-Before replacement, the bridge re-reads source metadata and modification time.
-For a live merge it does the same for the target. Any change causes the
-temporary output to be discarded.
+Each verified archive has a `.meta` sidecar containing the information required
+for validation or restore.
 
-Historical sources are also deferred when a matching Historical Daily source
-shows that the SCID file has not yet reached the end of the contract, or when
-the SCID source was modified within the last five seconds.
+## Rithmic rollback
 
-## SCID preflight validation
+A manual rollback:
 
-When both an SC Data source and an existing Rithmic SCID target are available,
-the bridge compares them before any history file is replaced.
+1. requires Sierra Chart to be closed
+2. identifies the target from the verified backup
+3. compares the current target to the selected backup
+4. saves a different current target as a manual undo backup
+5. restores and verifies the selected backup
+6. invalidates the corresponding saved state
 
-The comparison is performed over the complete overlapping time range at
-one-second resolution. It records:
+The selected backup is retained.
 
-- structural validity and record alignment
-- source and target timestamp ordering
-- first and last timestamps and record counts
-- overlap coverage in seconds
-- exact per-second total-volume agreement
-- exact per-second bid-volume and ask-volume agreement
-- exact last-price agreement after the verified raw-price scale is applied
-- aggregate overlap-volume difference
-- the proportion of records containing bid/ask spread information
+## Recovery staging
 
-A strong comparison currently requires at least 100 common seconds, at least
-99% common-second coverage, at least 98% exact per-second volume agreement, at
-least 99% exact last-price agreement, and no more than 0.5% aggregate overlap
-volume difference. These thresholds classify cross-feed consistency; a failure
-does not by itself prove that either feed is corrupt.
+Raw `.bak` files are temporary recovery material produced during replacement.
 
-Structural faults, out-of-order source records, incomplete coverage, or weak
-cross-feed agreement are surfaced before conversion. Ambiguous cases require a
-user decision. With unattended `-Yes` operation, ambiguous SCID work is deferred
-rather than forced.
+Successful historical replacements remove their temporary backups after
+verification. Live/temporary merges retain a verified compressed rollback when
+required.
 
-### Incomplete historical sources
+Unexpected files left in Recovery are not silently converted or deleted by
+startup cleanup.
 
-If Historical Daily coverage or the existing Rithmic target shows that an SCID
-source ends early, the bridge does not silently replace the more complete
-Rithmic file.
+## Logging
 
-If the overlapping data validates strongly and the Rithmic target only extends
-later than the source, the interactive choices are:
-
-1. keep the Rithmic target and defer the SCID update (default)
-2. create a temporary merge using verified SC Data for the overlap and Rithmic
-   only beyond the source boundary
-3. cancel the run
-
-A temporary merge is deliberately not marked current in bridge state. A later
-run re-evaluates the contract and rebuilds it when the SC Data source is
-complete.
-
-The bridge also rechecks source and target metadata after validation and after
-conversion. If either file changes during either operation, the temporary work
-is discarded and the SCID update is deferred.
-
-### Independent Rithmic baseline
-
-On the first bridge replacement of an existing Rithmic SCID target, the bridge
-preserves an immutable compressed validation copy under:
+Logs use:
 
 ```text
-SCID_Bridge_Archive\Rithmic_Baselines\<SC-contract>\<Rithmic-filename>.gz
+timestamp | level | event | message
 ```
 
-The two-digit source-contract directory prevents Rithmic one-digit-year alias
-collisions. The `.gz` filename preserves the original Rithmic filename. A small
-`.meta` sidecar stores uncompressed size, record count, first/last timestamps,
-original write time, and SHA-256.
+The console presents operational status and decisions. Detailed validation
+metrics, record counts, hashes, timings, and errors are kept in logs.
 
-Later preflight runs compare directly against the compressed baseline by
-streaming decompression, avoiding both circular validation and a full-size
-temporary extraction.
+## Runtime
 
-Raw `.bak` files are temporary recovery files. Historical replacements delete
-them after post-replacement validation. Live and temporary merges retain one
-compressed rollback archive instead. The immutable Rithmic baseline is never
-overwritten.
-
-For installations that were already processed by an older bridge version and
-do not have an immutable baseline, the current target can still be compared but
-is labeled `managed target`; it is not presented as independent Rithmic
-evidence.
-
-
-## Disk-space policy
-
-SCID conversion requires one full-size temporary output in the Sierra Data
-folder so replacement remains atomic. That scratch copy is the unavoidable
-peak cost of a safe conversion.
-
-The bridge minimizes everything around that requirement:
-
-- conversions run sequentially, so temporary SCID space is not multiplied by
-  the number of contracts
-- each SCID checks available free space immediately before writing
-- a 256 MB reserve is required beyond the estimated temporary output
-- insufficient-space updates are deferred before the target is touched
-- historical replacement backups are deleted only after successful
-  post-replacement validation
-- live/temporary rollback data and original Rithmic baselines are compressed
-  with streaming GZip and verified before raw files are deleted
-- leftover historical/Daily backups are pruned at startup when the current
-  target can be validated
-- stale `.scbridge.tmp` and `.dailybridge.tmp` files older than one hour are
-  removed at startup
-- bridge-generated targets retired outside the rolling Rithmic window are not
-  redundantly archived when the SC Data source can regenerate them
-
-SC Data source files are intentionally outside automatic storage cleanup. They
-are the authoritative source data and removing/compressing them would make them
-unavailable to Sierra Chart until restored.
-
-
-## Validation terminology
-
-`CROSS-FEED` is reserved for comparisons against independent Rithmic evidence,
-including an immutable Rithmic baseline captured before the bridge modified the
-target. A bridge-managed target can still be compared for consistency, but is
-reported as `MANAGED CONSISTENT` rather than independent corroboration.
-
-New source-only SCIDs which pass full structural validation are reported as
-`SOURCE VALID`; the absence of a second feed is stated explicitly.
-
-## Archive year resolution
-
-Two-digit SC Data contract years use a sliding century window. With a current
-year of 2026, `99` resolves to 1999 rather than 2099. This is required for
-1999-2026 source-history archive filtering and prevents early history from being
-misclassified as future data.
-
-
-## SCID dirty checking
-
-The old pre-release signature included `LastWriteTimeUtc`, which could cause a
-semantically unchanged Sierra source to be treated as dirty after Sierra or
-Windows touched the file. v0.0.25 now stores:
-
-```text
-v2 | byte length | first SCID timestamp | last SCID timestamp | sampled SHA-256
-```
-
-The sampled SHA-256 includes the SCID header, structural metadata, and 65
-deterministically distributed records. It is a fast dirty-check fingerprint,
-not a substitute for full validation.
-
-When state is missing/stale, `QuickConvertedPairMatches` compares structural
-metadata and 257 deterministic records using the exact source-to-Rithmic price
-conversion. This is used only to recover "already converted" state and avoid a
-gratuitous rewrite. Full validation remains the authority when an actual change
-or anomaly requires a processing decision.
-
-
-## Rithmic rollback state handling
-
-A manual rollback restores the exact archived bytes and original file timestamp
-through the same verified GZip restore engine used by SC Data restore.
-
-If the restored target is SCID, the bridge state entry whose `target_path`
-matches that Rithmic target is removed. If the restored target is Historical
-Daily, only the Daily state fields are removed. This prevents stale state from
-classifying the rolled-back target as the prior bridge output on the next run.
-
-When a different current target exists, rollback first archives that current
-target under `Rollbacks\Manual\<timestamp>` so the manual rollback itself can be
-undone.
+The application targets stock Windows PowerShell 5.1 and compiles the embedded
+C# engine through plain `Add-Type`.

@@ -215,28 +215,28 @@ try {
 
     Write-Host "PASS: compressed Rithmic baseline round-trip and validation"
 
-    $legacyDaily =
+    $genericDaily =
         Join-Path $temp "NQU6.CME.dly.bak"
 
     [IO.File]::WriteAllText(
-        $legacyDaily,
+        $genericDaily,
         "Date, Open, High, Low, Close, Volume, OpenInterest`r`n2026/08/07, 1, 2, 0, 1, 10, 0`r`n")
 
-    $legacyDailyArchive =
+    $genericDailyArchive =
         Join-Path $temp "NQU6.CME.dly.gz"
 
     [void][SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
-        $legacyDaily,
-        $legacyDailyArchive,
+        $genericDaily,
+        $genericDailyArchive,
         $true,
         $false)
 
-    if ((Test-Path -LiteralPath $legacyDaily) -or
-        -not (Test-Path -LiteralPath $legacyDailyArchive)) {
+    if ((Test-Path -LiteralPath $genericDaily) -or
+        -not (Test-Path -LiteralPath $genericDailyArchive)) {
         throw "Generic compressed backup archive failed."
     }
 
-    Write-Host "PASS: generic compressed legacy backup"
+    Write-Host "PASS: generic compressed file archive"
 
     $meta = [SierraHistoryBridge.ScidBridge]::GetMeta($target)
     if ($meta.Records -ne 20) {

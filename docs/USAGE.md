@@ -1,312 +1,151 @@
 # Usage
 
-## Run
+## Update History
 
-Right-click the configured Sierra Chart `Data` folder itself and choose:
+Run:
 
 ```text
-Update Sierra history from SC Data
+run.cmd
 ```
 
-The bridge can also be run with `run.cmd`.
-
-## Update sequence
+or right-click the configured Sierra Data folder and choose **Update History**.
 
 A normal run:
 
-1. locates the Sierra Chart Data folder
-2. scans SC Data futures contracts
-3. applies the rolling Rithmic history window
-4. verifies the raw-price scale
-5. checks eligible `.scid` and `.dly` sources independently
-6. shows the update plan
-7. waits for Sierra Chart to close
-8. updates and validates the required files
-9. saves state and writes the run log
+1. loads the conversion engine
+2. resolves configured storage
+3. removes stale bridge temporary files
+4. scans the managed contract window
+5. verifies price scaling
+6. checks saved state and source/target integrity
+7. performs preflight validation when required
+8. shows the update plan
+9. applies confirmed changes
+10. verifies each published file and writes the operation log
 
-A contract can require an SCID update, a DLY update, both, or neither.
-Historical Daily files are included even when the matching SCID source is not
-present.
+### Full SCID validation
 
-```text
-UPDATE  NQU26-CME -> NQU6.CME | SCID current | DLY update
-UPDATE  NQZ26-CME -> NQZ6.CME | SCID update | DLY create
-```
+When changed or unknown historical SCIDs require full-file validation, the
+interactive run asks once before beginning the long scan.
 
-## Status display
+Choosing No defers those SCID updates. It never treats them as validated.
 
-Each contract uses one live status line. The retained result contains exact
-record totals.
+A live-sensitive merge preserves a Rithmic tail only after matching trade
+aggregates prove a whole-second handoff. SC Data contributes records before the
+boundary and Rithmic contributes records at or after it.
 
-```text
-[1/2] NQU26-CME -> NQU6.CME | OK | SCID src=19,571,469 -> out=19,571,469 | DLY src=349 applied=348 kept=1 -> out=349 | 9.8s
-```
+### Sierra Chart running
 
-For DLY results:
+Historical updates can run while Sierra Chart remains open.
 
-- `src`: SC Data daily records
-- `applied`: source records written into the result
-- `kept`: Rithmic target records retained
-- `out`: final records
+If a live-sensitive SCID requires replacement, the bridge offers explicit
+options to disconnect/close affected charts, close Sierra Chart, skip the live
+SCID, or cancel.
 
-## Historical Daily latest-date rule
-
-If the Rithmic `.dly` target contains the same date as the latest SC Data daily
-record, the Rithmic row is retained for that date.
-
-On a later run, when SC Data contains a newer date, the previous date becomes
-normal historical data and is replaced from SC Data.
-
-Rithmic dates newer than the latest SC Data date are retained. Older target-only dates are not carried forward.
-
-
-## Updating while Sierra Chart is running
-
-Historical updates do not require Sierra Chart to be closed.
-
-If the update plan contains a recent SCID target, the bridge treats it as a
-possible live file and asks how to proceed:
+Reload open charts after an update with:
 
 ```text
-1. Update all - disconnect Sierra Chart and close affected chartbooks
-2. Update all - close Sierra Chart
-3. Skip live SCID updates and continue with remaining updates
-4. Cancel
+Chart > Reload and Recalculate
 ```
 
-Option 3 is shown only when there is other work to perform.
+## Archive SC Data
 
-For option 1, use **File > Disconnect** and close the chartbooks using the live
-symbol. **File > Close All Chartbooks** is the simplest choice when several
-charts use that symbol.
-
-For historical-only updates, Sierra Chart can remain open. If an affected chart
-was already open, use **Chart > Reload and Recalculate** after the update.
-
-If Windows reports that a historical target is in use, close the affected
-chart/chartbook and run the bridge again.
-
-When `-Yes` is used while Sierra Chart is running, live SCID updates are skipped
-when other work is available. The switch does not bypass the live-file safety
-check.
-
-## Dry run
-
-```powershell
-.\app\SierraHistoryBridge.ps1 -DryRun -Interactive
-```
-
-## Force reprocessing
-
-```powershell
-.\app\SierraHistoryBridge.ps1 -Force -Interactive
-```
-
-## Rolling history window
-
-```text
-current month - 5 years - 3 months
-through
-current month + 6 months
-```
-
-Older SC Data contracts remain under their two-digit-year names.
-
-## Backups and logs
-
-```text
-SCID_Bridge_Backups
-SCID_Bridge_Logs
-```
-
-The backup directory can contain `.scid.bak` and `.dly.bak` files.
-
-
-## Files outside the managed range
-
-The application does not remove Rithmic files it did not create or previously
-record. Unused chart-data files can remain in the Data folder.
-
-Bridge-managed files can be retired after their saved metadata is verified.
-This is housekeeping rather than a requirement for chart loading.
-
-A newer eligible decade can reuse the same one-digit Rithmic filename. In that
-case the new conversion replaces the old contract data rather than merging old
-decade history into the new file.
-
-
-## Independent SCID and DLY updates
-
-SCID and Historical Daily files are checked independently. A changed SCID source
-does not cause the matching `.dly` file to be rewritten.
-
-The Daily source is identified by its file content rather than its Windows
-modification time. If an existing target already matches the expected Daily
-result, the plan reports `DLY current` even when the source file timestamp has
-changed.
-
-
-## Historical SCID replacement
-
-Historical SCID updates should normally show:
-
-```text
-SCID replace src=33,741,xxx -> out=33,741,xxx
-```
-
-The source and output record counts are identical. Their file sizes are also
-identical.
-
-If an old contract is still downloading, the plan can show:
-
-```text
-SCID deferred - SCID ends 2021-09-30; Daily history ends 2021-12-17
-```
-
-or the run can defer it if the source changes during conversion. The existing
-Rithmic target is left untouched.
-
-Only a live-sensitive contract can show `SCID live-merge`, and the log records
-the source total, source records used, preserved Rithmic records, and the
-handoff timestamp and number of matching trade seconds used to verify it.
-
-## Preflight data comparison
-
-Existing Rithmic SCID data is used as an independent validation source before it
-is replaced. The bridge shows a preflight line similar to:
-
-```text
-NQZ21-CME -> NQZ1.CME | STRONG | coverage=99.987% | volume/sec=99.562% | last-price=99.852% | aggregate-volume-diff=0.000153%
-```
-
-If the SC Data source is incomplete or the feeds disagree beyond the normal
-comparison thresholds, the bridge stops for that contract and asks for a
-decision before any history file is changed.
-
-The safe default is always to keep the existing target and defer the SCID
-update. A temporary SC Data/Rithmic merge is offered only when the overlap is
-strongly validated and Rithmic contributes later coverage without an earlier
-coverage segment that would be lost.
-
-The first time an existing Rithmic SCID is replaced, the bridge preserves an
-immutable compressed Rithmic baseline when the target has not previously
-been managed. Future comparisons read that `.gz` baseline directly without
-extracting it. The normal raw `.bak` file
-continues to hold the immediately previous target and may change on later runs.
-
-
-## Archive and restore commands
-
-Archiving is opt-in. It is separate from the normal update run.
+Run:
 
 ```text
 archive.cmd
+```
+
+or right-click a two-digit-year SC Data `.scid` / `.dly` file and choose
+**Archive SC Data**.
+
+Selections can be made by:
+
+- default: outside the managed Rithmic window
+- contract date range
+- contract age in days
+- all SC Data source files
+
+The source file is removed only after the GZip archive is decompressed and
+verified against the original byte count and SHA-256 hash.
+
+Archives are stored flat under:
+
+```text
+SCID_Bridge_Archive\SC_Data
+```
+
+Sierra Chart must be closed because the source file is removed from its active
+Data folder.
+
+## Restore SC Data
+
+Run:
+
+```text
 restore.cmd
-storage.cmd
 ```
 
-The interactive archive defaults to contract months older than the current
-bridge window. The interactive restore defaults to the most recent archived
-contract month. Both tools can filter by contract date range or number of days.
+or right-click an archive in `SC_Data` and choose **Restore SC Data**.
 
-Examples from an installed directory:
+Restore can select:
 
-```text
-archive.cmd -ToDate 2015-12-31
-archive.cmd -Days 3650
-restore.cmd -FromDate 2015-01-01 -ToDate 2016-12-31
-restore.cmd -Days 3650
-storage.cmd
-```
+- most recent archived contract
+- contract date range
+- recent contract months
+- all archives
 
-`-Days` refers to **contract-month age**, not the Windows file modification
-time. This is deliberate because a bulk historical download can give decades
-of files the same modification date.
+A successful restore removes the archive copy. If a different destination file
+already exists, the bridge can preserve that file as a verified conflict backup
+before replacement.
 
-Archive/restore requires Sierra Chart to be closed. A source archive is removed
-after a verified restore, so the same source is not retained twice by default.
-Conflicting destination files require an explicit decision and are preserved
-before replacement when that option is chosen.
+## Rollback Rithmic
 
-
-## Configured folders
-
-Setup stores these per-user settings:
-
-```text
-Sierra Chart Data folder
-Bridge archive folder
-Recovery folder
-Log folder
-```
-
-Archive/recovery/log locations default to subfolders of the Sierra Data folder
-but can be placed on another drive. Repair shows the current locations and
-offers to change them.
-
-When archive or restore is started while Sierra Chart is running, interactive
-mode no longer exits. It asks you to close Sierra Chart and rechecks after you
-press Enter.
-
-File-specific context actions use `-SelectedFile` internally and still validate
-that the selected item is a recognized SC Data source or bridge archive before
-changing anything.
-
-
-## Removing verified Rithmic baselines
-
-Run `storage.cmd`. If Rithmic baselines exist, Storage Report displays their
-count/size and offers:
-
-```text
-Verify and remove eligible baselines now? [y/N]
-```
-
-This is intentionally not automatic. The bridge performs one final full
-cross-feed validation before deleting each independent baseline. Baselines that
-are incomplete, inconsistent, unavailable, or otherwise uncertain remain
-untouched.
-
-
-## Logs
-
-Utility modes now log separately:
-
-```text
-archive-YYYYMMDD-HHMMSS.log
-restore-YYYYMMDD-HHMMSS.log
-storage-YYYYMMDD-HHMMSS.log
-cleanup-YYYYMMDD-HHMMSS.log
-```
-
-The cleanup log is created only when an empty bridge-owned directory has to be
-retried after the main process exits.
-
-
-## Flat archive browsing and bulk restore
-
-All user-managed SC Data archives live directly in
-`SCID_Bridge_Archive\SC_Data`. Restore's existing date-range, recent-days, and
-all-archive filters operate across the entire flat collection, so archived
-history is not partitioned by year folders.
-
-
-## Rithmic rollback
-
-Use:
+Run:
 
 ```text
 rollback.cmd
 ```
 
-or right-click a recognized Rithmic `.gz` backup and choose **Rollback Rithmic
-data**.
+or right-click a verified backup in `Rithmic_Baselines` or `Rollbacks` and
+choose **Rollback Rithmic**.
 
-Interactive `rollback.cmd` lists available baseline, rollback, and legacy
-Rithmic backups and restores one selection at a time. Before overwriting a
-different current target, the bridge creates a timestamped verified undo backup
-under `SCID_Bridge_Archive\Rollbacks\Manual`.
+Interactive rollback lists available backups and restores one selection.
 
-The backup being restored is retained. Bridge state for the restored target is
-invalidated so the next normal Update evaluates the restored data rather than
-assuming the prior bridge result is still current.
+If the current target differs from the selected backup, the current target is
+first saved as a timestamped manual undo backup in `Rollbacks`.
+
+The selected backup is retained. The corresponding saved bridge state is
+invalidated so the next Update evaluates the restored target normally.
+
+## Storage Report
+
+Run:
+
+```text
+storage.cmd
+```
+
+or right-click the configured Data folder and choose **Storage Report**.
+
+The report shows logical and allocated/on-disk usage for:
+
+- SC Data sources
+- Rithmic targets
+- archive
+- recovery staging
+- logs
+- other Data-folder files
+- Sierra Data folder total
+- total tracked storage
+- free space on the Data drive
+
+When independent Rithmic baselines are present, Storage Report can perform a
+final validation and remove baselines that are no longer needed.
+
+## Logs
+
+Detailed operation logs are written to the configured Logs folder.
+
+Use the console for current progress and decisions; use logs for validation
+metrics, record counts, timings, hashes, warnings, and error details.
