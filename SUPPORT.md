@@ -14,9 +14,8 @@ credentials, account secrets, unrelated trading records, or an active Sierra
 Chart Data folder.
 
 Report vulnerabilities and sensitive integrity problems through [GitHub private
-vulnerability reporting][private-report]. Conduct reports and corporate CLA
-exchange requests must use a private contact method listed on the
-[CrownOpsEng GitHub profile][maintainer].
+vulnerability reporting][private-report]. Send conduct reports and corporate
+CLA exchange requests to the [project maintainer][maintainer].
 
-[maintainer]: https://github.com/CrownOpsEng
+[maintainer]: mailto:265925262+CrownOpsEng@users.noreply.github.com
 [private-report]: https://github.com/CrownOpsEng/Sierra-HistoryBridge/security/advisories/new

@@ -47,9 +47,9 @@ officially representing the project in public spaces.
 
 ## Enforcement
 
-Report abusive, harassing, or otherwise unacceptable behavior privately using
-a contact method listed on the [CrownOpsEng GitHub profile][maintainer]. Do not
-publish a conduct report in a repository issue.
+Report abusive, harassing, or otherwise unacceptable behavior privately to the
+[project maintainer][maintainer]. Do not publish a conduct report in a
+repository issue.
 
 All complaints will be reviewed and investigated promptly and fairly. Project
 leaders will respect the privacy and security of the reporter.
@@ -96,6 +96,6 @@ Community Impact Guidelines were inspired by [Mozilla's code of conduct
 enforcement ladder][mozilla-coc].
 
 [homepage]: https://www.contributor-covenant.org
-[maintainer]: https://github.com/CrownOpsEng
+[maintainer]: mailto:265925262+CrownOpsEng@users.noreply.github.com
 [mozilla-coc]: https://github.com/mozilla/diversity
 [v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
