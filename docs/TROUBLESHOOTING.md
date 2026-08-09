@@ -135,3 +135,15 @@ Data folders are supported.
 A conflicting destination is arbitrary existing data. The bridge preserves it
 before replacement but does not assume its source identity, so it is named
 `--UN--` unless separate evidence establishes otherwise.
+
+
+## A rollback restored to a composite filename
+
+A prior build could interpret a malformed composite backup stem such as
+`NQH22-CME.scid-NQH2.CME.scid` as a Rithmic target. Current Repair recognizes
+that form, resolves the terminal target as `NQH2.CME.scid`, fixes recoverable
+backup names/metadata, and refuses restore when a target cannot be established
+safely.
+
+An already-created composite file in the active Data folder is not deleted
+automatically because its contents may be unique. Review it before removing it.

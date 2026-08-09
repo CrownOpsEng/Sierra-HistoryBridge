@@ -2,7 +2,7 @@
 
 Release artifacts must contain the repository's `LICENSE` file and retain required source-file licensing notices.
 
-## v0.0.33 validation checklist
+## v0.0.34 validation checklist
 
 1. run `tests\Run-SelfTest.ps1`
 2. run `tests\Test-Package.ps1`
@@ -44,7 +44,7 @@ and the resulting backup/target provenance is MX.
 ## Version
 
 ```text
-v0.0.33
+v0.0.34
 ```
 
 Do not change the version unless the owner explicitly chooses a new release

@@ -551,17 +551,24 @@ $targetNameText =
         $targetNameStart,
         $targetNameEnd - $targetNameStart)
 
-$separatorPosition =
+$targetSuffixPatternPosition =
     $targetNameText.IndexOf(
-        '$separator =')
+        '$targetSuffixPattern =')
+
+$suffixMatchPosition =
+    $targetNameText.IndexOf(
+        '$suffixMatch =')
 
 $metadataPosition =
     $targetNameText.IndexOf(
         '$Meta.OriginalName')
 
-if ($separatorPosition -lt 0 -or
+if ($targetSuffixPatternPosition -lt 0 -or
+    $suffixMatchPosition -lt 0 -or
     $metadataPosition -lt 0 -or
-    $separatorPosition -gt
+    $targetSuffixPatternPosition -gt
+        $suffixMatchPosition -or
+    $suffixMatchPosition -gt
         $metadataPosition) {
 
     throw "Rollback identity regression: composite filename target identity must be parsed before metadata."
@@ -1105,6 +1112,67 @@ if ($appText -notlike '*$env:TEMP*' -or
     $appText -notlike '*"Explorer"*') {
 
     throw "Explorer broker regression: transient selection state is not under TEMP\\SierraHistoryBridge\\Explorer."
+}
+
+foreach ($restoreFilenameToken in @(
+    'Never fall back to an arbitrary archive stem',
+    'Set-SetupArchiveOriginalName',
+    '--UN--unidentified.gz'
+)) {
+    if ($appText -notlike "*$restoreFilenameToken*" -and
+        $setupText -notlike "*$restoreFilenameToken*") {
+
+        throw "Restore filename regression: missing $restoreFilenameToken"
+    }
+}
+
+if ($converterText -notmatch
+        'string\s+originalName\s*=\s*Path\.GetFileName\(\s*sourcePath\s*\);' -or
+    $converterText -notmatch
+        '"original_name="\s*\+\s*Path\.GetFileName\(\s*sourcePath\s*\)') {
+
+    throw "Restore filename regression: archive metadata does not retain the actual source filename."
+}
+
+$targetParserStart =
+    $appText.IndexOf(
+        'function Get-RithmicTargetNameFromBackupArchive')
+
+$targetParserEnd =
+    $appText.IndexOf(
+        'function Get-ScDataSourceNameFromBaselineArchive',
+        $targetParserStart)
+
+$targetParserText =
+    $appText.Substring(
+        $targetParserStart,
+        $targetParserEnd - $targetParserStart)
+
+if ($targetParserText -match 'return \$name\s*\r?\n') {
+    # A direct return is permitted only after the strict Rithmic filename check.
+    if ($targetParserText -notmatch
+        '(?s)\$rithmicPattern\.IsMatch\(\s*\$name\).*?return \$name') {
+
+        throw "Restore filename regression: Rithmic target parser falls back to an arbitrary archive stem."
+    }
+}
+
+$setupRenameStart =
+    $setupText.IndexOf(
+        'function Rename-SetupBackupForProvenance')
+
+$setupRenameEnd =
+    $setupText.IndexOf(
+        'function Normalize-SetupProvenance',
+        $setupRenameStart)
+
+$setupRenameText =
+    $setupText.Substring(
+        $setupRenameStart,
+        $setupRenameEnd - $setupRenameStart)
+
+if ($setupRenameText -like '*Format-SetupScDateTimeCompact*') {
+    throw "Restore filename regression: hybrid cutover timestamps are encoded in current backup filenames."
 }
 
 $required = @(

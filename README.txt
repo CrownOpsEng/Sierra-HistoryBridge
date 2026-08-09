@@ -1,4 +1,4 @@
-Sierra History Bridge v0.0.33
+Sierra History Bridge v0.0.34
 
 PURPOSE
   Maintains Rithmic-named Sierra Chart history from Sierra Chart SC Data

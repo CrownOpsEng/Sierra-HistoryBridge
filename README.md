@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.33**
+**Version 0.0.34**
 
 Sierra History Bridge maintains Rithmic-named Sierra Chart history from Sierra
 Chart SC Data sources while preserving newer Rithmic records when a safe,
@@ -200,6 +200,20 @@ actual content/source relationship.
 
 `FR` is deliberately separate from `RT`: looking non-SC does not prove that a
 file came from Rithmic.
+
+
+### Restore filename identity
+
+Restore operations never derive a destination filename from the complete backup
+archive stem. SC Data restore uses the verified original SC Data basename from
+archive metadata. Rithmic rollback extracts and validates the terminal one-digit
+Rithmic target name, so composite backup names such as
+`NQH22-CME.scid--RT--NQH2.CME.scid.gz` restore only to `NQH2.CME.scid`.
+
+Repair recognizes current names plus prior `__`, `--`, and short-lived
+single-hyphen composite forms, canonicalizes recoverable backup names, and
+corrects their `original_name` metadata to the actual target basename. A backup
+whose target cannot be determined safely is not restored.
 
 ## Rollback Rithmic
 

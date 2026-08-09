@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge"
-$Version = "0.0.33"
+$Version = "0.0.34"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -872,6 +872,12 @@ function Read-SetupArchiveMeta(
 function Get-SetupBackupTargetName(
     [string]$ArchivePath) {
 
+    $rithmicPattern =
+        [regex]'^(?<root>[A-Za-z0-9_]+)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $targetSuffixPattern =
+        [regex]'(?:--|__|-)(?<target>[A-Za-z0-9_]+[FGHJKMNQUVXZ]\d\.[A-Za-z0-9_]+\.(?:scid|dly))$'
+
     $name =
         [IO.Path]::GetFileName(
             $ArchivePath)
@@ -886,20 +892,68 @@ function Get-SetupBackupTargetName(
                 $name.Length - 3)
     }
 
-    $separator =
-        $name.LastIndexOf(
-            "--",
-            [StringComparison]::Ordinal)
+    $suffixMatch =
+        $targetSuffixPattern.Match(
+            $name)
 
-    if ($separator -lt 0 -or
-        $separator + 2 -ge
-            $name.Length) {
+    if ($suffixMatch.Success) {
+        $target =
+            $suffixMatch.Groups[
+                "target"].Value
 
-        return $null
+        if ($rithmicPattern.IsMatch(
+                $target)) {
+
+            return $target
+        }
     }
 
-    return $name.Substring(
-        $separator + 2)
+    if ($rithmicPattern.IsMatch(
+            $name)) {
+
+        return $name
+    }
+
+    $meta =
+        Read-SetupArchiveMeta `
+            $ArchivePath
+
+    if ($meta -and
+        $meta.ContainsKey(
+            "original_name")) {
+
+        $candidate =
+            [IO.Path]::GetFileName(
+                [string]$meta["original_name"])
+
+        if ($candidate -eq
+                [string]$meta["original_name"]) {
+
+            $metadataSuffix =
+                $targetSuffixPattern.Match(
+                    $candidate)
+
+            if ($metadataSuffix.Success) {
+                $metadataTarget =
+                    $metadataSuffix.Groups[
+                        "target"].Value
+
+                if ($rithmicPattern.IsMatch(
+                        $metadataTarget)) {
+
+                    return $metadataTarget
+                }
+            }
+
+            if ($rithmicPattern.IsMatch(
+                    $candidate)) {
+
+                return $candidate
+            }
+        }
+    }
+
+    return $null
 }
 
 function Get-SetupProvenanceCode(
@@ -948,20 +1002,73 @@ function Convert-SetupScDateTimeToUtc(
     }
 }
 
-function Format-SetupScDateTimeCompact(
-    [long]$Value) {
 
-    $date =
-        Convert-SetupScDateTimeToUtc `
-            $Value
+function Set-SetupArchiveOriginalName(
+    [string]$ArchivePath,
+    [string]$TargetName) {
 
-    if (-not $date) {
-        return $null
+    if ([string]::IsNullOrWhiteSpace(
+            $TargetName)) {
+
+        return
     }
 
-    return $date.ToString(
-        "yyyyMMddTHHmmssZ",
-        [Globalization.CultureInfo]::InvariantCulture)
+    $metadataPath =
+        $ArchivePath +
+        ".meta"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $metadataPath `
+            -PathType Leaf)) {
+
+        return
+    }
+
+    $values =
+        [ordered]@{}
+
+    foreach ($line in @(
+        Get-Content `
+            -LiteralPath $metadataPath `
+            -ErrorAction Stop)) {
+
+        $separator =
+            $line.IndexOf("=")
+
+        if ($separator -le 0) {
+            continue
+        }
+
+        $key =
+            $line.Substring(
+                0,
+                $separator)
+
+        $values[$key] =
+            $line.Substring(
+                $separator + 1)
+    }
+
+    $values["original_name"] =
+        $TargetName
+
+    $lines =
+        @()
+
+    foreach ($entry in $values.GetEnumerator()) {
+        $lines +=
+            (
+                [string]$entry.Key +
+                "=" +
+                [string]$entry.Value
+            )
+    }
+
+    $lines |
+        Set-Content `
+            -LiteralPath $metadataPath `
+            -Encoding UTF8
 }
 
 function Set-SetupArchiveEvidence(
@@ -1097,20 +1204,6 @@ function Rename-SetupBackupForProvenance(
         Get-SetupProvenanceCode `
             $Provenance
 
-    if ($code -eq "MX" -and
-        $CutoverDateTime -gt 0) {
-
-        $compact =
-            Format-SetupScDateTimeCompact `
-                $CutoverDateTime
-
-        if ($compact) {
-            $code +=
-                "-" +
-                $compact
-        }
-    }
-
     $name =
         [IO.Path]::GetFileName(
             $ArchivePath)
@@ -1120,23 +1213,38 @@ function Rename-SetupBackupForProvenance(
             -Parent `
             $ArchivePath
 
-    $suffix =
-        "--" +
-        $TargetName +
-        ".gz"
+    $stem =
+        if ($name.EndsWith(
+                ".gz",
+                [StringComparison]::OrdinalIgnoreCase)) {
 
-    if (-not $name.EndsWith(
-            $suffix,
+            $name.Substring(
+                0,
+                $name.Length - 3)
+        }
+        else {
+            $name
+        }
+
+    if (-not $stem.EndsWith(
+            $TargetName,
             [StringComparison]::OrdinalIgnoreCase)) {
 
         return $ArchivePath
     }
 
     $prefix =
-        $name.Substring(
+        $stem.Substring(
             0,
-            $name.Length -
-                $suffix.Length)
+            $stem.Length -
+                $TargetName.Length).TrimEnd(
+                    [char[]]"-_")
+
+    if ([string]::IsNullOrWhiteSpace(
+            $prefix)) {
+
+        return $ArchivePath
+    }
 
     $codeMatch =
         [regex]::Match(
@@ -1149,6 +1257,12 @@ function Rename-SetupBackupForProvenance(
             $prefix.Substring(
                 0,
                 $codeMatch.Index)
+    }
+
+    if ([string]::IsNullOrWhiteSpace(
+            $prefix)) {
+
+        return $ArchivePath
     }
 
     $newPath =
@@ -1167,6 +1281,10 @@ function Rename-SetupBackupForProvenance(
             $ArchivePath,
             [StringComparison]::OrdinalIgnoreCase)) {
 
+        Set-SetupArchiveOriginalName `
+            $ArchivePath `
+            $TargetName
+
         return $ArchivePath
     }
 
@@ -1177,6 +1295,10 @@ function Rename-SetupBackupForProvenance(
             "Backup name warning: destination already exists; leaving current name: " +
             $ArchivePath) `
             -ForegroundColor Yellow
+
+        Set-SetupArchiveOriginalName `
+            $ArchivePath `
+            $TargetName
 
         return $ArchivePath
     }
@@ -1201,6 +1323,10 @@ function Rename-SetupBackupForProvenance(
             -LiteralPath $oldMeta `
             -Destination $newMeta
     }
+
+    Set-SetupArchiveOriginalName `
+        $newPath `
+        $TargetName
 
     return $newPath
 }
@@ -1651,19 +1777,6 @@ function Move-SetupUnidentifiedBaselineToRollbacks(
                 $originalName.Length - 3)
     }
 
-    $safeName =
-        [regex]::Replace(
-            $originalName,
-            '[^A-Za-z0-9.\-]+',
-            "-")
-
-    if ([string]::IsNullOrWhiteSpace(
-            $safeName)) {
-
-        $safeName =
-            "unidentified"
-    }
-
     $destination =
         Join-Path `
             $RollbackDirectory `
@@ -1672,9 +1785,7 @@ function Move-SetupUnidentifiedBaselineToRollbacks(
                 $stamp +
                 "-" +
                 [guid]::NewGuid().ToString("N").Substring(0, 8) +
-                "--UN--" +
-                $safeName +
-                ".gz"
+                "--UN--unidentified.gz"
             )
 
     Move-Item `
@@ -1759,6 +1870,16 @@ function Normalize-RithmicBackupProvenance(
             $target =
                 Get-SetupBackupTargetName `
                     $archive.FullName
+
+            if ($target) {
+                Set-SetupArchiveOriginalName `
+                    $archive.FullName `
+                    $target
+
+                $meta =
+                    Read-SetupArchiveMeta `
+                        $archive.FullName
+            }
 
             if (-not $meta -or
                 -not $target -or
@@ -2020,6 +2141,16 @@ function Normalize-RithmicBackupProvenance(
             $target =
                 Get-SetupBackupTargetName `
                     $archive.FullName
+
+            if ($target) {
+                Set-SetupArchiveOriginalName `
+                    $archive.FullName `
+                    $target
+
+                $meta =
+                    Read-SetupArchiveMeta `
+                        $archive.FullName
+            }
 
             if (-not $meta -or
                 -not $target -or

@@ -2355,14 +2355,7 @@ namespace SierraHistoryBridge
                         metadataTemporary);
 
                 string originalName =
-                    archivePath.EndsWith(
-                        ".gz",
-                        StringComparison.OrdinalIgnoreCase)
-                    ? Path.GetFileName(
-                        archivePath.Substring(
-                            0,
-                            archivePath.Length - 3))
-                    : Path.GetFileName(
+                    Path.GetFileName(
                         sourcePath);
 
                 File.WriteAllLines(
@@ -2653,16 +2646,8 @@ namespace SierraHistoryBridge
                     {
                         "version=1",
                         "original_name=" +
-                            (
-                                archivePath.EndsWith(
-                                    ".gz",
-                                    StringComparison.OrdinalIgnoreCase)
-                                ? Path.GetFileName(
-                                    archivePath.Substring(
-                                        0,
-                                        archivePath.Length - 3))
-                                : Path.GetFileName(sourcePath)
-                            ),
+                            Path.GetFileName(
+                                sourcePath),
                         "original_bytes=" +
                             sourceMeta.Length.ToString(
                                 CultureInfo.InvariantCulture),

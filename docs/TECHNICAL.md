@@ -345,3 +345,21 @@ output_sha256
 
 These fields make the exact merge identity and audit trail reproducible from
 recorded evidence.
+
+
+## Restore destination identity
+
+Archive container names are never used directly as restore destinations.
+
+- SC Data restore accepts only a basename that matches the two-digit SC Data
+  contract pattern and restores to that basename under `DataPath`.
+- Rithmic rollback resolves only a validated terminal one-digit Rithmic target
+  from current or recognized prior composite backup forms.
+- An arbitrary composite stem is never accepted as a Rithmic target.
+- New GZip metadata records `original_name` from the archived source file itself,
+  not from the archive container filename.
+- Repair rewrites recoverable Rithmic backup metadata to the actual target
+  basename and canonicalizes the filename.
+
+This prevents a composite archive name from becoming an active Sierra data
+filename.

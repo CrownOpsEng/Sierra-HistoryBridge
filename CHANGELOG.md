@@ -1,7 +1,11 @@
 # Changelog
 
-## 0.0.33
+## 0.0.34
 
+- rollback restore destination now resolves only the validated terminal Rithmic target filename
+- Repair canonicalizes recoverable prior composite backup names and target metadata
+- archive metadata now records the archived source basename instead of the archive container stem
+- SC Data restore validates the original basename before constructing its destination
 ### History update
 
 - converts Sierra Chart SC Data history into Rithmic-named SCID targets

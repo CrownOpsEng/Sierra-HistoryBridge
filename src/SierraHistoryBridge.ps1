@@ -21,7 +21,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.33"
+$Version = "0.0.34"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -3173,7 +3173,20 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
             continue
         }
 
-        $match = $sourcePattern.Match($meta.OriginalName)
+        $originalName =
+            [IO.Path]::GetFileName(
+                [string]$meta.OriginalName)
+
+        if ($originalName -ne
+                [string]$meta.OriginalName) {
+
+            Write-Host (
+                "  Archive warning: invalid original filename: {0}" -f
+                $archive.FullName) -ForegroundColor Yellow
+            continue
+        }
+
+        $match = $sourcePattern.Match($originalName)
         if (-not $match.Success) {
             continue
         }
@@ -3184,8 +3197,8 @@ function Get-ArchivedSourceFiles([string]$DataFolder) {
         $items += [pscustomobject]@{
             ArchivePath = $archive.FullName
             MetadataPath = $archive.FullName + ".meta"
-            OriginalName = $meta.OriginalName
-            Destination = Join-Path $DataFolder $meta.OriginalName
+            OriginalName = $originalName
+            Destination = Join-Path $DataFolder $originalName
             OriginalBytes = [long]$meta.OriginalBytes
             OriginalWriteTicks = [long]$meta.OriginalWriteTicks
             Sha256 = $meta.Sha256
@@ -3649,8 +3662,14 @@ function Get-RithmicTargetNameFromBackupArchive(
     [string]$ArchivePath,
     $Meta) {
 
+    # A Rithmic target filename is a one-digit futures contract name. Keep the
+    # symbol portion deliberately strict so a composite backup stem can never
+    # be mistaken for the destination filename.
     $rithmicPattern =
-        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+        [regex]'^(?<root>[A-Za-z0-9_]+)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $targetSuffixPattern =
+        [regex]'(?:--|__|-)(?<target>[A-Za-z0-9_]+[FGHJKMNQUVXZ]\d\.[A-Za-z0-9_]+\.(?:scid|dly))$'
 
     $name =
         [IO.Path]::GetFileName(
@@ -3666,25 +3685,29 @@ function Get-RithmicTargetNameFromBackupArchive(
                 $name.Length - 3)
     }
 
-    # Composite flat backup names encode the actual Rithmic target after the
-    # final "--". Parse that explicit identity before consulting metadata.
-    $separator =
-        $name.LastIndexOf(
-            "--",
-            [StringComparison]::Ordinal)
+    # Current names, legacy __ names, and the short-lived malformed single-
+    # hyphen layout all carry the real target at the end. Extract that terminal
+    # contract identity instead of treating the whole archive stem as a target.
+    $suffixMatch =
+        $targetSuffixPattern.Match(
+            $name)
 
-    if ($separator -ge 0 -and
-        $separator + 2 -lt $name.Length) {
-
+    if ($suffixMatch.Success) {
         $encodedTarget =
-            $name.Substring(
-                $separator + 2)
+            $suffixMatch.Groups[
+                "target"].Value
 
         if ($rithmicPattern.IsMatch(
                 $encodedTarget)) {
 
             return $encodedTarget
         }
+    }
+
+    if ($rithmicPattern.IsMatch(
+            $name)) {
+
+        return $name
     }
 
     if ($Meta -and
@@ -3695,25 +3718,42 @@ function Get-RithmicTargetNameFromBackupArchive(
                 [string]$Meta.OriginalName)
 
         if ($candidate -eq
-                [string]$Meta.OriginalName -and
-            $rithmicPattern.IsMatch(
-                $candidate)) {
+                [string]$Meta.OriginalName) {
 
-            return $candidate
+            $metadataSuffix =
+                $targetSuffixPattern.Match(
+                    $candidate)
+
+            if ($metadataSuffix.Success) {
+                $metadataTarget =
+                    $metadataSuffix.Groups[
+                        "target"].Value
+
+                if ($rithmicPattern.IsMatch(
+                        $metadataTarget)) {
+
+                    return $metadataTarget
+                }
+            }
+
+            if ($rithmicPattern.IsMatch(
+                    $candidate)) {
+
+                return $candidate
+            }
         }
     }
 
-    if ($rithmicPattern.IsMatch(
-            $name)) {
-
-        return $name
-    }
-
-    return $name
+    # Never fall back to an arbitrary archive stem. A backup without a
+    # provable Rithmic target is ignored until Repair can classify it safely.
+    return $null
 }
 
 function Get-ScDataSourceNameFromBaselineArchive(
     [string]$ArchivePath) {
+
+    $sourcePattern =
+        [regex]'^(?<source>.+?[FGHJKMNQUVXZ]\d{2}-[A-Za-z0-9_]+\.(?:scid|dly))(?:--|__|-).+$'
 
     $name =
         [IO.Path]::GetFileName(
@@ -3729,18 +3769,16 @@ function Get-ScDataSourceNameFromBaselineArchive(
                 $name.Length - 3)
     }
 
-    $separator =
-        $name.IndexOf(
-            "--",
-            [StringComparison]::Ordinal)
+    $match =
+        $sourcePattern.Match(
+            $name)
 
-    if ($separator -le 0) {
+    if (-not $match.Success) {
         return $null
     }
 
-    return $name.Substring(
-        0,
-        $separator)
+    return $match.Groups[
+        "source"].Value
 }
 
 function Normalize-RithmicProvenance(
@@ -3941,12 +3979,8 @@ function Get-RithmicBackupPrefixFromArchive(
                 $name.Length - 3)
     }
 
-    $suffix =
-        "--" +
-        $TargetName
-
     if (-not $name.EndsWith(
-            $suffix,
+            $TargetName,
             [StringComparison]::OrdinalIgnoreCase)) {
 
         return $null
@@ -3956,7 +3990,14 @@ function Get-RithmicBackupPrefixFromArchive(
         $name.Substring(
             0,
             $name.Length -
-                $suffix.Length)
+                $TargetName.Length).TrimEnd(
+                    [char[]]"-_")
+
+    if ([string]::IsNullOrWhiteSpace(
+            $prefix)) {
+
+        return $null
+    }
 
     $codeMatch =
         [regex]::Match(
@@ -3965,9 +4006,16 @@ function Get-RithmicBackupPrefixFromArchive(
             [Text.RegularExpressions.RegexOptions]::IgnoreCase)
 
     if ($codeMatch.Success) {
-        return $prefix.Substring(
-            0,
-            $codeMatch.Index)
+        $prefix =
+            $prefix.Substring(
+                0,
+                $codeMatch.Index)
+    }
+
+    if ([string]::IsNullOrWhiteSpace(
+            $prefix)) {
+
+        return $null
     }
 
     return $prefix
