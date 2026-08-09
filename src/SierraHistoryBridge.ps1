@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$DataFolder,
-    [ValidateSet("Update", "Archive", "Restore", "Storage")]
+    [ValidateSet("Update", "Archive", "Restore", "Rollback", "Storage")]
     [string]$Mode = "Update",
     [string]$FromDate,
     [string]$ToDate,
@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.0.24"
+$Version = "0.0.25"
 $AppName = "SierraHistoryBridge"
 $AppDataDirectory = Join-Path $env:LOCALAPPDATA $AppName
 $ConfigPath = Join-Path $AppDataDirectory "config.json"
@@ -31,10 +31,6 @@ $script:DeferredCleanupDirectories = @()
 $script:CleanupDataFolder = $null
 $script:UtilityTranscriptActive = $false
 $script:UtilityLogPath = $null
-$script:PendingCleanupPath =
-    Join-Path `
-        $AppDataDirectory `
-        "pending-cleanup.json"
 
 function Show-Banner {
     Clear-Host
@@ -375,7 +371,7 @@ function Start-UtilityOperationLog(
         Out-Null
 
     $stamp =
-        (Get-Date).ToUniversalTime().ToString(
+        (Get-Date).ToString(
             "yyyyMMdd-HHmmss")
 
     $safeOperation =
@@ -459,130 +455,6 @@ function Add-DeferredDirectoryCleanup(
     return $true
 }
 
-function Read-PendingDirectoryCleanup {
-    if (-not (
-        Test-Path `
-            -LiteralPath $script:PendingCleanupPath `
-            -PathType Leaf)) {
-
-        return @()
-    }
-
-    try {
-        return @(
-            Get-Content `
-                -LiteralPath $script:PendingCleanupPath `
-                -Raw |
-            ConvertFrom-Json
-        )
-    }
-    catch {
-        Write-Host (
-            "CLEANUP WARNING: pending cleanup state is invalid: " +
-            $_.Exception.Message) `
-            -ForegroundColor Yellow
-
-        return @()
-    }
-}
-
-function Write-PendingDirectoryCleanup($Items) {
-    $itemsArray =
-        @($Items)
-
-    if ($itemsArray.Count -eq 0) {
-        Remove-Item `
-            -LiteralPath $script:PendingCleanupPath `
-            -Force `
-            -ErrorAction SilentlyContinue
-
-        return
-    }
-
-    $itemsArray |
-        ConvertTo-Json `
-            -Depth 4 |
-        Set-Content `
-            -LiteralPath $script:PendingCleanupPath `
-            -Encoding UTF8
-}
-
-function Invoke-PendingDirectoryCleanup(
-    [string]$DataFolder) {
-
-    $pending =
-        Read-PendingDirectoryCleanup
-
-    if ($pending.Count -eq 0) {
-        return 0
-    }
-
-    $remaining = @()
-    $removed = 0
-
-    foreach ($item in $pending) {
-        $directory =
-            [string]$item.Directory
-
-        $root =
-            [string]$item.ProtectedRoot
-
-        if ([string]::IsNullOrWhiteSpace($directory) -or
-            [string]::IsNullOrWhiteSpace($root)) {
-            continue
-        }
-
-        try {
-            $removed +=
-                Remove-EmptyParentChain `
-                    $directory `
-                    $root
-
-            if (Test-Path `
-                -LiteralPath $directory `
-                -PathType Container) {
-
-                $remaining +=
-                    [pscustomobject]@{
-                        Directory = $directory
-                        ProtectedRoot = $root
-                    }
-            }
-        }
-        catch {
-            $remaining +=
-                [pscustomobject]@{
-                    Directory = $directory
-                    ProtectedRoot = $root
-                }
-        }
-    }
-
-    Write-PendingDirectoryCleanup `
-        $remaining
-
-    if ($removed -gt 0) {
-        Write-Host (
-            "Pending cleanup: removed {0} empty folder(s)." -f
-            $removed)
-    }
-
-    if ($remaining.Count -gt 0) {
-        Write-Host (
-            "Pending cleanup: {0} folder chain(s) still locked." -f
-            $remaining.Count) `
-            -ForegroundColor Yellow
-
-        foreach ($item in $remaining) {
-            [void](Add-DeferredDirectoryCleanup `
-                ([string]$item.Directory) `
-                ([string]$item.ProtectedRoot))
-        }
-    }
-
-    return $removed
-}
-
 function Start-DeferredDirectoryCleanupWorker {
     if ($script:DeferredCleanupDirectories.Count -eq 0 -or
         [string]::IsNullOrWhiteSpace(
@@ -601,7 +473,7 @@ function Start-DeferredDirectoryCleanupWorker {
         Out-Null
 
     $stamp =
-        (Get-Date).ToUniversalTime().ToString(
+        (Get-Date).ToString(
             "yyyyMMdd-HHmmss")
 
     $logPath =
@@ -625,11 +497,6 @@ function Start-DeferredDirectoryCleanupWorker {
             [Text.Encoding]::Unicode.GetBytes(
                 $logPath))
 
-    $pending64 =
-        [Convert]::ToBase64String(
-            [Text.Encoding]::Unicode.GetBytes(
-                $script:PendingCleanupPath))
-
     $parentPid =
         [int]$PID
 
@@ -639,7 +506,6 @@ $ErrorActionPreference = "Continue"
 $parentPid = __PARENT_PID__
 $payload64 = "__PAYLOAD64__"
 $log64 = "__LOG64__"
-$pending64 = "__PENDING64__"
 
 $payloadJson =
     [Text.Encoding]::Unicode.GetString(
@@ -651,11 +517,6 @@ $logPath =
         [Convert]::FromBase64String(
             $log64))
 
-$pendingPath =
-    [Text.Encoding]::Unicode.GetString(
-        [Convert]::FromBase64String(
-            $pending64))
-
 $items =
     @(
         $payloadJson |
@@ -663,7 +524,6 @@ $items =
     )
 
 $lines = @()
-$failedItems = @()
 $lines +=
     "Sierra History Bridge deferred cleanup"
 $lines +=
@@ -771,13 +631,6 @@ foreach ($item in $items) {
                 $current +
                 " | " +
                 $lastError
-
-            $failedItems +=
-                [pscustomobject]@{
-                    Directory = $current
-                    ProtectedRoot = $root
-                }
-
             break
         }
 
@@ -804,35 +657,6 @@ foreach ($item in $items) {
 $lines +=
     "Finished UTC: " +
     (Get-Date).ToUniversalTime().ToString("o")
-
-try {
-    if ($failedItems.Count -gt 0) {
-        $pendingDirectory =
-            Split-Path `
-                -Parent `
-                $pendingPath
-
-        New-Item `
-            -ItemType Directory `
-            -Path $pendingDirectory `
-            -Force |
-            Out-Null
-
-        $failedItems |
-            ConvertTo-Json `
-                -Depth 4 |
-            Set-Content `
-                -LiteralPath $pendingPath `
-                -Encoding UTF8
-    }
-    else {
-        Remove-Item `
-            -LiteralPath $pendingPath `
-            -Force `
-            -ErrorAction SilentlyContinue
-    }
-}
-catch { }
 
 try {
     $directory =
@@ -869,11 +693,6 @@ catch { }
             "__LOG64__",
             $log64)
 
-    $worker =
-        $worker.Replace(
-            "__PENDING64__",
-            $pending64)
-
     $encoded =
         [Convert]::ToBase64String(
             [Text.Encoding]::Unicode.GetBytes(
@@ -884,44 +703,21 @@ catch { }
             $PSHOME `
             "powershell.exe"
 
-    $processInfo =
-        New-Object `
-            Diagnostics.ProcessStartInfo
-
-    $processInfo.FileName =
-        $powershellExe
-
-    $processInfo.Arguments =
-        '-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand "' +
-        $encoded +
-        '"'
-
-    $processInfo.WorkingDirectory =
-        $script:CleanupDataFolder
-
-    # UseShellExecute=false goes through CreateProcess rather than ShellExecute.
-    # With no redirected handles, .NET starts this helper without inheriting the
-    # selected-folder/context-menu handle set from Explorer or the parent.
-    $processInfo.UseShellExecute =
-        $false
-
-    $processInfo.CreateNoWindow =
-        $true
-
-    $processInfo.WindowStyle =
-        [Diagnostics.ProcessWindowStyle]::Hidden
-
-    $workerProcess =
-        [Diagnostics.Process]::Start(
-            $processInfo)
-
-    if ($null -eq $workerProcess) {
-        throw "Failed to start deferred cleanup helper."
-    }
-
-    Write-Host (
-        "Cleanup helper PID: {0} | handle inheritance disabled" -f
-        $workerProcess.Id)
+    Start-Process `
+        -FilePath $powershellExe `
+        -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            $encoded
+        ) `
+        -WorkingDirectory $script:CleanupDataFolder `
+        -WindowStyle Hidden |
+        Out-Null
 
     Write-Host
     Write-Host (
@@ -1442,6 +1238,9 @@ function Get-StorageSnapshot([string]$DataFolder) {
     $rithmicPattern =
         [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
 
+    $dataLogical = 0L
+    $dataDisk = 0L
+
     $categories = @{
         Sources = [long[]]@(0L, 0L)
         Rithmic = [long[]]@(0L, 0L)
@@ -1480,6 +1279,19 @@ function Get-StorageSnapshot([string]$DataFolder) {
         $full =
             [IO.Path]::GetFullPath(
                 $file.FullName)
+
+        $dataLogical +=
+            [long]$file.Length
+
+        try {
+            $dataDisk +=
+                [long][SierraHistoryBridge.ScidBridge]::GetFileAllocatedBytes(
+                    $file.FullName)
+        }
+        catch {
+            $dataDisk +=
+                [long]$file.Length
+        }
 
         if ($full.StartsWith(
                 $archiveRoot,
@@ -1547,6 +1359,8 @@ function Get-StorageSnapshot([string]$DataFolder) {
         LogsDisk = $categories.Logs[1]
         OtherLogical = $categories.Other[0]
         OtherDisk = $categories.Other[1]
+        DataLogical = $dataLogical
+        DataDisk = $dataDisk
         TotalLogical = $logicalTotal
         TotalDisk = $allocatedTotal
         Free = Get-AvailableFreeBytes $DataFolder
@@ -1560,8 +1374,8 @@ function Show-StorageSnapshot([string]$Label, $Snapshot) {
     Write-Host (
         "      {0}: Data {1} logical / {2} disk | free {3}" -f
         $Label,
-        (Format-StorageBytes $Snapshot.TotalLogical),
-        (Format-StorageBytes $Snapshot.TotalDisk),
+        (Format-StorageBytes $Snapshot.DataLogical),
+        (Format-StorageBytes $Snapshot.DataDisk),
         (Format-StorageBytes $Snapshot.Free))
 }
 
@@ -1579,7 +1393,8 @@ function Show-StorageDelta($Before, $After) {
         [pscustomobject]@{ Name = "Recovery staging"; Before = $Before.RecoveryDisk; After = $After.RecoveryDisk },
         [pscustomobject]@{ Name = "Logs"; Before = $Before.LogsDisk; After = $After.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Before = $Before.OtherDisk; After = $After.OtherDisk },
-        [pscustomobject]@{ Name = "Data folder"; Before = $Before.TotalDisk; After = $After.TotalDisk },
+        [pscustomobject]@{ Name = "Sierra Data folder"; Before = $Before.DataDisk; After = $After.DataDisk },
+        [pscustomobject]@{ Name = "Tracked total"; Before = $Before.TotalDisk; After = $After.TotalDisk },
         [pscustomobject]@{ Name = "Free space"; Before = $Before.Free; After = $After.Free }
     )) {
         Write-Host (
@@ -1591,7 +1406,9 @@ function Show-StorageDelta($Before, $After) {
     }
 
     Write-Host (
-        "  Logical Data total: {0} -> {1}" -f
+        "  Logical Sierra Data: {0} -> {1} | tracked total: {2} -> {3}" -f
+        (Format-StorageBytes $Before.DataLogical),
+        (Format-StorageBytes $After.DataLogical),
         (Format-StorageBytes $Before.TotalLogical),
         (Format-StorageBytes $After.TotalLogical))
 }
@@ -1696,23 +1513,17 @@ function Get-ScDataSourceFiles([string]$DataFolder) {
 }
 
 function Get-SourceArchivePath($SourceFile, [string]$DataFolder) {
-    $safeGroup =
-        ($SourceFile.Root + "-" + $SourceFile.Exchange) -replace '[^A-Za-z0-9_.-]', '_'
-
     $bridgePaths =
         Get-BridgePaths $DataFolder
 
     $directory =
         Join-Path `
-            (Join-Path `
-                $bridgePaths.Archive `
-                "SC_Data") `
-            $safeGroup
+            $bridgePaths.Archive `
+            "SC_Data"
 
-    $directory =
-        Join-Path $directory ([string]$SourceFile.FullYear)
-
-    return Join-Path $directory ($SourceFile.Name + ".gz")
+    return Join-Path `
+        $directory `
+        ($SourceFile.Name + ".gz")
 }
 
 function Select-ArchiveSourceFiles(
@@ -1798,6 +1609,16 @@ function Select-ArchiveSourceFiles(
 function Invoke-SourceArchiveManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
+
+    $layoutMigration =
+        Convert-LegacyScDataArchiveLayout `
+            $ResolvedDataFolder
+
+    if ($layoutMigration.Moved -gt 0) {
+        Write-Host (
+            "Archive layout: flattened {0} legacy archive file(s)." -f
+            $layoutMigration.Moved)
+    }
 
     Set-Location `
         -LiteralPath $ResolvedDataFolder
@@ -2480,6 +2301,156 @@ function Invoke-BridgeDirectoryHousekeeping(
 }
 
 
+function Convert-LegacyScDataArchiveLayout(
+    [string]$DataFolder) {
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $root =
+        Join-Path `
+            $bridgePaths.Archive `
+            "SC_Data"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $root `
+            -PathType Container)) {
+
+        return [pscustomobject]@{
+            Moved = 0
+            Conflicts = 0
+            EmptyDirectories = 0
+        }
+    }
+
+    $rootFull =
+        [IO.Path]::GetFullPath(
+            $root).TrimEnd('\')
+
+    $moved = 0
+    $conflicts = 0
+    $prunedDirectories = 0
+
+    $nestedArchives =
+        @(
+            Get-ChildItem `
+                -LiteralPath $rootFull `
+                -Recurse `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not $_.DirectoryName.Equals(
+                    $rootFull,
+                    [StringComparison]::OrdinalIgnoreCase)
+            }
+        )
+
+    foreach ($archive in $nestedArchives) {
+        $destination =
+            Join-Path `
+                $rootFull `
+                $archive.Name
+
+        $sourceMeta =
+            $archive.FullName + ".meta"
+
+        $destinationMeta =
+            $destination + ".meta"
+
+        if (Test-Path `
+            -LiteralPath $destination `
+            -PathType Leaf) {
+
+            $same = $false
+
+            try {
+                $same =
+                    (Get-Item -LiteralPath $destination).Length -eq
+                        $archive.Length -and
+                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                        $destination) -eq
+                    [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                        $archive.FullName)
+            }
+            catch {
+                $same = $false
+            }
+
+            if (-not $same) {
+                $conflicts++
+                Write-Host (
+                    "  ARCHIVE LAYOUT WARNING: flat destination already exists with different data: " +
+                    $destination) `
+                    -ForegroundColor Yellow
+                continue
+            }
+
+            [void](Remove-BridgeOwnedFileAndPrune `
+                $archive.FullName `
+                $DataFolder)
+
+            if (Test-Path `
+                -LiteralPath $sourceMeta `
+                -PathType Leaf) {
+
+                if (-not (
+                    Test-Path `
+                        -LiteralPath $destinationMeta `
+                        -PathType Leaf)) {
+
+                    Move-Item `
+                        -LiteralPath $sourceMeta `
+                        -Destination $destinationMeta `
+                        -Force
+                }
+                else {
+                    [void](Remove-BridgeOwnedFileAndPrune `
+                        $sourceMeta `
+                        $DataFolder)
+                }
+            }
+
+            $moved++
+            continue
+        }
+
+        Move-Item `
+            -LiteralPath $archive.FullName `
+            -Destination $destination `
+            -Force
+
+        if (Test-Path `
+            -LiteralPath $sourceMeta `
+            -PathType Leaf) {
+
+            Move-Item `
+                -LiteralPath $sourceMeta `
+                -Destination $destinationMeta `
+                -Force
+        }
+
+        $moved++
+
+        $prunedDirectories +=
+            Remove-EmptyParentChain `
+                $archive.DirectoryName `
+                $rootFull
+    }
+
+    $prunedDirectories +=
+        Remove-EmptyBridgeDirectories `
+            $rootFull `
+            -PreserveRoot
+
+    return [pscustomobject]@{
+        Moved = $moved
+        Conflicts = $conflicts
+        EmptyDirectories = $prunedDirectories
+    }
+}
+
 function Get-ArchivedSourceFiles([string]$DataFolder) {
     $bridgePaths =
         Get-BridgePaths $DataFolder
@@ -2628,6 +2599,29 @@ function Invoke-SourceRestoreManager(
     [string]$ResolvedDataFolder,
     [bool]$AskForFilter) {
 
+    $selectedPathBeforeMigration = $null
+    $selectedNameBeforeMigration = $null
+
+    if ($SelectedFile) {
+        $selectedPathBeforeMigration =
+            [IO.Path]::GetFullPath(
+                $SelectedFile.Trim().Trim('"'))
+
+        $selectedNameBeforeMigration =
+            [IO.Path]::GetFileName(
+                $selectedPathBeforeMigration)
+    }
+
+    $layoutMigration =
+        Convert-LegacyScDataArchiveLayout `
+            $ResolvedDataFolder
+
+    if ($layoutMigration.Moved -gt 0) {
+        Write-Host (
+            "Archive layout: flattened {0} legacy archive file(s)." -f
+            $layoutMigration.Moved)
+    }
+
     Set-Location `
         -LiteralPath $ResolvedDataFolder
 
@@ -2644,19 +2638,37 @@ function Invoke-SourceRestoreManager(
     }
 
     if ($SelectedFile) {
-        $selectedPath =
-            [IO.Path]::GetFullPath(
-                $SelectedFile.Trim().Trim('"'))
-
         $selection =
             @(
                 $archives |
                 Where-Object {
                     $_.ArchivePath.Equals(
-                        $selectedPath,
+                        $selectedPathBeforeMigration,
                         [StringComparison]::OrdinalIgnoreCase)
                 }
             )
+
+        if ($selection.Count -eq 0 -and
+            $layoutMigration.Moved -gt 0 -and
+            $selectedNameBeforeMigration) {
+
+            $selection =
+                @(
+                    $archives |
+                    Where-Object {
+                        [IO.Path]::GetFileName(
+                            $_.ArchivePath).Equals(
+                                $selectedNameBeforeMigration,
+                                [StringComparison]::OrdinalIgnoreCase)
+                    }
+                )
+        }
+
+        if ($selection.Count -gt 1) {
+            throw (
+                "More than one archive matches the selected filename after " +
+                "legacy layout migration. Resolve the duplicate archives before restoring.")
+        }
 
         if ($selection.Count -eq 0) {
             throw (
@@ -2768,18 +2780,21 @@ function Invoke-SourceRestoreManager(
     $deduplicated = 0
     $skippedConflicts = 0
     $failed = 0
+    $prunedDirectories = 0
     $conflictStamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
 
     foreach ($item in $alreadyPresent) {
         try {
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $item.ArchivePath `
-                $ResolvedDataFolder)
+            $prunedDirectories +=
+                Remove-BridgeOwnedFileAndPrune `
+                    $item.ArchivePath `
+                    $ResolvedDataFolder
 
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $item.MetadataPath `
-                $ResolvedDataFolder `
-                -IgnoreMissing)
+            $prunedDirectories +=
+                Remove-BridgeOwnedFileAndPrune `
+                    $item.MetadataPath `
+                    $ResolvedDataFolder `
+                    -IgnoreMissing
 
             $deduplicated++
         }
@@ -2850,14 +2865,16 @@ function Invoke-SourceRestoreManager(
                     [bool]$isScid,
                     $false)
 
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $item.ArchivePath `
-                $ResolvedDataFolder)
+            $prunedDirectories +=
+                Remove-BridgeOwnedFileAndPrune `
+                    $item.ArchivePath `
+                    $ResolvedDataFolder
 
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $item.MetadataPath `
-                $ResolvedDataFolder `
-                -IgnoreMissing)
+            $prunedDirectories +=
+                Remove-BridgeOwnedFileAndPrune `
+                    $item.MetadataPath `
+                    $ResolvedDataFolder `
+                    -IgnoreMissing
 
             $restored++
 
@@ -2871,7 +2888,7 @@ function Invoke-SourceRestoreManager(
         }
     }
 
-    $emptyDirectoriesRemoved =
+    $prunedDirectories +=
         Invoke-BridgeDirectoryHousekeeping `
             $ResolvedDataFolder
 
@@ -2884,13 +2901,675 @@ function Invoke-SourceRestoreManager(
         $deduplicated,
         $skippedConflicts,
         $failed,
-        $emptyDirectoriesRemoved)
+        $prunedDirectories)
 
     Show-StorageDelta $before $after
 
     if ($failed -gt 0) {
         return 2
     }
+
+    return 0
+}
+
+function Read-GzipArchiveMeta(
+    [string]$ArchivePath) {
+
+    $metadataPath =
+        $ArchivePath + ".meta"
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $ArchivePath `
+            -PathType Leaf) -or
+        -not (
+            Test-Path `
+                -LiteralPath $metadataPath `
+                -PathType Leaf)) {
+
+        return $null
+    }
+
+    try {
+        $values = @{}
+
+        foreach ($line in
+            (Get-Content `
+                -LiteralPath $metadataPath `
+                -ErrorAction Stop)) {
+
+            $separator =
+                $line.IndexOf("=")
+
+            if ($separator -le 0) {
+                continue
+            }
+
+            $key =
+                $line.Substring(
+                    0,
+                    $separator)
+
+            $value =
+                $line.Substring(
+                    $separator + 1)
+
+            $values[$key] =
+                $value
+        }
+
+        if (-not $values.ContainsKey(
+                "original_bytes") -or
+            -not $values.ContainsKey(
+                "sha256")) {
+
+            return $null
+        }
+
+        $originalName =
+            if ($values.ContainsKey(
+                "original_name")) {
+
+                [string]$values[
+                    "original_name"]
+            }
+            elseif ($ArchivePath.EndsWith(
+                ".gz",
+                [StringComparison]::OrdinalIgnoreCase)) {
+
+                [IO.Path]::GetFileName(
+                    $ArchivePath.Substring(
+                        0,
+                        $ArchivePath.Length - 3))
+            }
+            else {
+                $null
+            }
+
+        return [pscustomobject]@{
+            OriginalName =
+                $originalName
+            OriginalBytes =
+                [long]$values[
+                    "original_bytes"]
+            OriginalWriteTicks =
+                if ($values.ContainsKey(
+                    "original_write_ticks")) {
+
+                    [long]$values[
+                        "original_write_ticks"]
+                }
+                else {
+                    0L
+                }
+            Sha256 =
+                [string]$values[
+                    "sha256"]
+            Records =
+                if ($values.ContainsKey(
+                    "records")) {
+
+                    [long]$values[
+                        "records"]
+                }
+                else {
+                    0L
+                }
+            FirstDateTime =
+                if ($values.ContainsKey(
+                    "first_datetime")) {
+
+                    [long]$values[
+                        "first_datetime"]
+                }
+                else {
+                    0L
+                }
+            LastDateTime =
+                if ($values.ContainsKey(
+                    "last_datetime")) {
+
+                    [long]$values[
+                        "last_datetime"]
+                }
+                else {
+                    0L
+                }
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-RithmicBackupArchives(
+    [string]$DataFolder) {
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $roots =
+        @(
+            [pscustomobject]@{
+                Kind = "baseline"
+                Path =
+                    Join-Path `
+                        $bridgePaths.Archive `
+                        "Rithmic_Baselines"
+            },
+            [pscustomobject]@{
+                Kind = "rollback"
+                Path =
+                    Join-Path `
+                        $bridgePaths.Archive `
+                        "Rollbacks"
+            },
+            [pscustomobject]@{
+                Kind = "legacy"
+                Path =
+                    Join-Path `
+                        $bridgePaths.Archive `
+                        "Legacy_Backups"
+            }
+        )
+
+    $rithmicPattern =
+        [regex]'^(?<root>.+?)(?<month>[FGHJKMNQUVXZ])(?<year>\d)\.(?<exchange>[A-Za-z0-9_]+)\.(?<extension>scid|dly)$'
+
+    $items = @()
+
+    foreach ($root in $roots) {
+        if (-not (
+            Test-Path `
+                -LiteralPath $root.Path `
+                -PathType Container)) {
+            continue
+        }
+
+        foreach ($archive in @(
+            Get-ChildItem `
+                -LiteralPath $root.Path `
+                -Recurse `
+                -File `
+                -Filter "*.gz" `
+                -ErrorAction SilentlyContinue)) {
+
+            $meta =
+                Read-GzipArchiveMeta `
+                    $archive.FullName
+
+            if (-not $meta -or
+                [string]::IsNullOrWhiteSpace(
+                    $meta.OriginalName)) {
+                continue
+            }
+
+            $targetName =
+                [IO.Path]::GetFileName(
+                    [string]$meta.OriginalName)
+
+            if ($targetName -ne
+                    [string]$meta.OriginalName -or
+                -not $rithmicPattern.IsMatch(
+                    $targetName)) {
+                continue
+            }
+
+            $extension =
+                [IO.Path]::GetExtension(
+                    $targetName).TrimStart('.').ToLowerInvariant()
+
+            $items +=
+                [pscustomobject]@{
+                    Kind = $root.Kind
+                    ArchivePath =
+                        $archive.FullName
+                    MetadataPath =
+                        $archive.FullName +
+                        ".meta"
+                    TargetName =
+                        $targetName
+                    TargetPath =
+                        Join-Path `
+                            $DataFolder `
+                            $targetName
+                    Extension =
+                        $extension
+                    OriginalBytes =
+                        [long]$meta.OriginalBytes
+                    OriginalWriteTicks =
+                        [long]$meta.OriginalWriteTicks
+                    Sha256 =
+                        [string]$meta.Sha256
+                    ArchiveBytes =
+                        [long]$archive.Length
+                    ArchiveWriteTime =
+                        $archive.LastWriteTime
+                }
+        }
+    }
+
+    return @(
+        $items |
+        Sort-Object `
+            ArchiveWriteTime `
+            -Descending
+    )
+}
+
+function Invalidate-BridgeStateForRithmicTarget(
+    [string]$TargetPath,
+    [string]$Extension) {
+
+    $state =
+        Read-JsonFile `
+            $StatePath
+
+    $table =
+        Get-StateTable `
+            $state
+
+    $changed = $false
+
+    foreach ($key in @($table.Keys)) {
+        $entry =
+            $table[$key]
+
+        if ($null -eq $entry -or
+            $entry -is [string]) {
+            continue
+        }
+
+        if ($Extension -eq "scid" -and
+            $entry.target_path -and
+            [string]$entry.target_path -ieq
+                $TargetPath) {
+
+            $table.Remove(
+                $key)
+
+            $changed = $true
+            continue
+        }
+
+        if ($Extension -eq "dly" -and
+            $entry.daily_target_path -and
+            [string]$entry.daily_target_path -ieq
+                $TargetPath) {
+
+            foreach ($propertyName in @(
+                "daily_source_signature",
+                "daily_target_path",
+                "daily_minimum_target_records",
+                "daily_target_first_date_ticks",
+                "daily_minimum_target_last_date_ticks"
+            )) {
+                if ($entry.PSObject.Properties[
+                    $propertyName]) {
+
+                    $entry.PSObject.Properties.Remove(
+                        $propertyName)
+                }
+            }
+
+            $table[$key] =
+                $entry
+
+            $changed = $true
+        }
+    }
+
+    if ($changed) {
+        Save-JsonFile `
+            $StatePath `
+            ([pscustomobject]@{
+                sources =
+                    (Convert-HashtableToObject `
+                        $table)
+            })
+    }
+
+    return $changed
+}
+
+function New-RithmicUndoArchive(
+    $Backup,
+    [string]$DataFolder) {
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $Backup.TargetPath `
+            -PathType Leaf)) {
+
+        return $null
+    }
+
+    $bridgePaths =
+        Get-BridgePaths $DataFolder
+
+    $stamp =
+        (Get-Date).ToString(
+            "yyyyMMdd-HHmmss-fff")
+
+    $directory =
+        Join-Path `
+            (Join-Path `
+                (Join-Path `
+                    $bridgePaths.Archive `
+                    "Rollbacks") `
+                "Manual") `
+            $stamp
+
+    $archivePath =
+        Join-Path `
+            $directory `
+            ($Backup.TargetName +
+                ".gz")
+
+    if ($Backup.Extension -eq "scid") {
+        [SierraHistoryBridge.ScidBridge]::ArchiveScidGzipVerified(
+            $Backup.TargetPath,
+            $archivePath,
+            $false,
+            $false) | Out-Null
+    }
+    else {
+        [SierraHistoryBridge.ScidBridge]::ArchiveFileGzipVerified(
+            $Backup.TargetPath,
+            $archivePath,
+            $false,
+            $false) | Out-Null
+    }
+
+    return $archivePath
+}
+
+function Invoke-RithmicRollbackManager(
+    [string]$ResolvedDataFolder,
+    [bool]$AskForSelection) {
+
+    Set-Location `
+        -LiteralPath $ResolvedDataFolder
+
+    [Environment]::CurrentDirectory =
+        $ResolvedDataFolder
+
+    $backups =
+        Get-RithmicBackupArchives `
+            $ResolvedDataFolder
+
+    if ($backups.Count -eq 0) {
+        Write-Host
+        Write-Host "No Rithmic backup archives are available."
+        return 0
+    }
+
+    $selection = $null
+
+    if ($SelectedFile) {
+        $selectedPath =
+            [IO.Path]::GetFullPath(
+                $SelectedFile.Trim().Trim('"'))
+
+        $matches =
+            @(
+                $backups |
+                Where-Object {
+                    $_.ArchivePath.Equals(
+                        $selectedPath,
+                        [StringComparison]::OrdinalIgnoreCase)
+                }
+            )
+
+        if ($matches.Count -ne 1) {
+            throw (
+                "The selected file is not a recognized Rithmic baseline/rollback backup.")
+        }
+
+        $selection =
+            $matches[0]
+    }
+    elseif ($AskForSelection) {
+        Write-Host
+        Write-Host "Rithmic backups:"
+
+        for ($index = 0;
+            $index -lt $backups.Count;
+            $index++) {
+
+            $item =
+                $backups[$index]
+
+            Write-Host (
+                "  [{0}] {1,-9} {2,-18} {3,10} | {4}" -f
+                ($index + 1),
+                $item.Kind,
+                $item.TargetName,
+                (Format-StorageBytes `
+                    $item.ArchiveBytes),
+                $item.ArchiveWriteTime.ToString(
+                    "yyyy-MM-dd HH:mm:ss"))
+        }
+
+        Write-Host
+        $answer =
+            Read-Host "Backup number to roll back, or Enter to cancel"
+
+        if ([string]::IsNullOrWhiteSpace(
+            $answer)) {
+            return 0
+        }
+
+        $number = 0
+
+        if (-not [int]::TryParse(
+            $answer,
+            [ref]$number) -or
+            $number -lt 1 -or
+            $number -gt $backups.Count) {
+
+            throw "Invalid backup selection."
+        }
+
+        $selection =
+            $backups[
+                $number - 1]
+    }
+    else {
+        throw (
+            "Rollback requires -SelectedFile or interactive selection.")
+    }
+
+    if (-not (Wait-ForSierraChartClosed `
+            "Rolling back Rithmic data" `
+            $AskForSelection)) {
+        return 0
+    }
+
+    $targetExists =
+        Test-Path `
+            -LiteralPath $selection.TargetPath `
+            -PathType Leaf
+
+    $alreadyMatches = $false
+
+    if ($targetExists) {
+        try {
+            $targetHash =
+                [SierraHistoryBridge.ScidBridge]::HashFileSha256(
+                    $selection.TargetPath)
+
+            $targetLength =
+                [long](
+                    Get-Item `
+                        -LiteralPath $selection.TargetPath).Length
+
+            $alreadyMatches =
+                $targetLength -eq
+                    [long]$selection.OriginalBytes -and
+                $targetHash -ieq
+                    [string]$selection.Sha256
+        }
+        catch {
+            $alreadyMatches = $false
+        }
+    }
+
+    Write-Host
+    Write-Host "Rollback plan:"
+    Write-Host "  Backup: $($selection.ArchivePath)"
+    Write-Host "  Type:   $($selection.Kind)"
+    Write-Host "  Target: $($selection.TargetPath)"
+    Write-Host (
+        "  Size:   {0}" -f
+        (Format-StorageBytes `
+            $selection.OriginalBytes))
+
+    if ($alreadyMatches) {
+        Write-Host
+        Write-Host (
+            "Target already matches this backup. No rollback is required.")
+        return 0
+    }
+
+    if ($targetExists) {
+        Write-Host (
+            "  Safety: current target will be preserved as a new manual rollback first.")
+    }
+    else {
+        Write-Host (
+            "  Safety: target is missing; the selected backup will recreate it.")
+    }
+
+    Write-Host (
+        "  Backup retention: selected backup is kept after rollback.")
+
+    if ($DryRun) {
+        Write-Host
+        Write-Host "Dry run: no files were changed."
+        return 0
+    }
+
+    if (-not $Yes) {
+        $answer =
+            Read-Host (
+                "Roll back $($selection.TargetName) from this backup? [y/N]")
+
+        if ($answer.Trim().ToLowerInvariant() -notin @(
+            "y",
+            "yes")) {
+
+            Write-Host "Rollback canceled."
+            return 0
+        }
+    }
+
+    $requiredBytes =
+        [long]$selection.OriginalBytes +
+        256MB
+
+    $freeBytes =
+        Get-AvailableFreeBytes `
+            $ResolvedDataFolder
+
+    if ($freeBytes -ge 0 -and
+        $freeBytes -lt $requiredBytes) {
+
+        throw (
+            "Insufficient free space for verified rollback. Need about " +
+            (Format-StorageBytes $requiredBytes) +
+            "; available " +
+            (Format-StorageBytes $freeBytes) +
+            ".")
+    }
+
+    $before =
+        Get-StorageSnapshot `
+            $ResolvedDataFolder
+
+    $undoArchive = $null
+
+    if ($targetExists) {
+        Write-Host
+        Write-Host (
+            "Preserving current target before rollback...")
+
+        $undoArchive =
+            New-RithmicUndoArchive `
+                $selection `
+                $ResolvedDataFolder
+
+        Write-Host (
+            "Undo backup: $undoArchive")
+    }
+
+    $status =
+        "ROLLBACK $($selection.TargetName)"
+
+    try {
+        [SierraHistoryBridge.ScidBridge]::UpdateStatusLine(
+            $status)
+
+        $isScid =
+            $selection.Extension -eq
+            "scid"
+
+        $result =
+            [SierraHistoryBridge.ScidBridge]::RestoreFileGzipVerified(
+                $selection.ArchivePath,
+                $selection.TargetPath,
+                [long]$selection.OriginalBytes,
+                [string]$selection.Sha256,
+                [long]$selection.OriginalWriteTicks,
+                [bool]$isScid,
+                $false)
+
+        [void](Invalidate-BridgeStateForRithmicTarget `
+            $selection.TargetPath `
+            $selection.Extension)
+
+        [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+            (
+                "{0} | OK | {1}" -f
+                $status,
+                (Format-StorageBytes `
+                    $result.RestoredBytes)))
+    }
+    catch {
+        [SierraHistoryBridge.ScidBridge]::CompleteStatusLine(
+            (
+                "{0} | FAILED | {1}" -f
+                $status,
+                $_.Exception.Message))
+
+        throw
+    }
+
+    $after =
+        Get-StorageSnapshot `
+            $ResolvedDataFolder
+
+    Write-Host
+    Write-Host (
+        "Rollback complete: {0}" -f
+        $selection.TargetName)
+
+    Write-Host (
+        "Selected backup retained: {0}" -f
+        $selection.ArchivePath)
+
+    if ($undoArchive) {
+        Write-Host (
+            "Undo backup retained:     {0}" -f
+            $undoArchive)
+    }
+
+    Write-Host (
+        "Bridge state for the restored target was invalidated; the next Update will re-evaluate it.")
+
+    Show-StorageDelta `
+        $before `
+        $after
 
     return 0
 }
@@ -3035,6 +3714,7 @@ function Invoke-VerifiedBaselineCleanup(
     $kept = 0
     $failed = 0
     $reclaimed = 0L
+    $prunedDirectories = 0
 
     foreach ($item in $baselines) {
         $status =
@@ -3147,14 +3827,16 @@ function Invoke-VerifiedBaselineCleanup(
                     Get-Item `
                         -LiteralPath $item.ArchivePath).Length
 
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $item.ArchivePath `
-                $ResolvedDataFolder)
+            $prunedDirectories +=
+                Remove-BridgeOwnedFileAndPrune `
+                    $item.ArchivePath `
+                    $ResolvedDataFolder
 
-            [void](Remove-BridgeOwnedFileAndPrune `
-                $item.MetadataPath `
-                $ResolvedDataFolder `
-                -IgnoreMissing)
+            $prunedDirectories +=
+                Remove-BridgeOwnedFileAndPrune `
+                    $item.MetadataPath `
+                    $ResolvedDataFolder `
+                    -IgnoreMissing
 
             $removed++
             $reclaimed += $bytes
@@ -3175,7 +3857,7 @@ function Invoke-VerifiedBaselineCleanup(
         }
     }
 
-    $emptyDirectories =
+    $prunedDirectories +=
         Invoke-BridgeDirectoryHousekeeping `
             $ResolvedDataFolder
 
@@ -3186,7 +3868,7 @@ function Invoke-VerifiedBaselineCleanup(
         $kept,
         $failed,
         (Format-StorageBytes $reclaimed),
-        $emptyDirectories)
+        $prunedDirectories)
 
     if ($failed -gt 0) {
         return 2
@@ -3196,6 +3878,16 @@ function Invoke-VerifiedBaselineCleanup(
 }
 
 function Invoke-StorageReport([string]$ResolvedDataFolder) {
+    $layoutMigration =
+        Convert-LegacyScDataArchiveLayout `
+            $ResolvedDataFolder
+
+    if ($layoutMigration.Moved -gt 0) {
+        Write-Host (
+            "Archive layout: flattened {0} legacy archive file(s)." -f
+            $layoutMigration.Moved)
+    }
+
     $snapshot = Get-StorageSnapshot $ResolvedDataFolder
 
     Write-Host
@@ -3211,7 +3903,8 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
         [pscustomobject]@{ Name = "Recovery staging"; Logical = $snapshot.RecoveryLogical; Disk = $snapshot.RecoveryDisk },
         [pscustomobject]@{ Name = "Logs"; Logical = $snapshot.LogsLogical; Disk = $snapshot.LogsDisk },
         [pscustomobject]@{ Name = "Other Data"; Logical = $snapshot.OtherLogical; Disk = $snapshot.OtherDisk },
-        [pscustomobject]@{ Name = "Data folder"; Logical = $snapshot.TotalLogical; Disk = $snapshot.TotalDisk }
+        [pscustomobject]@{ Name = "Sierra Data folder"; Logical = $snapshot.DataLogical; Disk = $snapshot.DataDisk },
+        [pscustomobject]@{ Name = "Tracked total"; Logical = $snapshot.TotalLogical; Disk = $snapshot.TotalDisk }
     )) {
         Write-Host (
             "  {0,-20} {1,14} {2,14}" -f
@@ -3230,6 +3923,52 @@ function Invoke-StorageReport([string]$ResolvedDataFolder) {
     Write-Host "  Archive:  $($snapshot.ArchivePath)"
     Write-Host "  Recovery: $($snapshot.RecoveryPath)"
     Write-Host "  Logs:     $($snapshot.LogPath)"
+
+    $rithmicBackups =
+        Get-RithmicBackupArchives `
+            $ResolvedDataFolder
+
+    if ($rithmicBackups.Count -gt 0) {
+        $baselineBackupCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    $_.Kind -eq "baseline"
+                }
+            ).Count
+
+        $rollbackBackupCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    $_.Kind -eq "rollback"
+                }
+            ).Count
+
+        $legacyBackupCount =
+            @(
+                $rithmicBackups |
+                Where-Object {
+                    $_.Kind -eq "legacy"
+                }
+            ).Count
+
+        $rithmicBackupBytes =
+            [long]((
+                $rithmicBackups |
+                Measure-Object `
+                    -Property ArchiveBytes `
+                    -Sum).Sum)
+
+        Write-Host
+        Write-Host (
+            "Rithmic backups: {0} baseline | {1} rollback | {2} legacy | {3} on disk" -f
+            $baselineBackupCount,
+            $rollbackBackupCount,
+            $legacyBackupCount,
+            (Format-StorageBytes `
+                $rithmicBackupBytes))
+    }
 
     $baselines =
         Get-RithmicBaselineArchives `
@@ -7103,9 +7842,6 @@ function Invoke-SierraHistoryUtilityMode {
     $script:CleanupDataFolder =
         $resolvedDataFolder
 
-    [void](Invoke-PendingDirectoryCleanup `
-        $resolvedDataFolder)
-
     [void](Start-UtilityOperationLog `
         $Mode `
         $resolvedDataFolder)
@@ -7119,6 +7855,12 @@ function Invoke-SierraHistoryUtilityMode {
 
         "Restore" {
             return Invoke-SourceRestoreManager `
+                $resolvedDataFolder `
+                ([bool]$Interactive)
+        }
+
+        "Rollback" {
+            return Invoke-RithmicRollbackManager `
                 $resolvedDataFolder `
                 ([bool]$Interactive)
         }

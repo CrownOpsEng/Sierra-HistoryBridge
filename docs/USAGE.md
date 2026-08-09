@@ -2,8 +2,7 @@
 
 ## Run
 
-Open the Sierra Chart `Data` folder. Right-click blank space or the folder and
-choose:
+Right-click the configured Sierra Chart `Data` folder itself and choose:
 
 ```text
 Update Sierra history from SC Data
@@ -282,3 +281,32 @@ cleanup-YYYYMMDD-HHMMSS.log
 
 The cleanup log is created only when an empty bridge-owned directory has to be
 retried after the main process exits.
+
+
+## Flat archive browsing and bulk restore
+
+All user-managed SC Data archives live directly in
+`SCID_Bridge_Archive\SC_Data`. Restore's existing date-range, recent-days, and
+all-archive filters operate across the entire flat collection, so archived
+history is not partitioned by year folders.
+
+
+## Rithmic rollback
+
+Use:
+
+```text
+rollback.cmd
+```
+
+or right-click a recognized Rithmic `.gz` backup and choose **Rollback Rithmic
+data**.
+
+Interactive `rollback.cmd` lists available baseline, rollback, and legacy
+Rithmic backups and restores one selection at a time. Before overwriting a
+different current target, the bridge creates a timestamped verified undo backup
+under `SCID_Bridge_Archive\Rollbacks\Manual`.
+
+The backup being restored is retained. Bridge state for the restored target is
+invalidated so the next normal Update evaluates the restored data rather than
+assuming the prior bridge result is still current.

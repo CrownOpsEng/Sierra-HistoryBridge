@@ -1,5 +1,5 @@
 SIERRA HISTORY BRIDGE
-Version 0.0.24
+Version 0.0.25
 
 Updates Rithmic-named Sierra Chart history files from matching SC Data files.
 
@@ -13,8 +13,8 @@ INSTALL
   Extract the release and run setup.cmd.
 
 RUN
-  Open the Sierra Chart Data folder, right-click the folder or blank space,
-  and choose "Update Sierra history from SC Data".
+  Right-click the configured Sierra Chart Data folder itself and choose
+  "Update Sierra history from SC Data", or run run.cmd.
 
 REPAIR
   Run repair.cmd, or run setup.cmd and choose Repair / update.
@@ -86,3 +86,13 @@ EARLY NQ DAILY HISTORY
   Zero-volume/missing-date records in the oldest SC Data are preserved as
   supplied. Sierra History Bridge never invents volume to silence continuous-
   contract warnings.
+
+
+ROLLBACK RITHMIC DATA
+  rollback.cmd
+
+  Or right-click a verified .gz backup under Rithmic_Baselines, Rollbacks, or
+  Legacy_Backups and choose "Rollback Rithmic data".
+
+  The current target is preserved first when it differs from the selected
+  backup. The selected backup itself is retained after rollback.

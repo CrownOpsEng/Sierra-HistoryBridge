@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $ProductName = "Sierra History Bridge"
 $ProductKey = "SierraHistoryBridge"
 $Publisher = "Sierra History Bridge contributors"
-$Version = "0.0.24"
+$Version = "0.0.25"
 
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA $ProductKey
@@ -136,7 +136,7 @@ function Get-ExistingInstallation {
         }
     }
 
-    # Development builds before v0.0.24 stored program files below the mutable
+    # Development builds before v0.0.25 stored program files below the mutable
     # application-data folder. Detect them so setup can migrate cleanly.
     $legacyApp = Join-Path $UserDataRoot "app"
     if (Test-Path -LiteralPath (Join-Path $legacyApp "SierraHistoryBridge.ps1")) {
@@ -727,6 +727,7 @@ function Copy-ApplicationPayload([string]$PayloadRoot, [string]$InstallDirectory
         "run.cmd",
         "archive.cmd",
         "restore.cmd",
+        "rollback.cmd",
         "storage.cmd",
         "repair.cmd",
         "uninstall.cmd"
@@ -773,6 +774,7 @@ function New-InstalledRepairPayload([string]$InstallDirectory) {
             "run.cmd",
             "archive.cmd",
             "restore.cmd",
+            "rollback.cmd",
             "storage.cmd",
             "repair.cmd",
             "uninstall.cmd"
@@ -845,7 +847,10 @@ function Remove-ExplorerIntegration([string]$InstallScope) {
         "$classesRoot\Directory\Background\shell\$ProductKey",
         "$classesRoot\SystemFileAssociations\.scid\shell\$ProductKey.Archive",
         "$classesRoot\SystemFileAssociations\.dly\shell\$ProductKey.Archive",
-        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore"
+        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.Restore",
+        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.RollbackBaseline",
+        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.RollbackCurrent",
+        "$classesRoot\SystemFileAssociations\.gz\shell\$ProductKey.RollbackLegacy"
     )) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item `
@@ -945,6 +950,36 @@ function Install-ExplorerIntegration(
         ($baseCommand + ' -Mode Restore -SelectedFile "%1" -Interactive') `
         "$env:SystemRoot\System32\shell32.dll,167" `
         $archiveFileAppliesTo
+
+
+    foreach ($rollbackScope in @(
+        [pscustomobject]@{
+            Key = "$ProductKey.RollbackBaseline"
+            Path = Join-Path $archiveFolder "Rithmic_Baselines"
+        },
+        [pscustomobject]@{
+            Key = "$ProductKey.RollbackCurrent"
+            Path = Join-Path $archiveFolder "Rollbacks"
+        },
+        [pscustomobject]@{
+            Key = "$ProductKey.RollbackLegacy"
+            Path = Join-Path $archiveFolder "Legacy_Backups"
+        }
+    )) {
+        $rollbackAppliesTo =
+            'System.ItemPathDisplay:~<"' +
+            ([IO.Path]::GetFullPath(
+                $rollbackScope.Path).TrimEnd('\')) +
+            '\' +
+            '"'
+
+        New-ExplorerVerb `
+            "$classesRoot\SystemFileAssociations\.gz\shell\$($rollbackScope.Key)" `
+            "Rollback Rithmic data" `
+            ($baseCommand + ' -Mode Rollback -SelectedFile "%1" -Interactive') `
+            "$env:SystemRoot\System32\shell32.dll,167" `
+            $rollbackAppliesTo
+    }
 }
 
 
@@ -1017,6 +1052,14 @@ function Install-StartMenuShortcuts(
         -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Restore -Interactive') `
         -WorkingDirectory $InstallDirectory `
         -Description "Restore archived SC Data source files to Sierra Chart." `
+        -IconLocation "$env:SystemRoot\System32\shell32.dll,167"
+
+    New-Shortcut `
+        -ShortcutPath (Join-Path $directory "Rollback Rithmic Data.lnk") `
+        -TargetPath $PowerShellExe `
+        -Arguments ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $mainScript + '" -Mode Rollback -Interactive') `
+        -WorkingDirectory $InstallDirectory `
+        -Description "Restore a verified Rithmic baseline or rollback backup." `
         -IconLocation "$env:SystemRoot\System32\shell32.dll,167"
 
     New-Shortcut `
@@ -1194,7 +1237,8 @@ function Invoke-InstallOrRepair(
         Write-Host "File Explorer:"
         Write-Host "  Right-click the configured Sierra Data folder for Update or Storage."
         Write-Host "  Right-click .scid/.dly source files in that folder to archive them."
-        Write-Host "  Right-click bridge .gz archives to restore them."
+        Write-Host "  Right-click SC_Data .gz archives to restore them."
+        Write-Host "  Right-click Rithmic backup .gz files to roll back their targets."
         Write-Host "  The bridge does not add a global blank-space menu to unrelated folders."
         Write-Host
         Write-Host "Windows Settings:"
@@ -1205,6 +1249,7 @@ function Invoke-InstallOrRepair(
             Write-Host "  $ProductName"
             Write-Host "  Archive Historical Data"
             Write-Host "  Restore Historical Data"
+            Write-Host "  Rollback Rithmic Data"
             Write-Host "  Storage Report"
             Write-Host "  Repair $ProductName"
             Write-Host "  Uninstall $ProductName"

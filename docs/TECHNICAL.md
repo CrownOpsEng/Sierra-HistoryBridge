@@ -155,7 +155,6 @@ is true:
 
 - the SC Data source ends within the last seven days
 - the existing Rithmic target ends within the last seven days
-- the Rithmic target was modified within the last ten minutes
 
 The seven-day interval is a safety margin for weekends and exchange holidays.
 It is not used to decide contract rollover or trading eligibility.
@@ -360,7 +359,7 @@ misclassified as future data.
 
 The old pre-release signature included `LastWriteTimeUtc`, which could cause a
 semantically unchanged Sierra source to be treated as dirty after Sierra or
-Windows touched the file. v0.0.24 now stores:
+Windows touched the file. v0.0.25 now stores:
 
 ```text
 v2 | byte length | first SCID timestamp | last SCID timestamp | sampled SHA-256
@@ -375,3 +374,18 @@ metadata and 257 deterministic records using the exact source-to-Rithmic price
 conversion. This is used only to recover "already converted" state and avoid a
 gratuitous rewrite. Full validation remains the authority when an actual change
 or anomaly requires a processing decision.
+
+
+## Rithmic rollback state handling
+
+A manual rollback restores the exact archived bytes and original file timestamp
+through the same verified GZip restore engine used by SC Data restore.
+
+If the restored target is SCID, the bridge state entry whose `target_path`
+matches that Rithmic target is removed. If the restored target is Historical
+Daily, only the Daily state fields are removed. This prevents stale state from
+classifying the rolled-back target as the prior bridge output on the next run.
+
+When a different current target exists, rollback first archives that current
+target under `Rollbacks\Manual\<timestamp>` so the manual rollback itself can be
+undone.

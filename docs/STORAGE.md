@@ -245,16 +245,37 @@ Data/Archive/Recovery/Logs base boundary. Results are written to
 `SCID_Bridge_Logs\cleanup-*.log`.
 
 
-## Deferred cleanup handle isolation
+## SC Data archive layout
 
-The cleanup helper is launched with `.UseShellExecute = false` and
-`.CreateNoWindow = true`. This uses the normal process-creation path without
-inheriting the parent/context-menu handle set. That matters because a handle
-inherited from Explorer or the restore process can otherwise keep the exact
-directory the helper is trying to remove locked even after the visible process
-exits.
+`SC_Data` is intentionally flat, matching Sierra Chart's Data folder. The
+original filename already identifies root, contract month/year, exchange, and
+file type. Additional group/year directories add no useful identity and get in
+the way of bulk restore.
 
-If cleanup still fails after the isolated helper has retried for 30 seconds,
-the directory/root pair is saved in per-user `pending-cleanup.json`. Archive,
-Restore, and Storage retry pending cleanup automatically on the next run and
-queue another isolated post-exit retry if necessary.
+Legacy nested archives are migrated automatically. A different archive already
+occupying the intended flat filename is never overwritten.
+
+
+## Data folder versus tracked total
+
+Storage reporting distinguishes the physical Sierra Data folder from the total
+files tracked across configured locations. With the default configuration the
+two totals are the same. If Archive, Recovery, or Logs are moved to another
+drive, **Sierra Data folder** reports only files physically under Data while
+**Tracked total** includes those configured external locations as well.
+
+Free-space reporting in the main table refers to the Sierra Data drive.
+
+
+## Rithmic rollback backups
+
+Storage Report inventories three persistent Rithmic backup classes:
+
+- **baseline** — original independent Rithmic evidence captured before a bridge
+  replacement
+- **rollback** — safety copies retained for live/temporary merges and manual
+  rollback undo points
+- **legacy** — older raw bridge backups compressed during storage migration
+
+All recognized Rithmic backup archives have a **Rollback Rithmic data** context
+menu action. Rolling back does not consume the selected backup.

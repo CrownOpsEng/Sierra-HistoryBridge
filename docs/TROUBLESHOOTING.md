@@ -89,7 +89,7 @@ You can also manually remove:
 
 ## Setup reports a C# compiler or assembly-reference error
 
-Use the current v0.0.24 package and rerun `setup.cmd`.
+Use the current v0.0.25 package and rerun `setup.cmd`.
 
 The installed SCID engine is compiled with the stock Windows PowerShell 5.1
 `Add-Type -Path` behavior. The converter does not require custom compiler
@@ -137,13 +137,12 @@ Archive, Restore, and Storage now also have their own timestamped operation logs
 in the configured Logs folder.
 
 
-## Deferred cleanup still reports FAILED
+## Rollback target is changed again by Update
 
-The isolated helper now starts without inheriting the parent/context-menu
-handle set. If `cleanup-*.log` still says `FAILED after parent exit`, the lock
-is genuinely external to both bridge processes for the full retry window.
+Rollback intentionally invalidates bridge state for the restored Rithmic target.
+A later normal Update can therefore determine that SC Data should be applied
+again. This is expected: rollback restores a previous Rithmic state; it does not
+disable future bridge management.
 
-The unresolved path is preserved in `pending-cleanup.json` and retried on the
-next utility run. At that point a Windows handle-owner diagnostic (Resource
-Monitor, Process Explorer, or equivalent) is appropriate; the bridge should not
-terminate unrelated processes just to remove an empty folder.
+If you want to inspect/use the rolled-back target first, do so before running
+the next normal Update.

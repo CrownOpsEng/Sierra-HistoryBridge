@@ -33,20 +33,21 @@ The shortcuts are optional. File Explorer integration and the Windows Installed 
 
 ## File Explorer integration
 
-Setup registers:
+Setup installs scoped Explorer commands rather than a global folder-background
+menu:
 
-```text
-Update Sierra history from SC Data
-```
+- right-click the configured Sierra Data folder: **Update Sierra history from
+  SC Data** and **Sierra History Bridge storage report**
+- right-click a two-digit-year SC Data `.scid` or `.dly` file directly in the
+  configured Data folder: **Archive SC Data source**
+- right-click a `.gz` file under the configured `SC_Data` archive:
+  **Restore Sierra history archive**
+- right-click a recognized `.gz` under `Rithmic_Baselines`, `Rollbacks`, or
+  `Legacy_Backups`: **Rollback Rithmic data**
 
-for:
+On Windows 11, commands may appear under **Show more options**, depending on the
+Explorer configuration.
 
-- a right-click on a folder
-- a right-click on blank space inside a folder
-
-On Windows 11, the command may appear under **Show more options**, depending on the Explorer configuration.
-
-The Explorer entry calls the installed PowerShell application directly with the selected folder path.
 
 ## Windows Installed apps entry
 

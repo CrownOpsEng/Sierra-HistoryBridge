@@ -359,20 +359,72 @@ foreach ($deferredCleanupToken in @(
 }
 
 
-foreach ($noInheritToken in @(
-    'UseShellExecute',
-    'CreateNoWindow',
-    'handle inheritance disabled',
-    'pending-cleanup.json',
-    'Invoke-PendingDirectoryCleanup'
+foreach ($flatArchiveToken in @(
+    'Convert-LegacyScDataArchiveLayout',
+    'Archive layout: flattened',
+    '($SourceFile.Name + ".gz")'
 )) {
-    if ($appText -notlike "*$noInheritToken*") {
-        throw "Deferred cleanup handle/persistence regression: missing $noInheritToken"
+    if ($appText -notlike "*$flatArchiveToken*") {
+        throw "Flat SC_Data archive regression: missing $flatArchiveToken"
     }
 }
 
-if ($appText -match 'Start-Process\s+`\s*\r?\n\s*-FilePath \$powershellExe') {
-    throw "Deferred cleanup regression: helper launch reverted to Start-Process."
+if ($appText -match '\$safeGroup\s*=') {
+    throw "Flat SC_Data archive regression: group/year archive layout was reintroduced."
+}
+
+
+foreach ($rollbackToken in @(
+    'Invoke-RithmicRollbackManager',
+    'Get-RithmicBackupArchives',
+    'New-RithmicUndoArchive',
+    'Invalidate-BridgeStateForRithmicTarget',
+    'Rollback Rithmic data',
+    'Selected backup retained'
+)) {
+    if ($appText -notlike "*$rollbackToken*" -and
+        $setupText -notlike "*$rollbackToken*") {
+        throw "Rithmic rollback regression: missing $rollbackToken"
+    }
+}
+
+$modeValidateSet =
+    [regex]::Match(
+        $appText,
+        '(?s)\[ValidateSet\((?<values>[^)]*)\)\]\s*\[string\]\$Mode')
+
+if (-not $modeValidateSet.Success) {
+    throw "Mode ValidateSet is missing."
+}
+
+$modeValues =
+    $modeValidateSet.Groups['values'].Value
+
+foreach ($requiredMode in @(
+    'Update',
+    'Archive',
+    'Restore',
+    'Rollback',
+    'Storage'
+)) {
+    if ($modeValues -notmatch ('"' + [regex]::Escape($requiredMode) + '"')) {
+        throw "Mode ValidateSet must include $requiredMode."
+    }
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "rollback.cmd") -PathType Leaf)) {
+    throw "Rithmic rollback regression: rollback.cmd is missing."
+}
+
+foreach ($finalReleaseToken in @(
+    'selectedNameBeforeMigration',
+    'DataLogical',
+    'DataDisk',
+    'Tracked total'
+)) {
+    if ($appText -notlike "*$finalReleaseToken*") {
+        throw "Final-release regression: missing $finalReleaseToken"
+    }
 }
 
 $required = @(
@@ -384,6 +436,7 @@ $required = @(
     "run.cmd",
     "archive.cmd",
     "restore.cmd",
+    "rollback.cmd",
     "storage.cmd",
     "repair.cmd",
     "uninstall.cmd",
@@ -441,8 +494,10 @@ try {
         "README.md",
         "README.txt",
         "setup.cmd",
+        "run.cmd",
         "archive.cmd",
         "restore.cmd",
+        "rollback.cmd",
         "storage.cmd",
         "repair.cmd",
         "uninstall.cmd"

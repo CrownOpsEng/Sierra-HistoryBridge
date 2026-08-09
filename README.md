@@ -1,6 +1,6 @@
 # Sierra History Bridge
 
-**Version 0.0.24 — pre-stable**
+**Version 0.0.25**
 
 Sierra History Bridge updates Rithmic-named Sierra Chart history files from
 matching SC Data files.
@@ -32,12 +32,16 @@ setup.cmd
 Setup supports current-user and all-users installation and can optionally
 create Start Menu shortcuts.
 
-After installation, open the Sierra Chart `Data` folder, right-click the folder
-or blank space inside it, and choose:
+After installation, right-click the configured Sierra Chart `Data` folder
+itself and choose:
 
 ```text
 Update Sierra history from SC Data
 ```
+
+Relevant `.scid`, `.dly`, SC Data archive, and Rithmic backup files receive
+scoped archive/restore/rollback context-menu actions. The bridge does not add a
+global blank-space menu to unrelated folders.
 
 ## Update behavior
 
@@ -45,8 +49,9 @@ The application scans the Sierra Chart Data folder, applies the managed history
 window, verifies the raw-price scale, and shows the update plan before changing
 files.
 
-If Sierra Chart is running when files are ready to be replaced, the application
-waits for Sierra Chart to close.
+Historical updates can run while Sierra Chart remains open. Archive, restore,
+and rollback operations that move or replace source/target files wait for Sierra
+Chart to close. Recent SCID bridge updates use explicit live-file safety choices.
 
 ### Intraday files
 
@@ -170,9 +175,11 @@ through Windows Settings → Apps → Installed apps.
 
 ## Project status
 
-Version 0.0.24 is pre-stable. The SCID path has been checked against real NQ SC
-Data and Rithmic files. Historical Daily handling follows Sierra Chart's
-documented text/CSV format and is covered by the project self-test.
+Version 0.0.25 is the initial release. The SCID path has been exercised against
+real NQ SC Data and Rithmic files during development, including historical
+replacement, live-aware handling, archive/restore, Rithmic rollback, storage
+reporting, and Windows PowerShell 5.1 integration. Historical Daily handling
+follows Sierra Chart's text/CSV format and is covered by the project self-test.
 
 This project is not affiliated with or endorsed by Sierra Chart, Rithmic,
 CME Group, or their affiliates.
@@ -331,7 +338,7 @@ Explorer commands are deliberately scoped rather than added to every folder:
 The bridge does not install a global blank-space/background command. Windows'
 static `Directory\Background` verbs cannot be reliably filtered by the current
 folder using `AppliesTo`; making that menu truly dynamic requires an in-process
-Shell extension. Avoiding that Explorer-loaded component keeps v0.0.24 simpler
+Shell extension. Avoiding that Explorer-loaded component keeps v0.0.25 simpler
 and reduces the risk of slowing or destabilizing File Explorer.
 
 Archive and restore now wait interactively when Sierra Chart is open. Close all
@@ -344,7 +351,7 @@ window after the process is gone.
 Normal runs do not use Windows file modification time as proof that an SCID
 source changed. SCID state now uses a stable structural/content fingerprint
 (length, first/last timestamps, and deterministic record samples). Existing
-v0.0.24 state which used modification time is migrated without rewriting files
+v0.0.25 state which used modification time is migrated without rewriting files
 when the structural source identity is unchanged.
 
 If saved provenance is stale or missing but the current Rithmic-named target
@@ -389,9 +396,49 @@ empty-folder removal for up to 30 seconds, and writes a `cleanup-*.log`
 recording what was removed or what remained locked.
 
 
-## Cleanup resilience
+## Flat SC Data archive
 
-Post-exit cleanup helpers are created without inheriting Explorer/parent
-handles. Any empty bridge directory that remains externally locked after the
-retry window is recorded and retried automatically on the next Archive,
-Restore, or Storage operation.
+User-managed SC Data archives mirror Sierra Chart's flat market-data directory.
+All archived source files are stored directly under:
+
+```text
+SCID_Bridge_Archive\SC_Data
+```
+
+Examples:
+
+```text
+NQH00-CME.dly.gz
+NQZ14-CME.scid.gz
+NQM20-CME.scid.gz
+```
+
+There are no market-group or year subdirectories. The Sierra filename already
+contains the contract identity, and a flat layout makes bulk browsing and mass
+restore much easier.
+
+Archives created by older bridge builds under paths such as
+`SC_Data\NQ-CME\2000` are automatically moved into flat `SC_Data` the next time
+Archive, Restore, or Storage Report runs. Empty legacy folders are pruned.
+
+
+## Rithmic backup rollback
+
+When the bridge preserves an original Rithmic baseline or a live/temporary
+rollback backup, the compressed backup can be restored directly.
+
+Right-click a recognized `.gz` file under `Rithmic_Baselines`, `Rollbacks`, or
+`Legacy_Backups` and choose **Rollback Rithmic data**, or run:
+
+```text
+rollback.cmd
+```
+
+Rollback requires Sierra Chart to be closed. If the current target exists and
+differs from the selected backup, the bridge first creates a new verified manual
+rollback of the current target. It then restores and verifies the selected
+backup and invalidates the corresponding bridge state so the next Update
+re-evaluates that target.
+
+The selected backup is retained after rollback. This makes rollback reversible
+instead of consuming the safety copy.
